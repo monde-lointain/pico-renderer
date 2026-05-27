@@ -1,16 +1,18 @@
-// sched.cc — single-core frame driver (C1). Orthodox C++.
+// sched.cc — frame driver. Orthodox C++.
 //
-// C1 scope: sched is the SEAM between the renderer façade and the geom/raster
-// stages, implemented single-core. sched_geom runs the geometry front end over
-// the whole command stream; sched_rasterize sweeps every tile, rasterizing its
-// bin into the framebuffer with one reused per-tile depth scratch. C2 swaps
-// these single-core bodies for the dual-core queue/bin-merge/watermark sched
-// WITHOUT changing this interface (the seam stays put).
+// sched is the SEAM between the renderer façade and the geom/raster stages.
+// sched_geom runs the geometry front end over the whole command stream
+// (SINGLE-CORE — C2 keeps the front end single-core). sched_rasterize sweeps
+// every tile via sched_dispatch_tiles (sched/dispatch.h), a link-time-
+// substituted primitive: serial on host/tests (dispatch_host.cc), dual-core on
+// firmware (dispatch_pico.cc). The seam signatures stay frozen; only the tile
+// distribution behind sched_dispatch_tiles changes between targets, and the
+// framebuffer is bit-identical either way.
 #include "sched/sched.h"
 
 #include "geom/geom.h"
-#include "raster/raster.h"
 #include "rdr/frame.h"
+#include "sched/dispatch.h"
 
 // Geometry pass: interpret the recorded command stream into the Frame's
 // transformed-vertex pool + per-tile bins. The stream pointer is threaded in by
@@ -33,8 +35,9 @@ RdrErr sched_rasterize(struct Frame* f) {
   if (f == 0 || f->fb == 0) {
     return RDR_EINVAL;
   }
-  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &f->geom.tiles[tile], f->geom.tverts, f->fb, f->zbuf);
-  }
+  // The tile sweep is extracted into a link-time-substituted primitive
+  // (sched/dispatch.h): serial on host/tests, dual-core on firmware. Both
+  // produce a bit-identical framebuffer (per-tile-independent rasterization).
+  sched_dispatch_tiles(f);
   return RDR_OK;
 }

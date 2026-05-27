@@ -216,16 +216,12 @@ static void raster_one(const struct TriSetup* t, int tile_px_x0, int tile_px_y0,
   }
 }
 
-void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
-                 uint16_t* fb, uint16_t* zbuf) {
+void raster_tile_noclear(int tile, const struct TileBin* bin,
+                         const struct TVtx* pool, uint16_t* fb,
+                         uint16_t* zbuf) {
   if (bin == 0 || pool == 0 || fb == 0 || zbuf == 0) {
     return;
   }
-  // Per-tile Z clear (spec: clear Z scratch at the start of each tile).
-  for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
-    zbuf[i] = RASTER_Z_CLEAR;
-  }
-
   // Tile grid is row-major; compute this tile's top-left screen pixel.
   int const tiles_per_row = RDR_SCREEN_W / RDR_TILE_W;
   int const tile_px_x0 = (tile % tiles_per_row) * RDR_TILE_W;
@@ -241,4 +237,19 @@ void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
     }
     raster_one(&t, tile_px_x0, tile_px_y0, fb, zbuf);
   }
+}
+
+void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
+                 uint16_t* fb, uint16_t* zbuf) {
+  if (zbuf == 0) {
+    return;
+  }
+  // Per-tile Z clear (spec: clear Z scratch at the start of each tile), then
+  // rasterize. The clear + draw are split so a depth-hazard demonstration
+  // (tests/sched: two workers sharing one un-recleared scratch) can drive the
+  // real rasterizer without re-clearing; production callers use raster_tile.
+  for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
+    zbuf[i] = RASTER_Z_CLEAR;
+  }
+  raster_tile_noclear(tile, bin, pool, fb, zbuf);
 }
