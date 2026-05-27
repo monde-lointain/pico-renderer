@@ -81,3 +81,28 @@ to **subagent-driven-in-worktrees** (`superpowers:subagent-driven-development` +
 **Bonus finding:** the destructive-guard greps the whole Bash command string, so a heredoc containing a
 forced-branch-delete *as documentation text* false-positives. Mitigation: author docs with the
 Write/Edit tools (not bash heredocs); longer term, narrow the guard to the leading command token.
+
+## Stream B.0 — `fixed` math (subagent-in-worktree, 2026-05-27)
+
+Landed Q16.16 mul/div/conv + mat4 + transform + vec3 dot/normalize. 17 host golden tests vs float
+oracle; arm-clean. Three small frictions worth surfacing:
+
+### Tier 2 — friction
+1. **`make format-patch` is repo-global, not lane-scoped.** It globs all of `src/`+`tests/`, so a
+   pre-existing format violation in a *non-owned* skeleton (`tests/geom/geom_test.cc` etc.) makes the
+   gate red for a lane that touched none of it. A subagent can't fix it without crossing ownership.
+   → Suggest a lane-scoped variant (`make format-patch FILES=...` or gate per-owned-glob) so a stream's
+   format gate reflects only its own files. I verified my owned files with a direct
+   `clang-format --dry-run --Werror <owned files>` instead.
+2. **`hardware/divider.h` isn't on the fixed lib's arm include path** (the target only carries
+   `src/`), so an explicit `hw_divider_*` call fails to compile for pico without adding a pico-sdk dep
+   to my CMakeLists. Resolved *better* by dropping the explicit include: the RP2040 AEABI maps C `/`
+   onto the SIO divider (datasheet 2.3.1.5), so plain integer `/` already uses the hardware divider on
+   device and is bit-identical to the host `/`. Net: simpler, no SDK coupling, same numerics.
+   → Guidance idea: for `fixed`, prefer C `/` (AEABI→SIO) over the explicit `hw_divider_*` API unless
+   an *overlapped/async* divide is actually needed; document this in the `fixed-point` skill.
+
+### Tier 3 — confirmations
+3. The no-UMULL discipline is verifiable post-build: `arm-none-eabi-objdump -d` on the lib object
+   showed 0 UMULL/SMULL/MLA, 81 MULS — a cheap, objective gate. Worth adding to the `fixed` review
+   checklist (assert no 64-bit-multiply opcodes in the arm object).
