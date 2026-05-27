@@ -36,6 +36,35 @@ its own module dirs under the same conventions.
   test-first against its frozen header rather than waiting for its impl to merge); serial protocol
   `KEY=VALUE\n` over USB-CDC stdio.
 
+## ⚠ Execution-Model Amendment (post-A10 validation, 2026-05-27) — SUPERSEDES the agent-team vehicle
+
+The A10 smoke test (see `WORKFLOW.md`) found that **Claude Code agent-team *members* run in the lead's
+working tree — they do NOT get per-teammate git-worktree isolation** (a spawned team member committed
+straight to `main`). The worktree/PR model above is therefore **not achievable via agent teams.** A
+**subagent with `isolation:worktree` DOES** get its own worktree+branch, and **hooks fire for both**.
+
+**This document's "agent team / teammates / shared task list / SendMessage" framing is superseded by a
+subagent-driven model** for all *implementation* work. What changes vs. what stands:
+
+- **Execution vehicle → `superpowers:subagent-driven-development` + `dispatching-parallel-agents` +
+  `using-git-worktrees`.** The Lead holds the dependency graph and **dispatches a fresh
+  subagent-in-a-worktree per stream** (the `renderer-module-owner`/`infra-tooling` agent defs become
+  *dispatch roles*, not standing teammates), reviews the returned branch, merges to `main`, and
+  dispatches the next unblocked streams. Read "teammate Tn" throughout this doc as "the subagent
+  dispatched for stream X."
+- **Barriers → lead-sequenced** (the Lead dispatches B.0/ε first, then β/γ/δ, etc.) rather than encoded
+  in an agent-team shared task list.
+- **Hook scope (measured):** `PreToolUse` (destructive guard) + `PostToolUse` (format) **fire in
+  subagent worktrees** ✓. The team-event hooks `TaskCreated`/`TaskCompleted`/`TeammateIdle` **do NOT
+  fire** for subagents → their gates move to the **Lead's pre-merge gate**: module `ctest -L <mod>` +
+  `make format-patch` + Orthodoxy + `renderer-reviewer` + `ci_main.sh` green, before merging a stream.
+- **Stands unchanged:** the worktree-per-stream + reviewed-merge-to-`main` topology (now via subagent
+  isolation); `.claude/ownership.json` (the reviewer/lead enforce lanes at merge); the contract freeze;
+  the C1/C2/C3 integration split; the verification ladder; the wave template + retro.
+
+Everything below is read through this amendment. The H1–H3 "launch the team" tasks in the plan are
+replaced by the subagent-dispatch loop.
+
 ## Targets / Non-Goals
 
 - **Targets:** a dispatch-ready workflow — agents, skills, hooks, the worktree/PR protocol, team
