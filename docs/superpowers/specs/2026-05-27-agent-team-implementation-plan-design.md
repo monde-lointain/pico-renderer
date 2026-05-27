@@ -142,7 +142,7 @@ maintainer who merges PRs.
 | **T1 Math+Geom** | `fixed/`, `geom/`, `clip/` | `fixed` → `geom`/`clip` |
 | **T2 Raster** | `raster/`, `aa/` | flat raster + Z |
 | **T3 Shading** | `tex/`, `shade/`, `blend/` | point-`tex` + modulate + opaque |
-| **T4 Cmd+Mem** | `cmd/`, `arena/`, `sched/` | command buffer, arena, multicore glue |
+| **T4 Cmd+Mem+Platform** | `cmd/`, `arena/`, `sched/`, `platform/` | command buffer, arena, multicore glue, ST7789 565 fork + scanline-race DMA |
 | **T5 Infra** | `tests/harness/`, `tools/` (assets), `.claude/skills`+`hooks`, on-target runner, CI | oracle + golden + ImGui + asset tool + serial runner |
 
 **Orthodoxy carve-out for the ImGui inspector.** T5's host inspector interfaces ImGui — classes,

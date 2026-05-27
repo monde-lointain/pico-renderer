@@ -1,0 +1,64 @@
+# Nightly ASan + UBSan run of the host build + tests.
+#
+# Separate from ci.yml ON PURPOSE: `schedule:` is workflow-level, so putting it
+# here keeps the per-PR build/test jobs off the nightly cron. This run hunts
+# runtime UB (OOB, misalignment, signed overflow, bad shifts) that static
+# analysis can't see and that can diverge x86 -> arm.
+#
+# Build is clang-22 Debug (-O0): -O0 maximizes UBSan coverage (the optimizer
+# can't elide checked operations). RENDERER_SANITIZE_HALT=ON bakes
+# -fno-sanitize-recover=all so the first finding aborts (gate build).
+
+name: Sanitizers
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 04:00 UTC nightly
+  workflow_dispatch: {}
+
+concurrency:
+  group: sanitize-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLVM_VERSION: "22"
+  # Gate env: abort on the first finding (RENDERER_SANITIZE_HALT=ON
+  # bakes the matching compile flag). container/odr-overflow off — uninstrumented
+  # gtest/SDL cross the instrumentation boundary and would trip bogus reports.
+  ASAN_OPTIONS: "detect_leaks=1:halt_on_error=1:detect_container_overflow=0:detect_odr_violation=0"
+  UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1:report_error_type=1"
+
+jobs:
+  sanitize:
+    name: asan-ubsan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL build deps + clang-${{ env.LLVM_VERSION }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorg-dev libwayland-dev wayland-protocols libxkbcommon-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libudev-dev \
+            libpulse-dev ninja-build
+          wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+          sudo ./llvm.sh ${LLVM_VERSION}
+
+      - name: Install Pillow (asset gen)
+        run: python -m pip install --upgrade pip Pillow
+
+      # Gate build: clang-22, Debug -O0, halt-on-first.
+      - name: Configure (host-asan, halt-on-first)
+        run: cmake --preset host-asan -DRENDERER_SANITIZE_HALT=ON
+
+      - name: Build
+        run: cmake --build build-asan --parallel
+
+      - name: Symbolizer path
+        run: echo "ASAN_SYMBOLIZER_PATH=$(command -v llvm-symbolizer-${LLVM_VERSION} llvm-symbolizer | head -1)" >> "$GITHUB_ENV"
+
+      - name: Run sanitized tests
+        env:
+          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tools/lsan.supp"
+        run: ctest --preset host-asan --output-on-failure

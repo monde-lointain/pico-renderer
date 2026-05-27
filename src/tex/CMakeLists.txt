@@ -1,0 +1,7 @@
+add_library(Renderer_tex)
+add_library(Renderer::Tex ALIAS Renderer_tex)
+target_sources(Renderer_tex PRIVATE tex.cc)
+target_include_directories(Renderer_tex PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_tex PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_tex)
+pico_tidy_enable(Renderer_tex)

@@ -1,0 +1,7 @@
+add_library(Renderer_aa)
+add_library(Renderer::Aa ALIAS Renderer_aa)
+target_sources(Renderer_aa PRIVATE aa.cc)
+target_include_directories(Renderer_aa PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_aa PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_aa)
+pico_tidy_enable(Renderer_aa)

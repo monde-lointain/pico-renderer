@@ -1,0 +1,10 @@
+{
+  "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" },
+  "hooks": {
+    "PreToolUse":  [{ "matcher": "Bash",       "hooks": [{ "type": "command", "command": ".claude/hooks/destructive_guard.sh" }] }],
+    "PostToolUse": [{ "matcher": "Edit|Write", "hooks": [{ "type": "command", "command": ".claude/hooks/format_check.sh" }] }],
+    "TaskCreated":   [{ "hooks": [{ "type": "command", "command": ".claude/hooks/task_schema.sh" }] }],
+    "TaskCompleted": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/task_complete_gate.sh" }] }],
+    "TeammateIdle":  [{ "hooks": [{ "type": "command", "command": ".claude/hooks/idle_gate.sh" }] }]
+  }
+}

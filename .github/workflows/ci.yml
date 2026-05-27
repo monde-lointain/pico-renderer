@@ -1,0 +1,281 @@
+# 3-OS host CI for the PicoSystem game template.
+#
+# Cross-platform commitment: build + pass on
+#   - Linux / clang      (Orthodoxy enforcement REQUIRED + canary check)
+#   - Windows / MSVC
+#   - macOS / AppleClang
+#
+# Host deps (SDL3, Dear ImGui, GoogleTest) come from FetchContent at configure
+# time, so the runners need network access (default on GitHub-hosted runners).
+#
+# A separate `pico-build` job cross-compiles the firmware for the PicoSystem
+# (arm-none-eabi / ILP32) so the device build can't silently regress: int/int32_t
+# ABI mismatches only surface on ARM (host x86-64 has int32_t==int, so they
+# compile there). It builds the .uf2 but runs no tests (no device in CI).
+#
+# A `tidy-pico` job runs clang-tidy-22 inline over the pico (arm-none-eabi) build,
+# linting device-only paths (platform_pico.cc / main_pico.cc) the host `tidy` job
+# can't see (they aren't in the host compile DB).
+#
+# NOTE: authored ahead of a GitHub remote existing; harmless until one is added.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Single-config generators (Linux/macOS) take the build type at
+          # configure via CMAKE_BUILD_TYPE; the multi-config VS gen (Windows)
+          # takes it via --config / --build-config (matrix.build_config feeds both).
+          - name: linux-clang
+            os: ubuntu-latest
+            require_orthodoxy: "ON"
+            build_config: "Debug"
+          - name: windows-msvc
+            os: windows-latest
+            require_orthodoxy: "OFF"
+            build_config: "Debug"
+          - name: macos-appleclang
+            os: macos-latest
+            require_orthodoxy: "OFF"
+            build_config: "Debug"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- System build deps -------------------------------------------
+      # SDL3 builds from source; on Linux it needs X11/Wayland dev headers.
+      - name: Install SDL build deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorg-dev libwayland-dev wayland-protocols libxkbcommon-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libudev-dev \
+            libpulse-dev ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      # ---- LLVM/Clang dev libs + Orthodoxy plugin (Linux only) ---------
+      # The Orthodoxy clang plugin must be COMPILED against matching LLVM/Clang
+      # dev libraries. Once installed, find_package(orthodoxy) locates it and our
+      # RENDERER_REQUIRE_ORTHODOXY=ON assertion passes. See
+      # docs/setup-llvm.md for the local equivalent.
+      - name: Install LLVM/Clang dev + build Orthodoxy plugin (Linux)
+        if: runner.os == 'Linux'
+        env:
+          LLVM_VERSION: "22"
+          ORTHODOXY_URL: "https://github.com/d-musique/orthodoxy"
+          # Pinned to a commit SHA (not master) for reproducible CI. Bump
+          # deliberately after verifying the new commit builds against LLVM-22
+          # and the canary still rejects the violations.
+          ORTHODOXY_REF: "237e25a3bb3f64f302e5c3e81e8f537f17c3e6f8"
+        run: |
+          set -euo pipefail
+          # LLVM/Clang ${LLVM_VERSION} toolchain via the official llvm.sh installer.
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${LLVM_VERSION}
+          # Dev libs the Orthodoxy plugin links against (-lclang-cpp / -lLLVM) and
+          # llvm-config. Package naming is inconsistent: the C API dev pkg is
+          # libclang-${LLVM_VERSION}-dev (hyphen), the C++ one is
+          # libclang-cpp${LLVM_VERSION}-dev (no hyphen). libclang-*-dev pulls in
+          # llvm-${LLVM_VERSION}-dev (llvm-config + libLLVM.so) transitively.
+          sudo apt-get install -y \
+            libclang-${LLVM_VERSION}-dev \
+            libclang-cpp${LLVM_VERSION}-dev
+          # Build + install the Orthodoxy plugin (pinned SHA) against this LLVM/Clang.
+          git clone "${ORTHODOXY_URL}" "${RUNNER_TEMP}/orthodoxy"
+          git -C "${RUNNER_TEMP}/orthodoxy" checkout "${ORTHODOXY_REF}"
+          cmake -S "${RUNNER_TEMP}/orthodoxy" -B "${RUNNER_TEMP}/orthodoxy/build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang-${LLVM_VERSION} \
+            -DCMAKE_CXX_COMPILER=clang++-${LLVM_VERSION} \
+            -DORTHODOXY_LLVM_CONFIG=/usr/bin/llvm-config-${LLVM_VERSION} \
+            -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build "${RUNNER_TEMP}/orthodoxy/build"
+          sudo cmake --build "${RUNNER_TEMP}/orthodoxy/build" --target install
+          # Point the project's clang preset at this versioned clang.
+          echo "ORTHODOXY_CC=clang-${LLVM_VERSION}" >> "$GITHUB_ENV"
+          echo "ORTHODOXY_CXX=clang++-${LLVM_VERSION}" >> "$GITHUB_ENV"
+
+      # ---- Configure ----------------------------------------------------
+      # The `host` preset pins clang/clang++. On Windows/macOS we override the
+      # compiler so the platform default toolchain (MSVC / AppleClang) is used.
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        run: >
+          cmake --preset host
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_config }}
+          -DCMAKE_C_COMPILER=${ORTHODOXY_CC}
+          -DCMAKE_CXX_COMPILER=${ORTHODOXY_CXX}
+          -DRENDERER_REQUIRE_ORTHODOXY=${{ matrix.require_orthodoxy }}
+
+      - name: Configure (macOS)
+        if: runner.os == 'macOS'
+        run: >
+          cmake --preset host
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_config }}
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        # Clear the preset's clang pin; let CMake pick the MSVC toolchain.
+        run: >
+          cmake --preset host
+          -DCMAKE_C_COMPILER=cl
+          -DCMAKE_CXX_COMPILER=cl
+
+      # ---- Python deps for asset generation ----------------------------
+      # The gfx build regenerates assets_gen.{h,cc} via tools/gen_assets.py.
+      - name: Install Pillow (asset gen)
+        run: python -m pip install --upgrade pip Pillow
+
+      # ---- Build --------------------------------------------------------
+      # Full host graph: the renderer exe + all tests + (Linux, with
+      # the plugin live) the WILL_FAIL canary. The exe is link-only in CI
+      # (headless runners have no display).
+      - name: Build
+        run: cmake --build build-host --config ${{ matrix.build_config }} --parallel
+
+      # ---- Test ---------------------------------------------------------
+      # On Linux with the plugin live, the WILL_FAIL canary test proves
+      # enforcement is active. Other OSes run the regular unit suite.
+      - name: Test
+        run: ctest --preset host --build-config ${{ matrix.build_config }}
+
+  # ---- PicoSystem cross-compile (firmware only; no device, no tests) ---------
+  # Guards against ARM/ILP32-only build regressions (int/int32_t-sensitive code
+  # only surfaces on ARM).
+  pico-build:
+    name: pico-arm-firmware
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # arm-none-eabi toolchain + build tools. libusb/pkg-config are needed
+      # because configuring the pico preset builds picotool from source (the
+      # SDK's pico_add_extra_outputs on the exe triggers it at configure).
+      - name: Install ARM toolchain + build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            cmake ninja-build git \
+            libusb-1.0-0-dev pkg-config
+
+      # pico-sdk (with submodules — pico_sdk_init pulls in tinyusb etc.).
+      - name: Fetch pico-sdk
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/raspberrypi/pico-sdk.git "${RUNNER_TEMP}/pico-sdk"
+          echo "PICO_SDK_PATH=${RUNNER_TEMP}/pico-sdk" >> "$GITHUB_ENV"
+
+      - name: Install Pillow (asset gen)
+        run: python -m pip install --upgrade pip Pillow
+
+      - name: Configure (pico preset)
+        run: cmake --preset pico
+
+      - name: Build firmware for ARM
+        run: cmake --build build-pico --target renderer --parallel
+
+  # ---- clang-tidy (clang-22 flags) -------------------------------------------
+  # Separate from the sanitizer nightly (sanitize.yml) so lint feedback is fast
+  # and per-PR. Reads compile_commands.json from a clang-22-configured host build
+  # so the lint matches the clang-22 toolchain. No sanitizer here, else clang-tidy
+  # would honor -fsanitize-ignorelist=... and error on it.
+  tidy:
+    name: clang-tidy-22
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SDL build deps + clang-22
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorg-dev libwayland-dev wayland-protocols libxkbcommon-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libudev-dev \
+            libpulse-dev ninja-build
+          wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+          sudo ./llvm.sh 22
+          sudo apt-get install -y clang-tidy-22
+
+      - name: Install Pillow (asset gen)
+        run: python -m pip install --upgrade pip Pillow
+
+      # build-host dir, pinned to clang-22 so compile_commands.json carries
+      # clang-22 flags (different __cplusplus / builtins / default -std than older).
+      - name: Configure (clang-22)
+        run: cmake --preset host -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22
+
+      - name: Build (generates SDL3 headers + compile DB)
+        run: cmake --build build-host --parallel
+
+      - name: clang-tidy (gated; findings fail)
+        run: cmake --build build-host --target tidy
+
+  # ---- clang-tidy over the pico (arm-none-eabi) build ------------------------
+  # Inline clang-tidy (run by CMake during the build) over the device sources, so
+  # device-only paths (platform_pico.cc / main_pico.cc) and shared code under
+  # RP2040 macros are linted as compiled for the device — the host `tidy` job
+  # can't see them (they aren't in the host compile DB). Findings fail the build.
+  tidy-pico:
+    name: clang-tidy-22 (pico arm-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain + clang-tidy-22
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            cmake ninja-build git libusb-1.0-0-dev pkg-config
+          wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+          sudo ./llvm.sh 22
+          sudo apt-get install -y clang-tidy-22
+
+      - name: Install Pillow (asset gen)
+        run: python -m pip install --upgrade pip Pillow
+
+      # pico-sdk pinned to the commit SHA of tag 2.2.0 for reproducible lint.
+      # Bump deliberately. A SHA pin can't use --depth 1 --branch, so clone then
+      # checkout the SHA and init submodules (the submodule update is what pins
+      # them — a --recurse-submodules clone would fetch the wrong gitlinks first).
+      - name: Fetch pico-sdk (pinned to 2.2.0)
+        run: |
+          git clone https://github.com/raspberrypi/pico-sdk.git "${RUNNER_TEMP}/pico-sdk"
+          git -C "${RUNNER_TEMP}/pico-sdk" checkout a1438dff1d38bd9c65dbd693f0e5db4b9ae91779
+          git -C "${RUNNER_TEMP}/pico-sdk" submodule update --init --recursive
+          echo "PICO_SDK_PATH=${RUNNER_TEMP}/pico-sdk" >> "$GITHUB_ENV"
+
+      - name: Configure + build (pico-tidy preset; clang-tidy runs inline, findings fail)
+        run: |
+          cmake --preset pico-tidy
+          cmake --build build-pico-tidy --parallel

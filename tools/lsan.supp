@@ -1,0 +1,23 @@
+# LeakSanitizer suppressions (LSAN_OPTIONS=suppressions=tools/lsan.supp).
+#
+# For third-party / one-time-static leaks only — NOT your game code. Needed day
+# one: gtest discovery is PRE_TEST, so ctest runs each ASan binary with
+# --gtest_list_tests to enumerate; a leak during enumeration fails discovery and
+# errors every test in that binary. These cover the uninstrumented libraries
+# (gtest, SDL3, ImGui) and their static one-time allocations.
+#
+# Format: leak:<substring matched against a frame in the leak's stack>
+# Entries are intentionally broad (library-scoped); tighten if they ever mask a
+# real leak in your own code.
+
+# GoogleTest one-time registry / death-test bookkeeping.
+leak:testing::
+leak:libgtest
+
+# SDL3: global subsystem/driver state initialized once, freed at process exit
+# paths LSan doesn't always see.
+leak:libSDL3
+leak:SDL_
+
+# Dear ImGui: context/atlas allocations.
+leak:ImGui

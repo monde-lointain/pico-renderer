@@ -1,0 +1,7 @@
+add_library(Renderer_blend)
+add_library(Renderer::Blend ALIAS Renderer_blend)
+target_sources(Renderer_blend PRIVATE blend.cc)
+target_include_directories(Renderer_blend PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_blend PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_blend)
+pico_tidy_enable(Renderer_blend)
