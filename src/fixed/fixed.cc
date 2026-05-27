@@ -41,23 +41,23 @@ static int64_t smul64(int32_t a, int32_t b) {
     ub = (uint32_t)(-(int64_t)b);
     sign = -sign;
   }
-  uint32_t a_lo = ua & 0xFFFFu;
-  uint32_t a_hi = ua >> 16;
-  uint32_t b_lo = ub & 0xFFFFu;
-  uint32_t b_hi = ub >> 16;
+  uint32_t const a_lo = ua & 0xFFFFU;
+  uint32_t const a_hi = ua >> 16;
+  uint32_t const b_lo = ub & 0xFFFFU;
+  uint32_t const b_hi = ub >> 16;
 
-  uint32_t ll = a_lo * b_lo;  // 16x16 -> <=32 bits (single MULS)
-  uint32_t lh = a_lo * b_hi;  // 16x16
-  uint32_t hl = a_hi * b_lo;  // 16x16
-  uint32_t hh = a_hi * b_hi;  // 16x16
+  uint32_t const ll = a_lo * b_lo;  // 16x16 -> <=32 bits (single MULS)
+  uint32_t const lh = a_lo * b_hi;  // 16x16
+  uint32_t const hl = a_hi * b_lo;  // 16x16
+  uint32_t const hh = a_hi * b_hi;  // 16x16
 
-  uint64_t mid = (uint64_t)lh + (uint64_t)hl;
-  uint64_t mag = (uint64_t)ll + (mid << 16) + ((uint64_t)hh << 32);
+  uint64_t const mid = (uint64_t)lh + (uint64_t)hl;
+  uint64_t const mag = (uint64_t)ll + (mid << 16) + ((uint64_t)hh << 32);
   return (sign < 0) ? -(int64_t)mag : (int64_t)mag;
 }
 
 fx16_16 fx_mul(fx16_16 a, fx16_16 b) {
-  int64_t p = smul64(a, b);
+  int64_t const p = smul64(a, b);
   // Round half away from zero. Operate on the magnitude with a logical shift
   // (arithmetic '>>' floors, which would skew negatives by one ULP).
   if (p >= 0) {
@@ -68,11 +68,15 @@ fx16_16 fx_mul(fx16_16 a, fx16_16 b) {
 
 fx_invw fx_div(fx16_16 a, fx16_16 b) {
   if (b == 0) {
-    if (a > 0) return INT32_MAX;
-    if (a < 0) return INT32_MIN;
+    if (a > 0) {
+      return INT32_MAX;
+    }
+    if (a < 0) {
+      return INT32_MIN;
+    }
     return 0;
   }
-  int64_t num = (int64_t)a << FX_FRAC_BITS;
+  int64_t const num = (int64_t)a << FX_FRAC_BITS;
   // Truncates toward zero. On device this lowers to the SIO divider (AEABI);
   // on host to the same C truncating divide -> bit-identical.
   return (fx_invw)(num / b);
@@ -92,7 +96,9 @@ int32_t fx_to_int(fx16_16 a) {
 }
 
 void mat4_identity(struct Mat4fx* m) {
-  for (int i = 0; i < 16; ++i) m->m[i] = 0;
+  for (int i = 0; i < 16; ++i) {
+    m->m[i] = 0;
+  }
   m->m[0] = FX_ONE;
   m->m[5] = FX_ONE;
   m->m[10] = FX_ONE;
@@ -106,9 +112,9 @@ void mat4_mul(struct Mat4fx* out, const struct Mat4fx* a,
     for (int row = 0; row < 4; ++row) {
       fx16_16 acc = 0;
       for (int k = 0; k < 4; ++k) {
-        acc += fx_mul(a->m[k * 4 + row], b->m[col * 4 + k]);
+        acc += fx_mul(a->m[(k * 4) + row], b->m[(col * 4) + k]);
       }
-      out->m[col * 4 + row] = acc;
+      out->m[(col * 4) + row] = acc;
     }
   }
 }
@@ -125,7 +131,7 @@ void mat4_mul_vec4(struct Vec4fx* out, const struct Mat4fx* m,
   for (int row = 0; row < 4; ++row) {
     fx16_16 acc = 0;
     for (int k = 0; k < 4; ++k) {
-      acc += fx_mul(m->m[k * 4 + row], in[k]);
+      acc += fx_mul(m->m[(k * 4) + row], in[k]);
     }
     r[row] = acc;
   }
@@ -153,13 +159,17 @@ fx16_16 vec3_dot(const struct Vec3fx* a, const struct Vec3fx* b) {
 // Returns sqrt(v) for v in Q16.16. Uses the bit-by-bit restoring algorithm on
 // the underlying integer with a 16-bit fractional shift; integer-only.
 static fx16_16 fx_sqrt(fx16_16 v) {
-  if (v <= 0) return 0;
+  if (v <= 0) {
+    return 0;
+  }
   // Compute isqrt of (v << 16) so the result is Q16.16: sqrt(v/2^16)*2^16
   // = sqrt(v*2^16). Use unsigned 64-bit accumulation (shifts/adds; no UMULL).
   uint64_t n = (uint64_t)(uint32_t)v << FX_FRAC_BITS;
   uint64_t res = 0;
   uint64_t bit = (uint64_t)1 << 62;
-  while (bit > n) bit >>= 2;
+  while (bit > n) {
+    bit >>= 2;
+  }
   while (bit != 0) {
     if (n >= res + bit) {
       n -= res + bit;
@@ -173,14 +183,14 @@ static fx16_16 fx_sqrt(fx16_16 v) {
 }
 
 void vec3_normalize(struct Vec3fx* out, const struct Vec3fx* v) {
-  fx16_16 len2 = vec3_dot(v, v);  // |v|^2 in Q16.16
+  fx16_16 const len2 = vec3_dot(v, v);  // |v|^2 in Q16.16
   if (len2 <= 0) {
     out->x = 0;
     out->y = 0;
     out->z = 0;
     return;
   }
-  fx16_16 len = fx_sqrt(len2);
+  fx16_16 const len = fx_sqrt(len2);
   if (len == 0) {
     out->x = 0;
     out->y = 0;

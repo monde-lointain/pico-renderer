@@ -3,6 +3,7 @@
 #define RDR_RASTER_H
 #include "rdr/types.h"
 
-void raster_tile(int tile, const struct TileBin* bin, uint16_t* fb, uint16_t* zbuf);
+void raster_tile(int tile, const struct TileBin* bin, const uint16_t* fb,
+                 const uint16_t* zbuf);
 
 #endif  // RDR_RASTER_H

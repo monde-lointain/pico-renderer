@@ -91,13 +91,13 @@ void oracle_unpack565(uint16_t c, uint8_t* r, uint8_t* g, uint8_t* b);
 // tex: decode one texel to RGBA8 for the given format/coords (point sample).
 // Returns 0 ok, nonzero if format/coords unsupported (stub today).
 int oracle_sample_texel(const struct TexDesc* tex, int s, int t,
-                        uint8_t out_rgba[4]);
+                        const uint8_t out_rgba[4]);
 // shade: evaluate (A-B)*C+D combiner on 8-bit inputs (stub today).
 int oracle_shade_combiner(const struct CombinerState* cs, const uint8_t* a,
                           const uint8_t* b, const uint8_t* c, const uint8_t* d,
-                          uint8_t out[4]);
+                          const uint8_t out[4]);
 // blend: coverage/alpha blend of src over dst (stub today).
 int oracle_blend(uint8_t zmode, const uint8_t* src_rgba, float coverage,
-                 uint8_t* dst_rgb);
+                 const uint8_t* dst_rgb);
 
 #endif  // HARNESS_ORACLE_H

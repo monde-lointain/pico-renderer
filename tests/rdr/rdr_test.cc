@@ -1,3 +1,4 @@
-#include "gtest/gtest.h"
 #include "rdr/rdr.h"
+
+#include "gtest/gtest.h"
 TEST(Rdr, ContractCompiles) { SUCCEED(); }

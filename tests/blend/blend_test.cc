@@ -1,4 +1,5 @@
-#include "gtest/gtest.h"
 #include "blend/blend.h"
+
+#include "gtest/gtest.h"
 
 TEST(Blend, LinksAndContractCompiles) { SUCCEED(); }

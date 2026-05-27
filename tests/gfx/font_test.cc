@@ -16,19 +16,22 @@
 #include "gfx/framebuffer.h"
 
 static color_t fb_get(const Framebuffer *fb, int x, int y) {
-  return fb->px[y * SCREEN_W + x];
+  return fb->px[(y * SCREEN_W) + x];
 }
 
 static void fb_clear(Framebuffer *fb, color_t c) {
   int i;
-  for (i = 0; i < SCREEN_PIXELS; ++i) fb->px[i] = c;
+  for (i = 0; i < SCREEN_PIXELS; ++i) {
+    fb->px[i] = c;
+  }
 }
 
 /* ---- cell index helpers -------------------------------------------------- */
 
 TEST(Font, CharmapGivesCorrectCellForA) {
   /* 'A' is row0 col1 → cell index 1 */
-  int col, row;
+  int col;
+  int row;
   font_cell_for('A', &col, &row);
   EXPECT_EQ(col, 1);
   EXPECT_EQ(row, 0);
@@ -36,7 +39,8 @@ TEST(Font, CharmapGivesCorrectCellForA) {
 
 TEST(Font, CharmapGivesCorrectCellForM) {
   /* 'M' is row1 col0 → cell index 13 */
-  int col, row;
+  int col;
+  int row;
   font_cell_for('M', &col, &row);
   EXPECT_EQ(col, 0);
   EXPECT_EQ(row, 1);
@@ -44,7 +48,8 @@ TEST(Font, CharmapGivesCorrectCellForM) {
 
 TEST(Font, CharmapGivesCorrectCellForZ) {
   /* 'Z' is row2 col0 */
-  int col, row;
+  int col;
+  int row;
   font_cell_for('Z', &col, &row);
   EXPECT_EQ(col, 0);
   EXPECT_EQ(row, 2);
@@ -52,7 +57,8 @@ TEST(Font, CharmapGivesCorrectCellForZ) {
 
 TEST(Font, CharmapGivesCorrectCellForZero) {
   /* '0' is row2 col1 */
-  int col, row;
+  int col;
+  int row;
   font_cell_for('0', &col, &row);
   EXPECT_EQ(col, 1);
   EXPECT_EQ(row, 2);
@@ -60,7 +66,8 @@ TEST(Font, CharmapGivesCorrectCellForZero) {
 
 TEST(Font, CharmapGivesCorrectCellForColon) {
   /* ':' is row2 col11 */
-  int col, row;
+  int col;
+  int row;
   font_cell_for(':', &col, &row);
   EXPECT_EQ(col, 11);
   EXPECT_EQ(row, 2);
@@ -68,7 +75,8 @@ TEST(Font, CharmapGivesCorrectCellForColon) {
 
 TEST(Font, CharmapGivesCorrectCellForSpace) {
   /* ' ' is row0 col0 */
-  int col, row;
+  int col;
+  int row;
   font_cell_for(' ', &col, &row);
   EXPECT_EQ(col, 0);
   EXPECT_EQ(row, 0);
@@ -76,7 +84,8 @@ TEST(Font, CharmapGivesCorrectCellForSpace) {
 
 TEST(Font, UnknownCharFallsBackToSpace) {
   /* Lowercase 'a' → maps to space (row0 col0) */
-  int col, row;
+  int col;
+  int row;
   font_cell_for('a', &col, &row);
   EXPECT_EQ(col, 0);
   EXPECT_EQ(row, 0);
@@ -98,17 +107,20 @@ TEST(Font, TextAdvances16PxPerGlyph) {
    * The top rows of the cell may be blank (transparent), so we scan
    * the full cell height (22px) for any changed pixel. */
   Framebuffer fb;
-  color_t bg = 0x1234;
+  color_t const bg = 0x1234;
   fb_clear(&fb, bg);
-  color_t fg = rgb565(0xFF, 0xFF, 0xFF);
+  color_t const fg = rgb565(0xFF, 0xFF, 0xFF);
   /* draw "SC" at (0,0) */
   text(&fb, "SC", 0, 0, fg);
   /* Some pixel within x=0..31, y=0..21 must differ from bg. */
   int any_changed = 0;
-  int x, y;
+  int x;
+  int y;
   for (y = 0; y < 22 && !any_changed; ++y) {
     for (x = 0; x < 32 && !any_changed; ++x) {
-      if (fb_get(&fb, x, y) != bg) any_changed = 1;
+      if (fb_get(&fb, x, y) != bg) {
+        any_changed = 1;
+      }
     }
   }
   EXPECT_EQ(any_changed, 1);
@@ -116,9 +128,9 @@ TEST(Font, TextAdvances16PxPerGlyph) {
 
 TEST(Font, TextDoesNotWriteBelowCellHeight) {
   Framebuffer fb;
-  color_t bg = 0xABCD;
+  color_t const bg = 0xABCD;
   fb_clear(&fb, bg);
-  color_t fg = rgb565(0xFF, 0xFF, 0xFF);
+  color_t const fg = rgb565(0xFF, 0xFF, 0xFF);
   text(&fb, "A", 0, 0, fg);
   /* Cell height is 22px. Row 22 should be unchanged. */
   int x;
@@ -129,9 +141,9 @@ TEST(Font, TextDoesNotWriteBelowCellHeight) {
 
 TEST(Font, TextDoesNotWriteAboveYOrigin) {
   Framebuffer fb;
-  color_t bg = 0x1111;
+  color_t const bg = 0x1111;
   fb_clear(&fb, bg);
-  color_t fg = rgb565(0xFF, 0xFF, 0xFF);
+  color_t const fg = rgb565(0xFF, 0xFF, 0xFF);
   text(&fb, "A", 0, 10, fg);
   /* Row 9 should be untouched. */
   int x;
@@ -148,18 +160,21 @@ TEST(Font, ScoreStringGlyphOriginsAreCorrect) {
    * 0=144 We draw at (0, 0) and verify some pixels changed in the S column (x
    * 0-15). */
   Framebuffer fb;
-  color_t bg = 0x0000;
+  color_t const bg = 0x0000;
   fb_clear(&fb, bg);
-  color_t fg = rgb565(0xFF, 0xFF, 0xFF);
+  color_t const fg = rgb565(0xFF, 0xFF, 0xFF);
   text(&fb, "SCORE 0:00", 0, 0, fg);
 
   /* 'S' is at row2 col9 in the charmap → atlas x = 9*16=144, y = 2*22=44.
    * Check that at least 1 pixel in x=0..15, y=0..21 changed. */
   int any = 0;
-  int x, y;
+  int x;
+  int y;
   for (y = 0; y < 22 && !any; ++y) {
     for (x = 0; x < 16 && !any; ++x) {
-      if (fb_get(&fb, x, y) != bg) any = 1;
+      if (fb_get(&fb, x, y) != bg) {
+        any = 1;
+      }
     }
   }
   EXPECT_EQ(any, 1) << "S glyph at x=0 must have written some pixels";
@@ -168,7 +183,9 @@ TEST(Font, ScoreStringGlyphOriginsAreCorrect) {
   any = 0;
   for (y = 0; y < 22 && !any; ++y) {
     for (x = 112; x < 128 && !any; ++x) {
-      if (fb_get(&fb, x, y) != bg) any = 1;
+      if (fb_get(&fb, x, y) != bg) {
+        any = 1;
+      }
     }
   }
   EXPECT_EQ(any, 1) << "colon glyph at x=112 must have written some pixels";
@@ -178,14 +195,16 @@ TEST(Font, ScoreStringGlyphOriginsAreCorrect) {
 
 TEST(Font, LowercaseRendersAsSpaceCell) {
   /* Draw 'a' (unknown) and space at same position on two fbs, compare. */
-  Framebuffer fb_space, fb_lower;
-  color_t bg = 0x0000;
-  color_t fg = rgb565(0xFF, 0xFF, 0xFF);
+  Framebuffer fb_space;
+  Framebuffer fb_lower;
+  color_t const bg = 0x0000;
+  color_t const fg = rgb565(0xFF, 0xFF, 0xFF);
   fb_clear(&fb_space, bg);
   fb_clear(&fb_lower, bg);
   text(&fb_space, " ", 0, 0, fg);
   text(&fb_lower, "a", 0, 0, fg);
-  int x, y;
+  int x;
+  int y;
   for (y = 0; y < 22; ++y) {
     for (x = 0; x < 16; ++x) {
       EXPECT_EQ(fb_get(&fb_space, x, y), fb_get(&fb_lower, x, y))

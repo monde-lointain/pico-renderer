@@ -14,23 +14,24 @@
 
 // ---- CRC32 (PNG / zlib polynomial 0xEDB88320) ------------------------------
 static uint32_t crc32_update(uint32_t crc, const uint8_t* buf, size_t len) {
-  crc = crc ^ 0xFFFFFFFFu;
+  crc = crc ^ 0xFFFFFFFFU;
   for (size_t i = 0; i < len; ++i) {
     crc ^= buf[i];
     for (int k = 0; k < 8; ++k) {
-      uint32_t mask = (uint32_t)(-(int32_t)(crc & 1u));
-      crc = (crc >> 1) ^ (0xEDB88320u & mask);
+      uint32_t const mask = (uint32_t)(-(int32_t)(crc & 1U));
+      crc = (crc >> 1) ^ (0xEDB88320U & mask);
     }
   }
-  return crc ^ 0xFFFFFFFFu;
+  return crc ^ 0xFFFFFFFFU;
 }
 
 // ---- Adler32 (zlib check value) --------------------------------------------
 static uint32_t adler32(const uint8_t* data, size_t len) {
-  uint32_t a = 1, b = 0;
+  uint32_t a = 1;
+  uint32_t b = 0;
   for (size_t i = 0; i < len; ++i) {
-    a = (a + data[i]) % 65521u;
-    b = (b + a) % 65521u;
+    a = (a + data[i]) % 65521U;
+    b = (b + a) % 65521U;
   }
   return (b << 16) | a;
 }
@@ -53,15 +54,23 @@ static int write_chunk(FILE* f, const char* type, const uint8_t* data,
   uint8_t hdr[8];
   put_be32(hdr, len);
   memcpy(hdr + 4, type, 4);
-  if (fwrite(hdr, 1, 8, f) != 8) return 1;
-  if (len && fwrite(data, 1, len, f) != len) return 1;
+  if (fwrite(hdr, 1, 8, f) != 8) {
+    return 1;
+  }
+  if (len && fwrite(data, 1, len, f) != len) {
+    return 1;
+  }
   // CRC is over type[4]+data in a single pass (crc32_update applies the
   // PNG inversion internally, so it must see the whole chunk at once).
   uint8_t* tmp = (uint8_t*)malloc(4 + len);
-  if (!tmp) return 1;
+  if (!tmp) {
+    return 1;
+  }
   memcpy(tmp, type, 4);
-  if (len) memcpy(tmp + 4, data, len);
-  uint32_t crc_final = crc32_update(0, tmp, 4 + len);
+  if (len) {
+    memcpy(tmp + 4, data, len);
+  }
+  uint32_t const crc_final = crc32_update(0, tmp, 4 + len);
   free(tmp);
   uint8_t crcb[4];
   put_be32(crcb, crc_final);
@@ -70,9 +79,13 @@ static int write_chunk(FILE* f, const char* type, const uint8_t* data,
 
 int png_write_rgb8(const char* path, const uint8_t* rgb, int width,
                    int height) {
-  if (width <= 0 || height <= 0) return 1;
+  if (width <= 0 || height <= 0) {
+    return 1;
+  }
   FILE* f = fopen(path, "wb");
-  if (!f) return 1;
+  if (!f) {
+    return 1;
+  }
 
   static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
   if (fwrite(sig, 1, 8, f) != 8) {
@@ -95,26 +108,28 @@ int png_write_rgb8(const char* path, const uint8_t* rgb, int width,
   }
 
   // Raw image data: each row prefixed with filter byte 0.
-  size_t row_bytes = (size_t)width * 3;
-  size_t raw_len = (row_bytes + 1) * (size_t)height;
+  size_t const row_bytes = (size_t)width * 3;
+  size_t const raw_len = (row_bytes + 1) * (size_t)height;
   uint8_t* raw = (uint8_t*)malloc(raw_len);
   if (!raw) {
     fclose(f);
     return 1;
   }
   for (int y = 0; y < height; ++y) {
-    uint8_t* dst = raw + (size_t)y * (row_bytes + 1);
+    uint8_t* dst = raw + ((size_t)y * (row_bytes + 1));
     dst[0] = 0;  // filter: none
-    memcpy(dst + 1, rgb + (size_t)y * row_bytes, row_bytes);
+    memcpy(dst + 1, rgb + ((size_t)y * row_bytes), row_bytes);
   }
 
   // zlib stream: 2-byte header + STORED DEFLATE blocks + 4-byte Adler32.
   // STORED block: 1 byte (BFINAL/BTYPE) + 2 LEN + 2 ~LEN + LEN data.
   // Max LEN per block = 65535.
-  size_t max_block = 65535;
+  size_t const max_block = 65535;
   size_t n_blocks = (raw_len + max_block - 1) / max_block;
-  if (n_blocks == 0) n_blocks = 1;
-  size_t zlen = 2 + n_blocks * 5 + raw_len + 4;
+  if (n_blocks == 0) {
+    n_blocks = 1;
+  }
+  size_t const zlen = 2 + (n_blocks * 5) + raw_len + 4;
   uint8_t* z = (uint8_t*)malloc(zlen);
   if (!z) {
     free(raw);
@@ -127,23 +142,25 @@ int png_write_rgb8(const char* path, const uint8_t* rgb, int width,
   size_t off = 0;
   for (size_t blk = 0; blk < n_blocks; ++blk) {
     size_t this_len = raw_len - off;
-    if (this_len > max_block) this_len = max_block;
-    int final = (blk + 1 == n_blocks) ? 1 : 0;
+    if (this_len > max_block) {
+      this_len = max_block;
+    }
+    int const final = (blk + 1 == n_blocks) ? 1 : 0;
     z[zi++] = (uint8_t) final;  // BFINAL in bit0, BTYPE=00 (stored)
     z[zi++] = (uint8_t)(this_len & 0xFF);
     z[zi++] = (uint8_t)((this_len >> 8) & 0xFF);
-    uint16_t nlen = (uint16_t)(~this_len);
+    uint16_t const nlen = (uint16_t)(~this_len);
     z[zi++] = (uint8_t)(nlen & 0xFF);
     z[zi++] = (uint8_t)((nlen >> 8) & 0xFF);
     memcpy(z + zi, raw + off, this_len);
     zi += this_len;
     off += this_len;
   }
-  uint32_t ad = adler32(raw, raw_len);
+  uint32_t const ad = adler32(raw, raw_len);
   put_be32(z + zi, ad);
   zi += 4;
 
-  int rc = write_chunk(f, "IDAT", z, (uint32_t)zi);
+  int const rc = write_chunk(f, "IDAT", z, (uint32_t)zi);
   free(z);
   free(raw);
   if (rc) {
@@ -164,13 +181,17 @@ int png_write_rgb8(const char* path, const uint8_t* rgb, int width,
 // write. Returns 0 and fills *out (caller frees) on success.
 static int inflate_stored(const uint8_t* z, size_t zlen, uint8_t** out,
                           size_t* out_len) {
-  if (zlen < 6) return 1;
+  if (zlen < 6) {
+    return 1;
+  }
   // Skip 2-byte zlib header; trailing 4 bytes are Adler32.
   size_t i = 2;
-  size_t end = zlen - 4;
+  size_t const end = zlen - 4;
   // Worst-case output: bounded by remaining input.
   uint8_t* buf = (uint8_t*)malloc(zlen);
-  if (!buf) return 1;
+  if (!buf) {
+    return 1;
+  }
   size_t cap = zlen;
   size_t n = 0;
   int final = 0;
@@ -179,9 +200,9 @@ static int inflate_stored(const uint8_t* z, size_t zlen, uint8_t** out,
       free(buf);
       return 1;
     }
-    uint8_t hdr = z[i++];
+    uint8_t const hdr = z[i++];
     final = hdr & 1;
-    int btype = (hdr >> 1) & 3;
+    int const btype = (hdr >> 1) & 3;
     if (btype != 0) {
       free(buf);
       return 1;
@@ -190,7 +211,7 @@ static int inflate_stored(const uint8_t* z, size_t zlen, uint8_t** out,
       free(buf);
       return 1;
     }
-    uint16_t len = (uint16_t)(z[i] | (z[i + 1] << 8));
+    uint16_t const len = (uint16_t)(z[i] | (z[i + 1] << 8));
     i += 4;  // skip LEN + NLEN
     if (i + len > zlen) {
       free(buf);
@@ -215,20 +236,26 @@ static int inflate_stored(const uint8_t* z, size_t zlen, uint8_t** out,
 }
 
 static uint8_t paeth(uint8_t a, uint8_t b, uint8_t c) {
-  int p = (int)a + (int)b - (int)c;
-  int pa = p > a ? p - a : a - p;
-  int pb = p > b ? p - b : b - p;
-  int pc = p > c ? p - c : c - p;
-  if (pa <= pb && pa <= pc) return a;
-  if (pb <= pc) return b;
+  int const p = (int)a + (int)b - (int)c;
+  int const pa = p > a ? p - a : a - p;
+  int const pb = p > b ? p - b : b - p;
+  int const pc = p > c ? p - c : c - p;
+  if (pa <= pb && pa <= pc) {
+    return a;
+  }
+  if (pb <= pc) {
+    return b;
+  }
   return c;
 }
 
 int png_read_rgb8(const char* path, uint8_t** out_rgb, int* out_w, int* out_h) {
   FILE* f = fopen(path, "rb");
-  if (!f) return 1;
+  if (!f) {
+    return 1;
+  }
   fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
+  long const sz = ftell(f);
   fseek(f, 0, SEEK_SET);
   if (sz < 8) {
     fclose(f);
@@ -252,16 +279,20 @@ int png_read_rgb8(const char* path, uint8_t** out_rgb, int* out_w, int* out_h) {
     return 1;
   }
 
-  int width = 0, height = 0;
+  int width = 0;
+  int height = 0;
   uint8_t* idat = NULL;
-  size_t idat_len = 0, idat_cap = 0;
+  size_t idat_len = 0;
+  size_t idat_cap = 0;
 
   size_t p = 8;
   while (p + 8 <= (size_t)sz) {
-    uint32_t len = get_be32(file + p);
+    uint32_t const len = get_be32(file + p);
     const char* type = (const char*)(file + p + 4);
     const uint8_t* data = file + p + 8;
-    if (p + 12 + len > (size_t)sz) break;
+    if (p + 12 + len > (size_t)sz) {
+      break;
+    }
     if (memcmp(type, "IHDR", 4) == 0) {
       width = (int)get_be32(data);
       height = (int)get_be32(data + 4);
@@ -301,7 +332,7 @@ int png_read_rgb8(const char* path, uint8_t** out_rgb, int* out_w, int* out_h) {
   }
   free(idat);
 
-  size_t row_bytes = (size_t)width * 3;
+  size_t const row_bytes = (size_t)width * 3;
   if (raw_len < (row_bytes + 1) * (size_t)height) {
     free(raw);
     return 1;
@@ -315,15 +346,15 @@ int png_read_rgb8(const char* path, uint8_t** out_rgb, int* out_w, int* out_h) {
 
   // Undo per-row filters (0 none, 1 sub, 2 up, 3 avg, 4 paeth). bpp=3.
   for (int y = 0; y < height; ++y) {
-    uint8_t ftype = raw[(size_t)y * (row_bytes + 1)];
-    const uint8_t* src = raw + (size_t)y * (row_bytes + 1) + 1;
-    uint8_t* dst = rgb + (size_t)y * row_bytes;
-    const uint8_t* prev = (y > 0) ? rgb + (size_t)(y - 1) * row_bytes : NULL;
+    uint8_t const ftype = raw[(size_t)y * (row_bytes + 1)];
+    const uint8_t* src = raw + ((size_t)y * (row_bytes + 1)) + 1;
+    uint8_t* dst = rgb + ((size_t)y * row_bytes);
+    const uint8_t* prev = (y > 0) ? rgb + ((size_t)(y - 1) * row_bytes) : NULL;
     for (size_t x = 0; x < row_bytes; ++x) {
-      uint8_t a = (x >= 3) ? dst[x - 3] : 0;
-      uint8_t b = prev ? prev[x] : 0;
-      uint8_t c = (prev && x >= 3) ? prev[x - 3] : 0;
-      uint8_t v = src[x];
+      uint8_t const a = (x >= 3) ? dst[x - 3] : 0;
+      uint8_t const b = prev ? prev[x] : 0;
+      uint8_t const c = (prev && x >= 3) ? prev[x - 3] : 0;
+      uint8_t const v = src[x];
       switch (ftype) {
         case 0:
           dst[x] = v;

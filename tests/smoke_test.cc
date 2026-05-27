@@ -21,13 +21,13 @@ TEST(AssetsContract, FontSpriteIsAvailable) {
 
 TEST(AppContract, InitThenTickRunsWithoutPlatform) {
   App a;
-  app_init(&a, 1u);
+  app_init(&a, 1U);
   EXPECT_EQ(app_state(&a), APP_TITLE);
 
   Framebuffer fb;
   struct Input in;
-  in.held = 0u;
+  in.held = 0U;
   in.pressed = BTN_A;
-  app_tick(&a, &in, 0u, &fb);
+  app_tick(&a, &in, 0U, &fb);
   EXPECT_EQ(app_state(&a), APP_PLAYING);
 }

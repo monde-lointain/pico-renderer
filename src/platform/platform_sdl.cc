@@ -69,7 +69,7 @@ void plat_init(void) {
 
   /* Window size: scale*240 × scale*240 + room for menu bar (~20px) */
   const int win_w = SCREEN_W * s_scale;
-  const int win_h = SCREEN_H * s_scale + 20;
+  const int win_h = (SCREEN_H * s_scale) + 20;
 
   s_window = SDL_CreateWindow("PicoSystem Template", win_w, win_h,
                               SDL_WINDOW_RESIZABLE);
@@ -149,7 +149,7 @@ void plat_present(const struct Framebuffer *fb) {
         if (ImGui::MenuItem(label, nullptr, sel)) {
           s_scale = s;
           SDL_SetWindowSize(s_window, SCREEN_W * s_scale,
-                            SCREEN_H * s_scale + 20);
+                            (SCREEN_H * s_scale) + 20);
         }
       }
       ImGui::EndMenu();
@@ -173,7 +173,7 @@ void plat_present(const struct Framebuffer *fb) {
   const int fb_h = SCREEN_H * s_scale;
   const int off_x = (out_w - fb_w) / 2;
   /* Leave room for menu bar (~20px at logical coords, but we just push down) */
-  const int off_y = out_h - fb_h - (out_h - fb_h) / 2;
+  const int off_y = out_h - fb_h - ((out_h - fb_h) / 2);
 
   SDL_FRect dst;
   dst.x = (float)off_x;

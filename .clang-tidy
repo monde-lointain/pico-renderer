@@ -20,9 +20,15 @@ Checks: >
   -readability-magic-numbers,
   -readability-use-std-min-max,
   -clang-analyzer-core.FixedAddressDereference
-HeaderFilterRegex: 'src/(app|game|gfx|platform)/'
-# Generated headers (pioasm output, asset tables) are not authored; never lint them.
-ExcludeHeaderFilterRegex: '.*\.pio\.h$'
+# Lint all authored headers under src/ and tests/ (every renderer module + façade +
+# demo + platform + harness). NOTE: this pattern is a substring match, so it also
+# matches vendored deps under FETCHCONTENT_BASE_DIR (e.g. ".deps-cache/imgui-src/",
+# "googletest-src/", "sdl3-src/" all contain "src/") — those are removed by the
+# ExcludeHeaderFilterRegex below, which takes precedence.
+HeaderFilterRegex: '(src|tests)/'
+# Never lint: vendored third-party deps (FetchContent cache), generated headers
+# (pioasm output, asset tables), and the ImGui inspector header (Modern-C++ carve-out).
+ExcludeHeaderFilterRegex: '(\.deps-cache/|\.pio\.h$|/tests/harness/inspector\.h$)'
 WarningsAsErrors: ''
 CheckOptions:
   - key: readability-identifier-naming.StructCase
