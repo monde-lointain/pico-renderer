@@ -18,7 +18,8 @@
 #define RDR_TILE_W   60   // 16 tiles; Phase-15 tunable
 #define RDR_TILE_H   60
 
-// ---- capacities (PENDING S0.5 confirmation; sized to ~3000-tri / ~120 KB) --
+// ---- capacities (S0.5-CONFIRMED: 138 KiB free beside FB > budget; see
+//      docs/superpowers/specs/hardware-measurements.md). Sized to ~3000-tri. --
 #define RDR_MAX_TVERTS  3000   // transformed-vertex pool (~14 B each)
 #define RDR_MAX_TRIS    3000   // bin triangle cap (drop-with-count on overflow)
 #define RDR_CMD_ARENA_BYTES (16 * 1024)
