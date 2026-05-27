@@ -148,6 +148,31 @@ TEST(SchedDeterminism, SerialEqualsTwoWorkerInterleaved) {
             0);
 }
 
+// The FROZEN SEAM itself: sched_rasterize (-> sched_dispatch_tiles ->
+// dispatch_host on host) must yield the SAME framebuffer as the hand-rolled
+// serial sweep. The two tests above prove raster_tile is order-independent;
+// this one proves the production dispatch primitive actually drains every tile
+// into the result the rest of the renderer relies on. On device the same seam
+// runs the dual-core path; the on-target fb_crc telemetry closes that half.
+TEST(SchedDeterminism, FrozenSeamEqualsSerial) {
+  build_scene_geom();
+
+  raster_serial(g_fb_serial);
+
+  // Drive the real seam into g_fb_par (sched_rasterize does not clear the fb —
+  // rdr_end_frame does — so match raster_serial's clear-to-0 first).
+  g_frame.fb = g_fb_par;
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    g_fb_par[i] = 0;
+  }
+  ASSERT_EQ(sched_rasterize(&g_frame), RDR_OK);
+
+  EXPECT_EQ(memcmp(g_fb_serial, g_fb_par,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0)
+      << "sched_rasterize seam diverged from the serial sweep";
+}
+
 // TEETH: two workers SHARING one zbuf MUST differ from the serial result. This
 // is the broken configuration; if it accidentally matched, the test above would
 // not be proving the per-worker isolation is load-bearing.
