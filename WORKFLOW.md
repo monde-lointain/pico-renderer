@@ -106,3 +106,44 @@ oracle; arm-clean. Three small frictions worth surfacing:
 3. The no-UMULL discipline is verifiable post-build: `arm-none-eabi-objdump -d` on the lib object
    showed 0 UMULL/SMULL/MLA, 81 MULS — a cheap, objective gate. Worth adding to the `fixed` review
    checklist (assert no 64-bit-multiply opcodes in the arm object).
+
+---
+
+# How this log becomes improvement (the closed loop)
+
+A journal of symptoms doesn't improve anything. From here, every finding is a **tracked backlog
+item**, not prose, and no item is *closed* until something **executable** would catch its
+regression (a hook / CI assert / validation step). The A10 pivot proved the cost of skipping this:
+it concluded "subagents isolate" and shipped a *doc-only* change with no check — and that exact
+assumption broke again on the first real dispatch (W1-01).
+
+**Record format** (one row per finding): `ID · symptom · root-cause · severity · → artifact
+(which agent def / skill / hook / CMake / plan section) · owner · status{open|shipped|verified|wontfix}`.
+
+**Two cadences:**
+- **Hot-fix** — finding blocks the next action → fix *before* the next dispatch.
+- **Batch** — friction/nits → collected to the **wave-retro barrier** (Stream D + `wave-retro` skill),
+  triaged, high-ROI ones shipped.
+
+**KPIs (feedback signal).** Existing: contract-deltas, CI-red-after-merge, on-target-gate-pass.
+Added: **review-catch rate** (blockers caught at gate vs escaped to `main`) and **dispatch-rework
+rate** (streams needing re-dispatch).
+
+## Wave-1 improvement backlog
+
+| ID | Symptom | Root cause | Sev | → Artifact | Owner | Status |
+|----|---------|-----------|-----|-----------|-------|--------|
+| **W1-01** | `isolation:worktree` defeated: both subagents ran concurrently in the shared main tree; `infra/harness` ended up stacked on `impl/fixed` | Agents `cd` to the abs project path (and the `worktree-pr` skill told them to `git worktree add` manually) → abandon the harness worktree → share the main tree | **High (blocks fan-out)** | `worktree-pr` (CWD-discipline block); dispatch loop (serial-until-proven + spawn-prompt CWD mandate + gate runs the guard); **new `tools/verify_stream_branch.sh`** (lane-scope ⇒ catches stacking) | Lead | **verified** — guard reproduces the catch on `infra/harness` (flags foreign `src/fixed/*`, accepts `tests/harness/*`) |
+| W1-02 | `geom` must map GBI `Vp_t`→`SET_VIEWPORT{x,y,w,h}` with the oracle's center/extent convention or every golden shifts | Oracle viewport interpretation not pinned in a shared note | Med | `tests/harness/oracle.h` note + geom integration | T5/T1 | open (batch) |
+| W1-03 | `OTVtx` carries no clip-space Z; δ/blend need a depth value, no seam | Oracle struct omits NDC-Z (w-buffer is `inv_w`, but z-compare path unseeded) | Med | `tests/harness/oracle.{h,cc}` | T5 | open (batch) |
+| W1-04 | `CommittedSceneRegression` soft-passes if the golden file is deleted (`GOLDEN_WROTE` passes) | Test asserts `!= FAIL` instead of `== PASS` for a committed anchor | Low | `tests/harness/golden_test.cc` (`EXPECT_EQ PASS` unless `GOLDEN_REGEN`) | T5 | open (batch) |
+| W1-05 | Oracle rejects whole back-of-near vertices but can't *clip* a partially-behind tri | No near-plane intersection in the oracle yet | Low | `tests/harness/oracle.cc` (when `clip` stream lands) | T5/T1 | open (batch) |
+| W1-06 | repo-global `make format-patch` is red on pre-existing skeleton files, failing a lane that touched none of them | The target globs all of `src/`+`tests/` | Low | `Makefile`/`tools` (lane-scoped variant) + gate uses lane-scoped `clang-format` meanwhile | T5 | open (batch) |
+
+## Cycle KPIs — first dispatch (B.0 `fixed` + B.1-ε harness), 2026-05-27
+- **Review-catch rate: 1 caught / 0 escaped.** The gate's reviewer (UBSan) caught a real `fx_to_int(INT32_MIN)` UB blocker the author's 17 tests missed → fixed → 23 tests, ASan/UBSan clean.
+- **Dispatch-rework rate: 1 of 2** (B.0 needed one re-dispatch for the blocker + edge tests).
+- **CI-red-after-merge: 0** (both merged green via `ci_main.sh`).
+- **Contract-deltas: 0** (frozen `rdr/types.h` untouched; `Vec4fx` kept module-local).
+- **Verdict:** validating-before-fan-out + the pre-merge gate earned their keep on cycle one. The
+  proof-of-loop (dispatch→gate→review→fix→re-gate→merge) is confirmed end-to-end.

@@ -684,15 +684,31 @@ Then: review the freeze PR (renderer-reviewer), merge to `main`, run `tools/ci_m
 - `C1` → `C2` → `C3` → `D`.
 
 ## The dispatch loop (repeat until all Wave-1 streams merged)
+
+> **⚠ W1-01 (worktree isolation defeated — applies until verified reliable).** On the first real
+> dispatch, `isolation:worktree` did NOT isolate: both subagents `cd`'d to the absolute project
+> path, abandoned their (empty, auto-cleaned) worktrees, and ran **concurrently in the shared main
+> tree** — one branch ended up stacked on the other's. Disjoint lanes saved the content, but the
+> isolation premise is broken. **Hot-fix policy until proven:** (a) **dispatch SERIALLY** — one
+> stream at a time, gate + merge before the next — so no two agents share the main tree at once;
+> (b) every spawn prompt carries the CWD-discipline block (work in `$PWD`, never `cd` to the abs
+> path, assert `git rev-parse --show-toplevel`/`branch --show-current` before committing — see the
+> `worktree-pr` skill); (c) the gate runs `tools/verify_stream_branch.sh` (below) which rejects any
+> stacked/out-of-lane branch. Re-enable parallel fan-out only after confirming worktrees actually
+> isolate (a one-shot probe: dispatch one agent, check `git worktree list` shows a populated
+> worktree and its branch is NOT in the main tree).
+
 - [ ] **Step 1: Dispatch each unblocked stream as a subagent in its own worktree.**
   Use the Agent tool with `isolation: "worktree"` and `subagent_type` = the stream's role
   (`renderer-module-owner` for module streams; `infra-tooling` for harness/assets/runner;
-  `integrator`/`perf-profiler` for C1–C3). Dispatch independent streams **in parallel** (multiple
-  Agent calls in one turn). The spawn prompt (per PROMPT_GUIDELINES) states: role; **owned globs** from
+  `integrator`/`perf-profiler` for C1–C3). **Until W1-01 is cleared, dispatch one stream at a time**
+  (not parallel). The spawn prompt (per PROMPT_GUIDELINES) states: role; **owned globs** from
   `.claude/ownership.json` (touch nothing else); the frozen contract (`src/rdr/types.h`); use
   `contract-first` then `orthodox-tdd-cycle`; for math-bearing modules `fixed-point` + `golden-image-test`;
-  run `make test`/`ctest -L <mod>` + `make format-patch` green before returning; commit on its branch;
-  and **report back** the branch name, test results, and any contract-gap needing a delta.
+  the **CWD-discipline block** (work from `$PWD`, never `cd` to the abs project path, assert the
+  worktree toplevel + branch before committing — per `worktree-pr`); run `make test`/`ctest -L <mod>`
+  + `make format-patch` green before returning; commit on its branch; and **report back** the branch
+  name, test results, and any contract-gap needing a delta.
   **MANDATORY in every spawn prompt:** include the `docs/REFERENCES.md` reference block and instruct the
   subagent to **read the primary sources relevant to its module first and never hallucinate an
   API/register/hardware-behavior/format/timing** (verify against the SDK headers, datasheets, N64
@@ -704,10 +720,15 @@ Then: review the freeze PR (renderer-reviewer), merge to `main`, run `tools/ci_m
   Return with `ctest -L raster` green + `make format-patch` clean; report your branch + results."*
 
 - [ ] **Step 2: Lead pre-merge gate for each returned stream** (replaces the team `TaskCompleted` hook,
-  which doesn't fire for subagents): in the subagent's worktree/branch, run module `ctest -L <mod>` +
-  `make format-patch` + Orthodoxy (host build) green; spawn `renderer-reviewer` on the branch diff;
-  then `ci_main.sh` green → **merge the branch to `main`**. On failure, re-dispatch with feedback (the
-  Lead is the circuit-breaker; escalate to the human after repeated failure).
+  which doesn't fire for subagents): **first run `tools/verify_stream_branch.sh <branch> <owner>`**
+  (W1-01 guard — rejects a stacked/out-of-lane branch before anything else; a stacked branch must be
+  rebuilt clean, e.g. cherry-pick the lane-only commit onto a fresh branch from `main`). Then in the
+  branch: module `ctest -L <mod>` + lane-scoped `clang-format --dry-run --Werror <owned files>`
+  (repo-global `make format-patch` is red on pre-existing skeleton files — W1 friction, lane-scope it)
+  + Orthodoxy (host build) green; spawn `renderer-reviewer` on the branch diff; then `ci_main.sh`
+  green → **merge the branch to `main`**. On failure, re-dispatch with feedback via SendMessage to the
+  same agent (keeps its context); the Lead is the circuit-breaker; escalate to the human after
+  repeated failure.
 
 - [ ] **Step 3: Advance the barrier.** After each merge, dispatch any streams whose deps are now all on
   `main` (per the graph). `git merge main` is implicit — each new subagent's worktree is cut fresh from
