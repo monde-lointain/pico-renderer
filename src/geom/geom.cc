@@ -267,7 +267,7 @@ void geom_out_init(struct GeomOut* o, struct TVtx* tverts, uint32_t tvert_cap,
   o->tris_total = 0;
   o->tris_dropped = 0;
   for (int i = 0; i < GEOM_NUM_TILES; ++i) {
-    o->tiles[i].refs = &refs[(uint32_t)i * refs_per_tile];
+    o->tiles[i].refs = &refs[(size_t)i * refs_per_tile];
     o->tiles[i].count = 0;
     o->tiles[i].cap = refs_per_tile;
     o->tiles[i].dropped = 0;

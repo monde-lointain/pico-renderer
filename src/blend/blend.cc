@@ -8,11 +8,10 @@
 uint16_t blend_pixel(uint8_t mode, uint16_t src, uint16_t dst) {
   switch (mode) {
     case BLEND_OPAQUE:
-      (void)dst;
-      return src;
     default:
-      // Unsupported mode in v1: fall back to opaque copy (never silently
-      // corrupt the framebuffer). Modes BLEND_ALPHA/BLEND_ADD land W-later.
+      // v1: opaque copy (src wins), dst unused. Unsupported modes fall back to
+      // opaque (never silently corrupt the FB). BLEND_ALPHA/BLEND_ADD + ordered
+      // dither land W-later, when each gets its own non-clone branch.
       (void)dst;
       return src;
   }

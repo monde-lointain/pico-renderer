@@ -16,7 +16,7 @@
 
 // ---- independent re-derivation of the expected combiner output -------------
 static uint8_t modulate8(uint8_t a, uint8_t c) {
-  int32_t out = ((int32_t)a * (int32_t)c + 0x80) >> 8;  // B=0, D=0
+  int32_t out = (((int32_t)a * (int32_t)c) + 0x80) >> 8;  // B=0, D=0
   if (out < 0) {
     out = 0;
   }
@@ -27,7 +27,12 @@ static uint8_t modulate8(uint8_t a, uint8_t c) {
 }
 
 static uint16_t expect_modulate(uint16_t texel, uint16_t shade) {
-  uint8_t tr, tg, tb, sr, sg, sb;
+  uint8_t tr;
+  uint8_t tg;
+  uint8_t tb;
+  uint8_t sr;
+  uint8_t sg;
+  uint8_t sb;
   oracle_unpack565(texel, &tr, &tg, &tb);
   oracle_unpack565(shade, &sr, &sg, &sb);
   return rgb565(modulate8(tr, sr), modulate8(tg, sg), modulate8(tb, sb));

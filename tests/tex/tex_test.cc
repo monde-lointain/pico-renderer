@@ -11,10 +11,10 @@
 #include "gtest/gtest.h"
 
 // ---- helpers ---------------------------------------------------------------
-static fx16_16 q16(int texel) { return (fx16_16)(texel) << 16; }
+static fx16_16 q16(int texel) { return (fx16_16)texel << 16; }
 
 // A 4x1 RGBA565 texture: distinct colors so index errors are obvious.
-static const uint16_t kRow565[4] = {
+static const uint16_t K_ROW565[4] = {
     0xF800,  // red   (idx 0)
     0x07E0,  // green (idx 1)
     0x001F,  // blue  (idx 2)
@@ -37,7 +37,7 @@ static void make_tex565(struct TexDesc* t, const uint16_t* data, uint16_t w,
 // ---- point sampling: exact texel pick (floor of Q16.16) --------------------
 TEST(Tex, PointSamplesExactTexel565) {
   struct TexDesc t;
-  make_tex565(&t, kRow565, 4, 1, WRAP_REPEAT, WRAP_REPEAT);
+  make_tex565(&t, K_ROW565, 4, 1, WRAP_REPEAT, WRAP_REPEAT);
   EXPECT_EQ(tex_sample(&t, q16(0), q16(0), 0), 0xF800);
   EXPECT_EQ(tex_sample(&t, q16(1), q16(0), 0), 0x07E0);
   EXPECT_EQ(tex_sample(&t, q16(2), q16(0), 0), 0x001F);
@@ -47,7 +47,7 @@ TEST(Tex, PointSamplesExactTexel565) {
 // Fractional coordinate (within a texel) floors to the texel index.
 TEST(Tex, PointDropsFraction) {
   struct TexDesc t;
-  make_tex565(&t, kRow565, 4, 1, WRAP_REPEAT, WRAP_REPEAT);
+  make_tex565(&t, K_ROW565, 4, 1, WRAP_REPEAT, WRAP_REPEAT);
   // 1.9 -> texel 1; 2.0 -> texel 2; 0.5 -> texel 0.
   EXPECT_EQ(tex_sample(&t, q16(1) + 0xE666, q16(0), 0), 0x07E0);  // 1.9
   EXPECT_EQ(tex_sample(&t, q16(0) + 0x8000, q16(0), 0), 0xF800);  // 0.5
@@ -56,7 +56,7 @@ TEST(Tex, PointDropsFraction) {
 // ---- WRAP (repeat): index masks with (w-1) ---------------------------------
 TEST(Tex, WrapRepeatsModuloWidth) {
   struct TexDesc t;
-  make_tex565(&t, kRow565, 4, 1, WRAP_REPEAT, WRAP_REPEAT);
+  make_tex565(&t, K_ROW565, 4, 1, WRAP_REPEAT, WRAP_REPEAT);
   EXPECT_EQ(tex_sample(&t, q16(4), q16(0), 0), 0xF800);   // 4 & 3 = 0
   EXPECT_EQ(tex_sample(&t, q16(5), q16(0), 0), 0x07E0);   // 5 & 3 = 1
   EXPECT_EQ(tex_sample(&t, q16(-1), q16(0), 0), 0xFFFF);  // -1 & 3 = 3
@@ -65,7 +65,7 @@ TEST(Tex, WrapRepeatsModuloWidth) {
 // ---- CLAMP: saturate to [0, w-1] -------------------------------------------
 TEST(Tex, ClampSaturatesEdges) {
   struct TexDesc t;
-  make_tex565(&t, kRow565, 4, 1, WRAP_CLAMP, WRAP_CLAMP);
+  make_tex565(&t, K_ROW565, 4, 1, WRAP_CLAMP, WRAP_CLAMP);
   EXPECT_EQ(tex_sample(&t, q16(-3), q16(0), 0), 0xF800);  // clamp low -> 0
   EXPECT_EQ(tex_sample(&t, q16(99), q16(0), 0), 0xFFFF);  // clamp high -> 3
   EXPECT_EQ(tex_sample(&t, q16(2), q16(0), 0), 0x001F);   // in range
@@ -75,7 +75,7 @@ TEST(Tex, ClampSaturatesEdges) {
 // For w=4 (mask=3, mask_bits=2): coords 0..3 forward, 4..7 mirror to 3..0.
 TEST(Tex, MirrorReflectsAcrossWidth) {
   struct TexDesc t;
-  make_tex565(&t, kRow565, 4, 1, WRAP_MIRROR, WRAP_MIRROR);
+  make_tex565(&t, K_ROW565, 4, 1, WRAP_MIRROR, WRAP_MIRROR);
   EXPECT_EQ(tex_sample(&t, q16(0), q16(0), 0), 0xF800);  // 0 -> 0
   EXPECT_EQ(tex_sample(&t, q16(3), q16(0), 0), 0xFFFF);  // 3 -> 3
   EXPECT_EQ(tex_sample(&t, q16(4), q16(0), 0), 0xFFFF);  // 4 -> 3 (mirror)

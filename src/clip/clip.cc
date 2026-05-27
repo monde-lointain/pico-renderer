@@ -123,7 +123,7 @@ int clip_poly_rect(const struct TVtx* in, int n, const struct ClipRect* r,
   struct TVtx buf_b[CLIP_MAX_OUT];
   const struct TVtx* src = in;
   int sn = n;
-  struct TVtx* scratch[2] = {buf_a, buf_b};
+  struct TVtx* const scratch[2] = {buf_a, buf_b};
   for (int edge = 0; edge < 4; ++edge) {
     struct TVtx* dst = scratch[edge & 1];
     sn = clip_against_edge(src, sn, r, edge, dst);

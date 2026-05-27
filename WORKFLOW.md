@@ -149,3 +149,49 @@ rate** (streams needing re-dispatch).
 - **Contract-deltas: 0** (frozen `rdr/types.h` untouched; `Vec4fx` kept module-local).
 - **Verdict:** validating-before-fan-out + the pre-merge gate earned their keep on cycle one. The
   proof-of-loop (dispatch→gate→review→fix→re-gate→merge) is confirmed end-to-end.
+
+## Wave-1 parallel fan-out (B.1-α/β/γ/δ/ζ/η/θ) — 2026-05-27
+
+After cycle 1, ran the W1-01 **isolation probe** (dispatch one subagent, confirm `git worktree list`
+shows a populated worktree on its own branch, not collapsed into the main tree). It PASSED — the
+harness pre-creates the worktree at spawn — so W1-01's serial-until-proven hold was cleared and **all
+7 remaining streams were dispatched in parallel**, each in its own worktree (per the dispatch graph,
+β/γ/δ code against the frozen headers, so all are unblocked once B.0+ε are merged). All 7 returned
+green + lane-scoped (`verify_stream_branch.sh` re-run by the Lead on every branch: 0 stacking, 0
+cross-lane). All 7 reviewed by `renderer-reviewer` → **APPROVE, 0 blockers**; the one real correctness
+coupling (δ `tex` 4444 decode vs ζ asset 4444 emit) was verified consistent (R-high/A-low). Merged 7
+branches to `main`; `ci_main.sh` integration gate went red once on clang-tidy, fixed by the Lead, then
+green (182 host tests; arm builds).
+
+### Backlog (tracked) — `ID · symptom · root-cause · sev · → artifact · owner · status`
+
+| ID | Symptom | Root cause | Sev | → Artifact | Owner | Status |
+|----|---------|-----------|-----|-----------|-------|--------|
+| **W1-09** | In a worktree subagent the **`Write`/`Edit` tools don't persist** — report success, but the worktree stays clean and the write lands in the **shared main tree** | Edit/Write path resolution ignores the agent's `$PWD` worktree (resolves to the parent/main tree); `Bash` heredoc/`tee` respect cwd | **High** | dispatch-prompt template + `worktree-pr` skill: **mandate authoring files via `Bash`, not Edit/Write**, until the harness CWD bug is fixed; gate already cleans the main-tree leak via `git merge`'s dirty-tree refusal | Lead | shipped (mandate); deliverables were never corrupted (commits via Bash landed in-worktree) — **verify the harness fix before W2** |
+| **W1-10** | 124 clang-tidy errors rode into the merge (const-correctness, uppercase-suffix, isolate-decl, narrowing) — caught only at the integration `ci_main` | The **per-stream gate omitted clang-tidy** (ran ctest+format+Orthodoxy only); W1-08 wired tidy into `ci_main` but not into the stream landing-gate | **High** | add lane-scoped `make tidy` (or `clang-tidy -p build-host/tidy <owned files>`) to the dispatch-prompt gate + the `worktree-pr` landing checklist; `ci_main` is the backstop (it fired) | Lead | shipped to docs; **executable**: ci_main enforces at integration |
+| **W1-11** | `clang-tidy --fix` introduced a **compile error** in `clip.cc` (const-correctness made the pointee const, breaking a `dst` assignment) | `--fix` applies fix-its without whole-program type-checking; reinforces W1-07 | Med | rule: after any scoped `--fix`, **re-run tidy + a build** before trusting it; never broad `--fix` (explicit file list only, then verify) | Lead | verified (re-run caught it; repaired with `* const`) |
+
+### C1 integration handoff (cross-module contract items — not workflow bugs; for the C1 plan)
+- **β `geom_run` ⇄ `Frame`:** frozen `Frame{fb,width,height}` lacks the TVtx pool / tile bins / matrix+viewport+material state / clip scratch → `geom_run` is a stub; C1 must extend `Frame` (or add a `GeomCtx` the entry takes). Module-local POD (`GeomOut`/`MtxStack`/`Viewport`) shaped for C1 to own+pass.
+- **γ `raster_tile` signature** (changed in-lane, T2-owned, NOT frozen): `raster_tile(int, const TileBin*, const TVtx* pool, uint16_t* fb, uint16_t* zbuf)` — added `pool`, dropped `const` on fb/zbuf. `sched`/`rdr`/AA callers adopt at C1.
+- **γ depth encoding** (unpinned): `clamp(inv_w_q16>>4, 0..0xFFFF)`, clear=0=farthest — δ/blend translucent (z-test-no-write/sort) MUST use the identical encoding. Pin in a shared note.
+- **ζ↔δ RGBA4444 order:** R-high/A-low (`R[15:12]G[11:8]B[7:4]A[3:0]`) — agreed by both lanes; **pin it in the spec/`config.h`** (config.h notes 4444's low nibble as coverage — reconcile alpha-vs-coverage there).
+- **ζ `Vtx` size:** real POD size is **14 B**; the `types.h` comment says 16 B — fix the comment + add `static_assert(sizeof(struct Vtx)==14)` (Stream-A/contract touch).
+- **ζ UV:** stored S10.5 of raw [0,1], NOT pre-scaled by tex size — the sampler/transform multiplies by tex dim. Confirm whose job at C1.
+- **δ alpha dropped end-to-end** (tex discards 4444 alpha; `shade` forces keep=1): the spec'd C1 demo's **alpha-cutout billboard cannot work** — C1 must descope it or plumb alpha through tex→shade.
+- **θ watermark producer unwired:** `s_committed_rows` only advanced by `plat_present_watermark`, which nothing calls → device takes the full-frame fallback; the scanline-race chase/stall path is unexercised on HW until the scheduler (C1/C2) drives it. Add a stall **deadline** (busy-wait has no escape today).
+- **α `cb_walk`** has no stream-length bound (relies on a terminating `CMD_END`) — the geom front-end must END-terminate every DL; **arena backing buffers must be 8B-aligned** on target (`arena_init` aligns offsets, not `base`).
+
+### Batch fast-follows (to wave-retro)
+- β `clip` lerps packed-565 rgba as a scalar → carry-bleed across R/G/B; harmless for off-screen guard-band clip, **must be per-channel before near-plane clipping lands** (later wave).
+- β `geom_modelview_det_sign` overflows `fx_mul` at uniform scale ≳180 → flips det sign → inverts cull. Use a 64-bit product or document the operand-range bound.
+- θ per-band DMA re-arming vs the continuous-stream 14.75 ms budget — confirm 30 fps at C2.
+- η `main()`/exit-code wiring untested (core is); `read_until_sentinel` tested but production re-implements it inline (drift risk); key-charset asymmetry parse vs check-spec.
+- δ `tex_sample` has no non-pow2 guard (documented pow2-only) — add a debug assert.
+
+## Cycle KPIs — second dispatch (Wave-1 parallel fan-out, 7 streams), 2026-05-27
+- **Review-catch rate: 0 escaped blockers** (7/7 APPROVE; reviewers independently rebuilt/retested per W1-09, confirmed the 4444 coupling, and surfaced the latents above as tracked items rather than blockers).
+- **Dispatch-rework rate: 0 of 7** (no stream needed re-dispatch; the only post-merge fix was the Lead clang-tidy pass — a gate-scope gap, W1-10, not a stream defect).
+- **CI-red-after-merge: caught-before-push** — `ci_main` went red on tidy at integration and was fixed before any push; main never pushed red.
+- **Contract-deltas (frozen `rdr/types.h`): 0** — every module change stayed in module-owned headers; the `Frame`/`Vtx` items are deferred C1 deltas, not made in Wave-1.
+- **Verdict:** parallel fan-out works behind the lane-scope guard + per-stream review + the `ci_main` integration backstop. The two process gaps (W1-09 tool bug, W1-10 tidy-not-in-stream-gate) are the cycle's real lessons; both now have an artifact.

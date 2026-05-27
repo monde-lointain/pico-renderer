@@ -21,7 +21,7 @@ namespace {
 
 // RGB565 flat color used across tests (a non-trivial value to catch packing
 // bugs). 565: R=10110(22), G=011010(26), B=01011(11).
-const uint16_t kFlat565 = (uint16_t)((22u << 11) | (26u << 5) | 11u);
+const uint16_t K_FLAT565 = (uint16_t)((22U << 11) | (26U << 5) | 11U);
 
 // rgb565 packer matching gfx/framebuffer.h rgb565() (avoid pulling that
 // header).
@@ -38,7 +38,7 @@ TVtx mk_vtx(int px, int py, int sub_x, int sub_y, int32_t inv_w_q16) {
   v.x = (fx12_4)((px * 16) + sub_x);
   v.y = (fx12_4)((py * 16) + sub_y);
   v.inv_w = (fx_invw)inv_w_q16;
-  v.rgba = kFlat565;
+  v.rgba = K_FLAT565;
   return v;
 }
 
@@ -65,7 +65,7 @@ void one_tri(OneTri* o, TVtx a, TVtx b, TVtx c) {
 
 // Unpack the test flat color to RGB8 (oracle reference fill color).
 void flat_rgb(uint8_t* r, uint8_t* g, uint8_t* b) {
-  oracle_unpack565(kFlat565, r, g, b);
+  oracle_unpack565(K_FLAT565, r, g, b);
 }
 
 // Render the bin into a full framebuffer at tile 0, then extract the tile's
@@ -84,7 +84,9 @@ void render_tile0_to_rgb(const TileBin* bin, const TVtx* pool, uint8_t* rgb_out,
   for (int y = 0; y < RDR_TILE_H; ++y) {
     for (int x = 0; x < RDR_TILE_W; ++x) {
       uint16_t const px = fb[(y * RDR_SCREEN_W) + x];
-      uint8_t r, g, b;
+      uint8_t r;
+      uint8_t g;
+      uint8_t b;
       oracle_unpack565(px, &r, &g, &b);
       size_t const o = (((size_t)y * RDR_TILE_W) + x) * 3;
       rgb_out[o + 0] = r;
@@ -97,7 +99,9 @@ void render_tile0_to_rgb(const TileBin* bin, const TVtx* pool, uint8_t* rgb_out,
 // Compare raster tile-0 output to the oracle filling the same triangle in
 // tile-local pixel space, returns count of mismatching pixels.
 int compare_to_oracle(const OneTri* o) {
-  uint8_t fr, fg, fb;
+  uint8_t fr;
+  uint8_t fg;
+  uint8_t fb;
   flat_rgb(&fr, &fg, &fb);
   // Background = black (0,0,0).
   uint8_t rast[RDR_TILE_W * RDR_TILE_H * 3];
@@ -110,9 +114,10 @@ int compare_to_oracle(const OneTri* o) {
   img.w = RDR_TILE_W;
   img.h = RDR_TILE_H;
   oracle_image_clear(&img, 0, 0, 0);
-  oracle_fill_tri(&img, o->pool[0].x / 16.0F, o->pool[0].y / 16.0F,
-                  o->pool[1].x / 16.0F, o->pool[1].y / 16.0F,
-                  o->pool[2].x / 16.0F, o->pool[2].y / 16.0F, fr, fg, fb);
+  oracle_fill_tri(&img, (float)o->pool[0].x / 16.0F,
+                  (float)o->pool[0].y / 16.0F, (float)o->pool[1].x / 16.0F,
+                  (float)o->pool[1].y / 16.0F, (float)o->pool[2].x / 16.0F,
+                  (float)o->pool[2].y / 16.0F, fr, fg, fb);
 
   int diff = 0;
   for (int i = 0; i < RDR_TILE_W * RDR_TILE_H * 3; ++i) {
@@ -127,7 +132,9 @@ int compare_to_oracle(const OneTri* o) {
 // mask (1 where the flat color was written). Caller-supplied mask sized
 // RDR_TILE_W*RDR_TILE_H.
 void coverage_of(const OneTri* o, uint8_t* mask) {
-  uint8_t fr, fg, fb;
+  uint8_t fr;
+  uint8_t fg;
+  uint8_t fb;
   flat_rgb(&fr, &fg, &fb);
   uint8_t rast[RDR_TILE_W * RDR_TILE_H * 3];
   render_tile0_to_rgb(&o->bin, o->pool, rast, 0, 0, 0);
@@ -203,7 +210,9 @@ TEST(Raster, SharedEdgeWatertight) {
   // No gap: the union must exactly equal the oracle's fill of the whole quad
   // expressed as the same two tris unioned (a watertight quad). Reference fill
   // = oracle over both tris into one image.
-  uint8_t fr, fg, fb;
+  uint8_t fr;
+  uint8_t fg;
+  uint8_t fb;
   flat_rgb(&fr, &fg, &fb);
   uint8_t ref[RDR_TILE_W * RDR_TILE_H * 3];
   OImage img;
@@ -211,10 +220,12 @@ TEST(Raster, SharedEdgeWatertight) {
   img.w = RDR_TILE_W;
   img.h = RDR_TILE_H;
   oracle_image_clear(&img, 0, 0, 0);
-  oracle_fill_tri(&img, a.x / 16.0F, a.y / 16.0F, b.x / 16.0F, b.y / 16.0F,
-                  c.x / 16.0F, c.y / 16.0F, fr, fg, fb);
-  oracle_fill_tri(&img, a.x / 16.0F, a.y / 16.0F, c.x / 16.0F, c.y / 16.0F,
-                  d.x / 16.0F, d.y / 16.0F, fr, fg, fb);
+  oracle_fill_tri(&img, (float)a.x / 16.0F, (float)a.y / 16.0F,
+                  (float)b.x / 16.0F, (float)b.y / 16.0F, (float)c.x / 16.0F,
+                  (float)c.y / 16.0F, fr, fg, fb);
+  oracle_fill_tri(&img, (float)a.x / 16.0F, (float)a.y / 16.0F,
+                  (float)c.x / 16.0F, (float)c.y / 16.0F, (float)d.x / 16.0F,
+                  (float)d.y / 16.0F, fr, fg, fb);
   int ref_covered = 0;
   int mismatch = 0;
   for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
@@ -336,10 +347,10 @@ TEST(Raster, ClipsToTileBounds) {
 // overlapping coplanar-in-screen tris with different inv_w.
 TEST(Raster, ZTestNearOccludesFar) {
   // Same screen triangle, two depths. inv_w big = near.
-  int32_t const near_iw = 0x20000;                  // 2.0
-  int32_t const far_iw = 0x08000;                   // 0.5
-  uint16_t const c_near = (uint16_t)((31u << 11));  // red
-  uint16_t const c_far = (uint16_t)31u;             // blue
+  int32_t const near_iw = 0x20000;                // 2.0
+  int32_t const far_iw = 0x08000;                 // 0.5
+  uint16_t const c_near = (uint16_t)(31U << 11);  // red
+  uint16_t const c_far = (uint16_t)31U;           // blue
 
   static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
   static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
@@ -419,7 +430,9 @@ TEST(Raster, NonZeroTileMapsToScreenRect) {
   raster_tile(tile, &o.bin, o.pool, fb, zbuf);
 
   // Oracle reference at the same absolute screen coords (full-screen image).
-  uint8_t fr, fg, fb8;
+  uint8_t fr;
+  uint8_t fg;
+  uint8_t fb8;
   flat_rgb(&fr, &fg, &fb8);
   uint8_t* ref = (uint8_t*)malloc((size_t)RDR_SCREEN_W * RDR_SCREEN_H * 3);
   OImage img;
@@ -427,15 +440,18 @@ TEST(Raster, NonZeroTileMapsToScreenRect) {
   img.w = RDR_SCREEN_W;
   img.h = RDR_SCREEN_H;
   oracle_image_clear(&img, 0, 0, 0);
-  oracle_fill_tri(&img, o.pool[0].x / 16.0F, o.pool[0].y / 16.0F,
-                  o.pool[1].x / 16.0F, o.pool[1].y / 16.0F, o.pool[2].x / 16.0F,
-                  o.pool[2].y / 16.0F, fr, fg, fb8);
+  oracle_fill_tri(&img, (float)o.pool[0].x / 16.0F, (float)o.pool[0].y / 16.0F,
+                  (float)o.pool[1].x / 16.0F, (float)o.pool[1].y / 16.0F,
+                  (float)o.pool[2].x / 16.0F, (float)o.pool[2].y / 16.0F, fr,
+                  fg, fb8);
 
   int diff = 0;
   for (int y = 0; y < RDR_SCREEN_H; ++y) {
     for (int x = 0; x < RDR_SCREEN_W; ++x) {
       uint16_t const px = fb[(y * RDR_SCREEN_W) + x];
-      uint8_t r, g, b;
+      uint8_t r;
+      uint8_t g;
+      uint8_t b;
       oracle_unpack565(px, &r, &g, &b);
       size_t const o2 = (((size_t)y * RDR_SCREEN_W) + x) * 3;
       if (r != ref[o2] || g != ref[o2 + 1] || b != ref[o2 + 2]) {
@@ -463,7 +479,7 @@ TEST(Raster, ClearsZScratchOnEntry) {
           mk_vtx(20, 48, 0, 0, 0x10000));
   raster_tile(0, &o.bin, o.pool, fb, zbuf);
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
-  EXPECT_EQ(px, kFlat565) << "Z scratch not cleared: stale depth blocked fill";
+  EXPECT_EQ(px, K_FLAT565) << "Z scratch not cleared: stale depth blocked fill";
 }
 
 // Committed golden-image regression anchor: a deterministic 2-triangle,

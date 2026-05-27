@@ -11,7 +11,7 @@
 // log2 of a power-of-2 dimension (mask = dim-1). dim must be >= 1.
 static int log2_pow2(uint16_t dim) {
   int bits = 0;
-  while ((1u << bits) < dim) {
+  while ((1U << bits) < dim) {
     ++bits;
   }
   return bits;

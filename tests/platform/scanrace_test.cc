@@ -46,7 +46,7 @@ TEST(ScanRace, DmaNeverCrossesWatermark) {
 
   /* DMA asks for the whole frame; runway must cap it at the watermark. */
   EXPECT_EQ(scanrace_runway(&r), 60);
-  uint16_t sent = scanrace_advance_dma(&r, 240);
+  uint16_t const sent = scanrace_advance_dma(&r, 240);
   EXPECT_EQ(sent, 60); /* clamped to watermark — never crossed */
   EXPECT_EQ(r.dma_rows_sent, 60);
 

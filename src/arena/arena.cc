@@ -19,7 +19,7 @@ void arena_init(struct Arena* a, void* buf, uint32_t cap) {
 }
 
 void* arena_alloc(struct Arena* a, uint32_t n) {
-  uint32_t base = arena_align_up(a->used);
+  uint32_t const base = arena_align_up(a->used);
   // Overflow-safe bound check: never let base + n wrap past cap.
   if (base > a->cap || n > a->cap - base) {
     return (void*)0;

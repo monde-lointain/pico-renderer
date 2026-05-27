@@ -69,18 +69,18 @@ struct TriSetup {
 // RDR_EDEGENERATE if the triangle area is <= epsilon (rejected at setup).
 static int tri_setup(struct TriSetup* t, const struct TVtx* a,
                      const struct TVtx* b, const struct TVtx* c) {
-  fx12_4 x0 = a->x;
-  fx12_4 y0 = a->y;
+  fx12_4 const x0 = a->x;
+  fx12_4 const y0 = a->y;
   fx12_4 x1 = b->x;
   fx12_4 y1 = b->y;
   fx12_4 x2 = c->x;
   fx12_4 y2 = c->y;
-  int32_t iw0 = (int32_t)a->inv_w;
+  int32_t const iw0 = (int32_t)a->inv_w;
   int32_t iw1 = (int32_t)b->inv_w;
   int32_t iw2 = (int32_t)c->inv_w;
 
   int32_t area2 = edge_eval(x0, y0, x1, y1, x2, y2);
-  int32_t mag = (area2 < 0) ? -area2 : area2;
+  int32_t const mag = (area2 < 0) ? -area2 : area2;
   if (mag <= RASTER_AREA_EPS) {
     return RDR_EDEGENERATE;
   }

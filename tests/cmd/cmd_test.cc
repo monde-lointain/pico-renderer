@@ -67,8 +67,8 @@ TEST(CmdRecord, ResetZeroesCountAndDropped) {
   cb.count = 99;
   cb.dropped = 7;
   cb_reset(&cb);
-  EXPECT_EQ(cb.count, 0u);
-  EXPECT_EQ(cb.dropped, 0u);
+  EXPECT_EQ(cb.count, 0U);
+  EXPECT_EQ(cb.dropped, 0U);
 }
 
 TEST(CmdRecord, PushAppendsAndCopiesPayload) {
@@ -77,11 +77,11 @@ TEST(CmdRecord, PushAppendsAndCopiesPayload) {
   cb.buf = storage;
   cb.cap = 4;
   cb_reset(&cb);
-  struct Command c = mk_clear(0xBEEF);
+  struct Command const c = mk_clear(0xBEEF);
   EXPECT_EQ(cb_push(&cb, &c), RDR_OK);
-  EXPECT_EQ(cb.count, 1u);
+  EXPECT_EQ(cb.count, 1U);
   EXPECT_EQ(cb.buf[0].op, (uint8_t)CMD_CLEAR);
-  EXPECT_EQ(cb.buf[0].u.clear.color, 0xBEEFu);
+  EXPECT_EQ(cb.buf[0].u.clear.color, 0xBEEFU);
 }
 
 TEST(CmdRecord, PushIsByValueCopyNotAlias) {
@@ -93,7 +93,7 @@ TEST(CmdRecord, PushIsByValueCopyNotAlias) {
   struct Command c = mk_clear(0x1111);
   cb_push(&cb, &c);
   c.u.clear.color = 0x2222;                     // mutate source after push
-  EXPECT_EQ(cb.buf[0].u.clear.color, 0x1111u);  // buffer holds the snapshot
+  EXPECT_EQ(cb.buf[0].u.clear.color, 0x1111U);  // buffer holds the snapshot
 }
 
 TEST(CmdRecord, PushFillsToExactCapacity) {
@@ -102,12 +102,12 @@ TEST(CmdRecord, PushFillsToExactCapacity) {
   cb.buf = storage;
   cb.cap = 3;
   cb_reset(&cb);
-  struct Command c = mk_op(CMD_END);
+  struct Command const c = mk_op(CMD_END);
   EXPECT_EQ(cb_push(&cb, &c), RDR_OK);
   EXPECT_EQ(cb_push(&cb, &c), RDR_OK);
   EXPECT_EQ(cb_push(&cb, &c), RDR_OK);
-  EXPECT_EQ(cb.count, 3u);
-  EXPECT_EQ(cb.dropped, 0u);
+  EXPECT_EQ(cb.count, 3U);
+  EXPECT_EQ(cb.dropped, 0U);
 }
 
 TEST(CmdRecord, OverflowDropsWithCountNeverCorrupts) {
@@ -116,17 +116,17 @@ TEST(CmdRecord, OverflowDropsWithCountNeverCorrupts) {
   cb.buf = storage;
   cb.cap = 2;
   cb_reset(&cb);
-  struct Command keep0 = mk_clear(0xAAAA);
-  struct Command keep1 = mk_clear(0xBBBB);
-  struct Command drop = mk_clear(0xCCCC);
+  struct Command const keep0 = mk_clear(0xAAAA);
+  struct Command const keep1 = mk_clear(0xBBBB);
+  struct Command const drop = mk_clear(0xCCCC);
   EXPECT_EQ(cb_push(&cb, &keep0), RDR_OK);
   EXPECT_EQ(cb_push(&cb, &keep1), RDR_OK);
   EXPECT_EQ(cb_push(&cb, &drop), RDR_EOVERFLOW);  // dropped, surfaced
   EXPECT_EQ(cb_push(&cb, &drop), RDR_EOVERFLOW);  // and counted
-  EXPECT_EQ(cb.count, 2u);                        // count never exceeds cap
-  EXPECT_EQ(cb.dropped, 2u);                      // both drops counted
-  EXPECT_EQ(cb.buf[0].u.clear.color, 0xAAAAu);    // earlier entries intact
-  EXPECT_EQ(cb.buf[1].u.clear.color, 0xBBBBu);
+  EXPECT_EQ(cb.count, 2U);                        // count never exceeds cap
+  EXPECT_EQ(cb.dropped, 2U);                      // both drops counted
+  EXPECT_EQ(cb.buf[0].u.clear.color, 0xAAAAU);    // earlier entries intact
+  EXPECT_EQ(cb.buf[1].u.clear.color, 0xBBBBU);
 }
 
 // ============================================================================
@@ -136,7 +136,7 @@ TEST(CmdRecord, OverflowDropsWithCountNeverCorrupts) {
 TEST(CmdWalk, NullArgsRejected) {
   struct VisitLog v;
   memset(&v, 0, sizeof v);
-  struct Command end = mk_op(CMD_END);
+  struct Command const end = mk_op(CMD_END);
   EXPECT_EQ(cb_walk(0, log_visit, &v), RDR_EINVAL);
   EXPECT_EQ(cb_walk(&end, 0, &v), RDR_EINVAL);
 }

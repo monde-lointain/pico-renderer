@@ -83,10 +83,18 @@ uint16_t shade_pixel(const struct RenderState* st, uint16_t texel,
     id = st->combiner.d;
   }
 
-  uint8_t ar, ag, ab;
-  uint8_t br, bg, bb;
-  uint8_t cr, cg, cb;
-  uint8_t dr, dg, db;
+  uint8_t ar;
+  uint8_t ag;
+  uint8_t ab;
+  uint8_t br;
+  uint8_t bg;
+  uint8_t bb;
+  uint8_t cr;
+  uint8_t cg;
+  uint8_t cb;
+  uint8_t dr;
+  uint8_t dg;
+  uint8_t db;
   select_input(ia, st, t, s, &ar, &ag, &ab);
   select_input(ib, st, t, s, &br, &bg, &bb);
   select_input(ic, st, t, s, &cr, &cg, &cb);

@@ -91,7 +91,7 @@ TEST(Geom, MtxStackOverflowUnderflow) {
 TEST(Geom, ViewportMatchesOracle) {
   struct Viewport vp;
   vp_from_cmd(&vp, 0, 0, RDR_SCREEN_W, RDR_SCREEN_H);
-  struct OViewport ovp = {0, 0, RDR_SCREEN_W, RDR_SCREEN_H};
+  struct OViewport const ovp = {0, 0, RDR_SCREEN_W, RDR_SCREEN_H};
   EXPECT_EQ(vp.x, ovp.x);
   EXPECT_EQ(vp.w, ovp.w);
   EXPECT_EQ(vp.h, ovp.h);
@@ -104,20 +104,20 @@ TEST(Geom, TransformProjectMatchesOracle) {
   make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
   struct Viewport vp;
   vp_from_cmd(&vp, 0, 0, RDR_SCREEN_W, RDR_SCREEN_H);
-  struct OViewport ovp = {0, 0, RDR_SCREEN_W, RDR_SCREEN_H};
+  struct OViewport const ovp = {0, 0, RDR_SCREEN_W, RDR_SCREEN_H};
 
   // A few model points well in front of the camera (z>0, within Q16.16 range).
-  int16_t pts[][3] = {{2, 3, 10}, {-4, 1, 8}, {0, -5, 20}, {6, 6, 12}};
+  int16_t const pts[][3] = {{2, 3, 10}, {-4, 1, 8}, {0, -5, 20}, {6, 6, 12}};
   for (int i = 0; i < 4; ++i) {
-    struct Vtx v = mk_vtx(pts[i][0], pts[i][1], pts[i][2]);
+    struct Vtx const v = mk_vtx(pts[i][0], pts[i][1], pts[i][2]);
     struct Vec4fx clip;
     geom_transform_clip(&clip, &proj, &v);
     struct TVtx tv;
     ASSERT_EQ(geom_project(&tv, &clip, &vp, 0, 0, 0), RDR_OK);
 
     // Oracle reference.
-    struct OVec4 om = {(float)pts[i][0], (float)pts[i][1], (float)pts[i][2],
-                       1.0F};
+    struct OVec4 const om = {(float)pts[i][0], (float)pts[i][1],
+                             (float)pts[i][2], 1.0F};
     struct OTVtx ot;
     oracle_xform_vertex(&ot, &oproj, &om, 0.0F, 0.0F, &ovp);
     ASSERT_EQ(ot.clipped, 0);
@@ -168,11 +168,15 @@ TEST(Geom, BackfaceCullPinnedToOracle) {
   vp_from_cmd(&vp, 0, 0, RDR_SCREEN_W, RDR_SCREEN_H);
 
   // CCW in NDC/clip space (z forward). Verts ordered CCW about +z.
-  struct Vtx a = mk_vtx(-3, -3, 10);
-  struct Vtx b = mk_vtx(3, -3, 10);
-  struct Vtx c = mk_vtx(0, 3, 10);
-  struct TVtx ta, tb, tc;
-  struct Vec4fx ca, cb, cc;
+  struct Vtx const a = mk_vtx(-3, -3, 10);
+  struct Vtx const b = mk_vtx(3, -3, 10);
+  struct Vtx const c = mk_vtx(0, 3, 10);
+  struct TVtx ta;
+  struct TVtx tb;
+  struct TVtx tc;
+  struct Vec4fx ca;
+  struct Vec4fx cb;
+  struct Vec4fx cc;
   geom_transform_clip(&ca, &proj, &a);
   geom_transform_clip(&cb, &proj, &b);
   geom_transform_clip(&cc, &proj, &c);
@@ -187,9 +191,12 @@ TEST(Geom, BackfaceCullPinnedToOracle) {
   // function (matches oracle_fill_tri's `area`) must share sign with our
   // signed-area test for the SAME screen positions. This guarantees the cull
   // rule below is anchored to the oracle, not an internal assumption.
-  float const ax = (float)ta.x / 16.0F, ay = (float)ta.y / 16.0F;
-  float const bx = (float)tb.x / 16.0F, by = (float)tb.y / 16.0F;
-  float const cx = (float)tc.x / 16.0F, cy = (float)tc.y / 16.0F;
+  float const ax = (float)ta.x / 16.0F;
+  float const ay = (float)ta.y / 16.0F;
+  float const bx = (float)tb.x / 16.0F;
+  float const by = (float)tb.y / 16.0F;
+  float const cx = (float)tc.x / 16.0F;
+  float const cy = (float)tc.y / 16.0F;
   float const oarea = ((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax));
   ASSERT_EQ((oarea < 0.0F), (area2 < 0));
 
@@ -223,7 +230,9 @@ TEST(Geom, BinTriHitsOverlappedTiles) {
   geom_out_init(&o, pool, 16, refs, 8);
 
   // Triangle covering the whole screen -> hits every tile.
-  struct TVtx v0, v1, v2;
+  struct TVtx v0;
+  struct TVtx v1;
+  struct TVtx v2;
   memset(&v0, 0, sizeof v0);
   memset(&v1, 0, sizeof v1);
   memset(&v2, 0, sizeof v2);
@@ -233,15 +242,15 @@ TEST(Geom, BinTriHitsOverlappedTiles) {
   v1.y = (fx12_4)(0 * 16);
   v2.x = (fx12_4)(0 * 16);
   v2.y = (fx12_4)((RDR_SCREEN_H - 1) * 16);
-  uint32_t i0 = geom_emit_tvert(&o, &v0);
-  uint32_t i1 = geom_emit_tvert(&o, &v1);
-  uint32_t i2 = geom_emit_tvert(&o, &v2);
+  uint32_t const i0 = geom_emit_tvert(&o, &v0);
+  uint32_t const i1 = geom_emit_tvert(&o, &v1);
+  uint32_t const i2 = geom_emit_tvert(&o, &v2);
   ASSERT_NE(i0, UINT32_MAX);
   ASSERT_EQ(geom_bin_tri(&o, (uint16_t)i0, (uint16_t)i1, (uint16_t)i2, 0),
             RDR_OK);
   // Tile (0,0) must be hit (the triangle covers the top-left corner).
-  EXPECT_GE(o.tiles[0].count, 1u);
-  EXPECT_EQ(o.tris_total, 1u);
+  EXPECT_GE(o.tiles[0].count, 1U);
+  EXPECT_EQ(o.tris_total, 1U);
 }
 
 TEST(Geom, BinOverflowDropsAndCounts) {
@@ -250,24 +259,26 @@ TEST(Geom, BinOverflowDropsAndCounts) {
   struct GeomOut o;
   geom_out_init(&o, pool, 8, refs, 1);
 
-  struct TVtx v0, v1, v2;
+  struct TVtx v0;
+  struct TVtx v1;
+  struct TVtx v2;
   memset(&v0, 0, sizeof v0);
   memset(&v1, 0, sizeof v1);
   memset(&v2, 0, sizeof v2);
-  v0.x = (fx12_4)(0);
-  v0.y = (fx12_4)(0);
+  v0.x = (fx12_4)0;
+  v0.y = (fx12_4)0;
   v1.x = (fx12_4)(RDR_TILE_W / 2 * 16);
-  v1.y = (fx12_4)(0);
-  v2.x = (fx12_4)(0);
+  v1.y = (fx12_4)0;
+  v2.x = (fx12_4)0;
   v2.y = (fx12_4)(RDR_TILE_H / 2 * 16);
-  uint32_t i0 = geom_emit_tvert(&o, &v0);
-  uint32_t i1 = geom_emit_tvert(&o, &v1);
-  uint32_t i2 = geom_emit_tvert(&o, &v2);
+  uint32_t const i0 = geom_emit_tvert(&o, &v0);
+  uint32_t const i1 = geom_emit_tvert(&o, &v1);
+  uint32_t const i2 = geom_emit_tvert(&o, &v2);
   // First into tile 0 ok; second overflows that tile's cap-1 segment.
   EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_OK);
   EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_EOVERFLOW);
-  EXPECT_EQ(o.tiles[0].count, 1u);
-  EXPECT_GE(o.tiles[0].dropped, 1u);
+  EXPECT_EQ(o.tiles[0].count, 1U);
+  EXPECT_GE(o.tiles[0].dropped, 1U);
 }
 
 // ---- lighting --------------------------------------------------------------
@@ -282,7 +293,9 @@ TEST(Geom, PrelitPassThrough) {
   struct LightState ls;
   memset(&ls, 0, sizeof ls);
   uint16_t const packed = geom_shade_vertex(&v, &ls, 0);
-  uint8_t r, g, b;
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
   oracle_unpack565(packed, &r, &g, &b);
   EXPECT_GT(r, 200);
   EXPECT_LT(g, 40);
@@ -311,9 +324,14 @@ TEST(Geom, DirectionalLightShading) {
   memset(&away, 0, sizeof away);
   away.c.nrm.n[2] = -127;  // normal -z -> away
 
-  uint16_t pf = geom_shade_vertex(&facing, &ls, 1);
-  uint16_t pa = geom_shade_vertex(&away, &ls, 1);
-  uint8_t rf, gf, bf, ra, ga, ba;
+  uint16_t const pf = geom_shade_vertex(&facing, &ls, 1);
+  uint16_t const pa = geom_shade_vertex(&away, &ls, 1);
+  uint8_t rf;
+  uint8_t gf;
+  uint8_t bf;
+  uint8_t ra;
+  uint8_t ga;
+  uint8_t ba;
   oracle_unpack565(pf, &rf, &gf, &bf);
   oracle_unpack565(pa, &ra, &ga, &ba);
   EXPECT_GT((int)gf, (int)ga);  // facing brighter
