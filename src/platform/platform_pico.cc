@@ -324,7 +324,7 @@ void plat_present(const struct Framebuffer *fb) {
      */
     scanrace_set_watermark(&race, s_committed_rows);
 
-    uint16_t runway = scanrace_runway(&race);
+    const uint16_t runway = scanrace_runway(&race);
     if (runway == 0) {
       /* Caught up to the watermark but frame not done → stall (no tear). */
       tight_loop_contents();
