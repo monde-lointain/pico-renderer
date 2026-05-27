@@ -1,0 +1,7 @@
+add_library(Renderer_clip)
+add_library(Renderer::Clip ALIAS Renderer_clip)
+target_sources(Renderer_clip PRIVATE clip.cc)
+target_include_directories(Renderer_clip PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_clip PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_clip)
+pico_tidy_enable(Renderer_clip)

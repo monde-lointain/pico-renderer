@@ -6,6 +6,22 @@ add_subdirectory(gfx)
 add_subdirectory(app)
 add_subdirectory(platform)
 
+# Renderer modules (Stream A pre-registration; feature branches add only their own
+# sources behind these already-registered subdirs — never edit this file again).
+add_subdirectory(rdr)
+add_subdirectory(fixed)
+add_subdirectory(arena)
+add_subdirectory(cmd)
+add_subdirectory(geom)
+add_subdirectory(clip)
+add_subdirectory(raster)
+add_subdirectory(aa)
+add_subdirectory(tex)
+add_subdirectory(shade)
+add_subdirectory(blend)
+add_subdirectory(sched)
+add_subdirectory(demo)
+
 # Final executable, one entry point per platform.
 if(PLATFORM STREQUAL "picosystem")
   add_executable(renderer main_pico.cc)

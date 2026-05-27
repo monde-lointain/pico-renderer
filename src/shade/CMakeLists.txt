@@ -1,0 +1,7 @@
+add_library(Renderer_shade)
+add_library(Renderer::Shade ALIAS Renderer_shade)
+target_sources(Renderer_shade PRIVATE shade.cc)
+target_include_directories(Renderer_shade PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_shade PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_shade)
+pico_tidy_enable(Renderer_shade)

@@ -1,0 +1,7 @@
+add_library(Renderer_arena)
+add_library(Renderer::Arena ALIAS Renderer_arena)
+target_sources(Renderer_arena PRIVATE arena.cc)
+target_include_directories(Renderer_arena PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_arena PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_arena)
+pico_tidy_enable(Renderer_arena)

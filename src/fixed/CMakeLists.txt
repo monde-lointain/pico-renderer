@@ -1,0 +1,7 @@
+add_library(Renderer_fixed)
+add_library(Renderer::Fixed ALIAS Renderer_fixed)
+target_sources(Renderer_fixed PRIVATE fixed.cc)
+target_include_directories(Renderer_fixed PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_fixed PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_fixed)
+pico_tidy_enable(Renderer_fixed)

@@ -1,0 +1,7 @@
+add_library(Renderer_raster)
+add_library(Renderer::Raster ALIAS Renderer_raster)
+target_sources(Renderer_raster PRIVATE raster.cc)
+target_include_directories(Renderer_raster PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_raster PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_raster)
+pico_tidy_enable(Renderer_raster)

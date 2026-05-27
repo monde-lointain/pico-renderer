@@ -1,0 +1,7 @@
+add_library(Renderer_cmd)
+add_library(Renderer::Cmd ALIAS Renderer_cmd)
+target_sources(Renderer_cmd PRIVATE cmd.cc)
+target_include_directories(Renderer_cmd PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_cmd PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_cmd)
+pico_tidy_enable(Renderer_cmd)
