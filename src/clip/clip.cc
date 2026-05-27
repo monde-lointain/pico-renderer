@@ -1,4 +1,5 @@
-// clip.cc — guard-band Sutherland-Hodgman polygon clip (B.1-beta). Orthodox C++.
+// clip.cc — guard-band Sutherland-Hodgman polygon clip (B.1-beta). Orthodox
+// C++.
 //
 // Integer-only so host and device are bit-identical (no FPU on RP2040). The
 // per-edge intersection parameter t is formed as a 64-bit ratio of signed
