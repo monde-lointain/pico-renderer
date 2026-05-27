@@ -141,6 +141,20 @@ rate** (streams needing re-dispatch).
 | W1-06 | repo-global `make format-patch` red on pre-existing skeleton/contract files, failing a lane that touched none | The frozen contract headers (`types.h`/`config.h`) were hand-formatted, not clang-format-clean | Low | reformatted the whole tree clean (frozen contract reflow OK'd — nothing implemented against it yet) | Lead | **verified** — repo-global `make format-patch` exit 0 |
 | **W1-07** | `clang-tidy --fix` corrupted vendored `imgui.h`/SDL backends AND renamed ImGui/SDL **API call-sites** in `platform_sdl.cc`/`main_sdl.cc` (`ImGui::CreateContext`→`create_context`) | `--fix` writes fixes to **every** file a fix touches, ignoring `HeaderFilterRegex` (which only filters *display*); identifier-naming renames a decl + all its uses, incl. third-party | **High (broke build)** | recovery: restored vendored headers from FetchContent git, reverted glue files; rule logged: **never run `--fix` broadly** — restrict to files that include no third-party headers, or use `-export-fixes` + filter to our tree | Lead | mitigated (recovered; rule documented here) |
 | **W1-08** | tidy gave **false-clean reviews** — b0-fixed's review said "clang-tidy: no findings" but `fixed.cc` was never linted | `StaticAnalysis.cmake` scoped tidy to template files only (`game\|gfx\|app`); `.clang-tidy` `HeaderFilterRegex` excluded the renderer modules + tests | **High (hollow gate)** | expanded scope to all `src/`+`tests/` (excl. generated/canary/inspector/pico-only); fixed unanchored `HeaderFilterRegex` matching `*-src/` via `.deps-cache/` exclude; **wired `make tidy` into `ci_main.sh`**; cleared ~529 findings | Lead/T5 | **verified** — `make tidy` exit 0; in `ci_main.sh` |
+| **W1-09** | `raster.h` scaffold signature `raster_tile(int, const TileBin*, const uint16_t* fb, const uint16_t* zbuf)` is uncallable as specified: fb/zbuf are `const` (raster must WRITE color+depth) and there is **no TVtx pool pointer** (the bin only carries indices into the pool) | Stream-A scaffold under-specified the back-end signature; `raster.h` is in the T2 lane so this was self-resolvable (no frozen `types.h` change needed) | Med | resolved in-lane: `raster_tile(int, const TileBin*, const TVtx* pool, uint16_t* fb, uint16_t* zbuf)` (contract-first commit). Surfacing so `sched`/`rdr` callers + δ/AA expect the pool arg + writable buffers | T2 | **shipped** (in-lane) — flag to Lead for caller alignment |
+| W1-10 | uint16 per-tile Z encoding is a raster-local choice, not pinned by the contract | `types.h`/`config.h` fix the scratch *size* (60×60×u16) but not the inv_w→u16 mapping; δ/blend translucent pass also reads inv_w for sort + z-test-no-write | Low | raster uses `depth_pack = clamp(inv_w_q16 >> 4, 0..0xFFFF)`, monotonic-in-closeness, clear=0=farthest. If δ/blend need to compare against the *same* encoding, pin it in a shared note | T2/T3 | open (batch) |
+
+## Stream B.1-γ — `raster` flat fill + per-tile Z (subagent-in-worktree, 2026-05-27)
+
+Landed half-space edge-function rasterizer: Q12.4 edge eval, pixel-center sampling, top-left
+fill rule (matched to oracle convention exactly), winding-normalize to +area, degenerate/sliver
+reject (|2*area| ≤ 1px²), perspective-correct inv_w interp → uint16 w-buffer test+write, per-tile
+Z clear. 14 host tests green (oracle-parity, watertight shared edge, reject, tile-clip, Z-occlude,
+clear-on-entry) + committed golden anchor. Owned-files clang-format + Orthodoxy-enforced build clean.
+Lane-scoped to T2 (`verify_stream_branch.sh` OK). Frictions → W1-09 (signature gap, shipped in-lane)
+and W1-10 (depth encoding unpinned, batch). Reused B.0's lane-scoped `clang-format --dry-run --Werror`
+on owned files (W1-06 workaround) — confirms that gap still bites and the per-glob format gate is worth
+shipping.
 
 ## Cycle KPIs — first dispatch (B.0 `fixed` + B.1-ε harness), 2026-05-27
 - **Review-catch rate: 1 caught / 0 escaped.** The gate's reviewer (UBSan) caught a real `fx_to_int(INT32_MIN)` UB blocker the author's 17 tests missed → fixed → 23 tests, ASan/UBSan clean.
