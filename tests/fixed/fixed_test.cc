@@ -30,6 +30,28 @@ TEST(FixedConv, ToIntTruncatesTowardZero) {
   EXPECT_EQ(fx_to_int(fx_from_double(-2.75)), -2);  // toward zero, not floor
 }
 
+// Edge: fx_to_int(INT32_MIN) must not negate INT32_MIN (would be UB/overflow).
+// INT32_MIN = -32768.0 exactly in Q16.16, so the truncated int is -32768.
+TEST(FixedConv, ToIntIntMinIsDefined) {
+  EXPECT_EQ(fx_to_int(INT32_MIN), -32768);
+  EXPECT_EQ(fx_to_int(INT32_MAX), 32767);  // 32767.999.. -> trunc 32767
+}
+
+// Edge: fx_from_int at the |n| < 2^15 domain boundary. Inside the domain the
+// result is exact; just below the negative edge it stays exact too.
+TEST(FixedConv, FromIntDomainBoundary) {
+  EXPECT_EQ(fx_from_int(32767), 32767 * 65536);
+  EXPECT_EQ(fx_from_int(-32768), INT32_MIN);  // -32768 * 65536 == INT32_MIN
+}
+
+// Out-of-domain fx_from_int must be well-defined (unsigned wrap), NOT UB. We
+// don't assert a meaningful value -- only that it returns a deterministic
+// two's-complement wrap (i.e. matches the documented unsigned-shift semantics).
+TEST(FixedConv, FromIntOutOfDomainWrapsDeterministically) {
+  EXPECT_EQ(fx_from_int(32768), (fx16_16)((uint32_t)32768 << 16));
+  EXPECT_EQ(fx_from_int(-40000), (fx16_16)((uint32_t)(-40000) << 16));
+}
+
 // ---- fx_mul (rounded Q16.16) -----------------------------------------------
 TEST(FixedMul, ByEye) {
   // 2.0 * 3.5 = 7.0
@@ -103,6 +125,29 @@ TEST(FixedDiv, ByZeroSaturates) {
   EXPECT_EQ(fx_div(fx_from_double(5.0), 0), INT32_MAX);
   EXPECT_EQ(fx_div(fx_from_double(-5.0), 0), INT32_MIN);
   EXPECT_EQ(fx_div(0, 0), 0);
+}
+
+// Overflow domain: fx_mul precondition is |a*b| < 2^15 (real units). A product
+// that exceeds the Q16.16 range wraps (two's-complement, well-defined) rather
+// than producing UB or silent garbage from an undefined shift. We pin the
+// deterministic wrapped value so the documented behavior is tested, not silent.
+TEST(FixedMul, OverflowDomainWrapsDeterministically) {
+  // 200.0 * 200.0 = 40000.0, which does not fit Q16.16 (max ~ +32767.99998).
+  fx16_16 big = fx_from_int(200);
+  int64_t p = (int64_t)big * (int64_t)big;  // exact 64-bit product
+  fx16_16 want = (fx16_16)(((uint64_t)p + (1 << 15)) >> 16);  // round-half-up
+  EXPECT_EQ(fx_mul(big, big), want);
+}
+
+// Overflow domain: fx_div where the 64-bit numerator/quotient exceeds int32.
+// (int64)a<<16 / b can exceed INT32 range; the (fx_invw) cast wraps. Pin the
+// deterministic truncated-then-cast value so the behavior is documented/tested.
+TEST(FixedDiv, OverflowDomainWrapsDeterministically) {
+  fx16_16 a = fx_from_int(20000);  // large dividend
+  fx16_16 b = fx_from_double(0.001);
+  int64_t num = (int64_t)a << 16;
+  fx_invw want = (fx_invw)(num / b);  // truncate toward zero, then cast/wrap
+  EXPECT_EQ(fx_div(a, b), want);
 }
 
 // ---- mat4 ------------------------------------------------------------------
@@ -186,6 +231,23 @@ TEST(Transform, MulVec4MatchesOracle) {
     EXPECT_LE(llabs((long long)g[row] - (long long)fx_from_double(oracle[row])),
               4)
         << "row=" << row;
+}
+
+// out MAY alias v: passing the same buffer for out and v must give the same
+// result as a separate output (the input is buffered before any store).
+TEST(Transform, MulVec4AliasSafe) {
+  struct Mat4fx m;
+  for (int i = 0; i < 16; ++i) m.m[i] = fx_from_double((i % 6) * 0.25 - 0.5);
+  struct Vec4fx in = {fx_from_double(1.5), fx_from_double(-2.0),
+                      fx_from_double(0.75), fx_from_double(1.0)};
+  struct Vec4fx sep;
+  mat4_mul_vec4(&sep, &m, &in);
+  struct Vec4fx aliased = in;
+  mat4_mul_vec4(&aliased, &m, &aliased);  // out == v
+  EXPECT_EQ(aliased.x, sep.x);
+  EXPECT_EQ(aliased.y, sep.y);
+  EXPECT_EQ(aliased.z, sep.z);
+  EXPECT_EQ(aliased.w, sep.w);
 }
 
 // ---- vec3 dot / normalize --------------------------------------------------

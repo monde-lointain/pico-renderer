@@ -8,13 +8,14 @@
 // a single MULS. The host build runs the SAME integer code path, so host and
 // device are bit-identical.
 //
-// Divide: on device, the Pico SDK's AEABI support maps C's '/' and '%' onto
-// the SIO hardware integer divider (~8 cyc, per-core; truncates toward zero --
-// see RP2040 datasheet 2.3.1.5). On host, C's '/' truncates identically. So
-// expressing the divide as a plain integer '/' uses the SIO divider on device
-// WITHOUT an explicit hardware/divider.h dependency, and is bit-identical to
-// the host path. (An explicit async hw_divider_* path only helps overlapped
-// divides; this single divide does not need it.)
+// Divide: fx_div widens the dividend to 64-bit ((int64)a << 16), so C's '/'
+// lowers to __aeabi_ldivmod (a 64/32 divide), NOT the 32-bit single-op path.
+// The Pico SDK backs __aeabi_ldivmod with the SIO hardware divider only when
+// pico_divider is linked (this lib pulls no such dep; it links via the default
+// runtime). Regardless of backing, the divide truncates toward zero, and host
+// C '/' truncates identically -> host/device numerics are bit-identical. (An
+// explicit async hw_divider_* path only helps overlapped divides; not needed
+// here, and would add a hardware/divider.h dependency.)
 #include "fixed/fixed.h"
 
 #include <stdint.h>
@@ -77,12 +78,17 @@ fx_invw fx_div(fx16_16 a, fx16_16 b) {
   return (fx_invw)(num / b);
 }
 
-fx16_16 fx_from_int(int32_t n) { return (fx16_16)(n << FX_FRAC_BITS); }
+fx16_16 fx_from_int(int32_t n) {
+  // Shift through unsigned: a signed left-shift that overflows int32 is UB,
+  // and |n| >= 2^15 overflows here. The unsigned shift wraps (well-defined);
+  // the precondition |n| < 2^15 still applies for a meaningful result.
+  return (fx16_16)((uint32_t)n << FX_FRAC_BITS);
+}
 
 int32_t fx_to_int(fx16_16 a) {
-  // Truncate toward zero (not arithmetic floor).
-  if (a >= 0) return a >> FX_FRAC_BITS;
-  return -((-a) >> FX_FRAC_BITS);
+  // Truncate toward zero (not arithmetic floor). Compute via a 64-bit divide
+  // so INT32_MIN is handled without negating it (negating INT32_MIN is UB).
+  return (int32_t)((int64_t)a / FX_ONE);
 }
 
 void mat4_identity(struct Mat4fx* m) {
