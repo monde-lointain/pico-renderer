@@ -24,6 +24,8 @@ Created/modified by this plan (paths relative to repo root):
 - `.claude/hooks/{ownership_guard.sh,destructive_guard.sh,format_check.sh,task_schema.sh,task_complete_gate.sh,idle_gate.sh}` — hook scripts
 - `tools/verify_toolchain.sh` — S0 hard-verify (tools + Orthodoxy-version + CDC-tty rule); `tools/rename_project.sh` — tested template rename; `tools/ci_main.sh` — CI-on-main
 - `WORKFLOW.md` — workflow retrospective + improvement log (collated by `wave-retro`)
+- `docs/REFERENCES.md` — primary-source references (SDKs/datasheets/manual/emulators) every
+  implementation subagent must read; embedded in all agent defs + every dispatch prompt
 
 **Project (from template, renamed `picosystem_template`→`renderer`, `PICOSYSTEM_TEMPLATE`→`RENDERER`):**
 - Top `CMakeLists.txt`, `CMakePresets.json`, `Makefile`, `cmake/*`, `.clang-format`, `.clang-tidy`, `.orthodoxy.yml`, `.gitignore`, `.github/`
@@ -691,6 +693,12 @@ Then: review the freeze PR (renderer-reviewer), merge to `main`, run `tools/ci_m
   `contract-first` then `orthodox-tdd-cycle`; for math-bearing modules `fixed-point` + `golden-image-test`;
   run `make test`/`ctest -L <mod>` + `make format-patch` green before returning; commit on its branch;
   and **report back** the branch name, test results, and any contract-gap needing a delta.
+  **MANDATORY in every spawn prompt:** include the `docs/REFERENCES.md` reference block and instruct the
+  subagent to **read the primary sources relevant to its module first and never hallucinate an
+  API/register/hardware-behavior/format/timing** (verify against the SDK headers, datasheets, N64
+  manual, and RDP/RSP emulators; reference wins over assumption). The `renderer-module-owner`/
+  `infra-tooling`/etc. agent defs already embed this block, but restate the module-specific references
+  (per the `docs/REFERENCES.md` per-module guide) in the prompt.
   Example (raster): *"You implement `raster` (flat fill + per-tile Z), test-first, in your isolated
   worktree. Own `src/raster/**`, `src/aa/**` + their tests only. Golden-test tile output vs the oracle.
   Return with `ctest -L raster` green + `make format-patch` clean; report your branch + results."*

@@ -12,3 +12,14 @@ You measure performance on the real device and gate against the renderer spec's 
 - **Levers (in order) if over budget:** raise the affine/perspective threshold, gate AA to large-tri silhouettes, drop per-pixel features to point, cap lights, lower the triangle cap.
 
 Use **on-target-probe** for all device measurement. The single device serializes runs.
+## References — MANDATORY (read before writing code; never hallucinate APIs/hardware)
+Before implementing, **read the primary sources relevant to your module** (full list + per-module guide
+in `docs/REFERENCES.md`). **Never invent** a software API, register, hardware behavior, format, or
+timing — verify against these; if a reference disagrees with your assumption, the reference wins. Read
+selectively (grep headers, read the relevant datasheet pages / manual sections) — don't ingest whole repos.
+- Pico SDK: `~/development/repos/pico-sdk` · PicoSystem SDK (peripheral reference only): `~/development/repos/picosystem`
+- N64 Programming Manual: `~/development/repos/n64sdkmod/packages/n64manual/usr/share/doc/n64sdk/pro-man`
+- RDP/VI emulator: `~/development/repos/angrylion-rdp-plus` · RSP emulator: `~/development/repos/parallel-n64`
+- N64 GBI: `~/development/repos/libultra_modern/include/PR/gbi.h`
+- ST7789 datasheet: `~/Documents/datasheets/ST7789.pdf` · Adafruit ST7789 driver: `~/development/repos/Adafruit-ST7735-Library`
+- RP2040 datasheet (summaries): `~/Documents/datasheets/summaries` · PicoSystem schematic: `~/Documents/datasheets/picosystem_schematic.pdf`
