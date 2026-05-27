@@ -128,8 +128,8 @@ static int clampi(int v, int lo, int hi) {
 
 // Rasterize one already-setup triangle into the framebuffer + tile Z scratch.
 // tile_px_x0/y0 = the tile's top-left pixel in screen space.
-static void raster_one(const struct TriSetup* t, int tile_px_x0,
-                       int tile_px_y0, uint16_t* fb, uint16_t* zbuf) {
+static void raster_one(const struct TriSetup* t, int tile_px_x0, int tile_px_y0,
+                       uint16_t* fb, uint16_t* zbuf) {
   // Triangle screen bounding box (pixels), then intersect with the tile rect.
   fx12_4 minx_q = t->x0;
   fx12_4 maxx_q = t->x0;
@@ -234,8 +234,8 @@ void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
   for (uint32_t i = 0; i < bin->count; ++i) {
     const struct TriRef* ref = &bin->refs[i];
     struct TriSetup t;
-    int const rc = tri_setup(&t, &pool[ref->v0], &pool[ref->v1],
-                             &pool[ref->v2]);
+    int const rc =
+        tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
     if (rc != RDR_OK) {
       continue;  // degenerate -> rejected, no fill
     }

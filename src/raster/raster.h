@@ -33,7 +33,8 @@
 #define RDR_RASTER_H
 #include "rdr/types.h"
 
-// Z scratch sentinel for "nothing drawn yet / farthest" (inv_w == 0 -> w = inf).
+// Z scratch sentinel for "nothing drawn yet / farthest" (inv_w == 0 -> w =
+// inf).
 #define RASTER_Z_CLEAR ((uint16_t)0)
 
 // Rasterize every triangle binned to `tile` into `fb`, depth-tested + written

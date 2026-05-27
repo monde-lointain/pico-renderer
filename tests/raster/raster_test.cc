@@ -6,8 +6,12 @@
 #include "raster/raster.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include <string>
+
+#include "golden.h"
 #include "gtest/gtest.h"
 #include "oracle.h"
 #include "rdr/config.h"
@@ -19,7 +23,8 @@ namespace {
 // bugs). 565: R=10110(22), G=011010(26), B=01011(11).
 const uint16_t kFlat565 = (uint16_t)((22u << 11) | (26u << 5) | 11u);
 
-// rgb565 packer matching gfx/framebuffer.h rgb565() (avoid pulling that header).
+// rgb565 packer matching gfx/framebuffer.h rgb565() (avoid pulling that
+// header).
 uint16_t rgb565_pack(uint8_t r, uint8_t g, uint8_t b) {
   return (uint16_t)((((uint16_t)(r & 0xF8)) << 8) |
                     (((uint16_t)(g & 0xFC)) << 3) | (uint16_t)(b >> 3));
@@ -183,8 +188,8 @@ TEST(Raster, SharedEdgeWatertight) {
   coverage_of(&t1, m1);
   coverage_of(&t2, m2);
 
-  int both = 0;       // covered by both -> double-cover (bad)
-  int covered = 0;    // covered by exactly one
+  int both = 0;     // covered by both -> double-cover (bad)
+  int covered = 0;  // covered by exactly one
   for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
     if (m1[i] && m2[i]) {
       ++both;
@@ -256,7 +261,8 @@ TEST(Raster, DegenerateCollinearRejected) {
 
 // A sub-epsilon sliver (|2*area| <= 256 Q24.8 units = <= 1px^2) is rejected:
 // nearly-collinear, area below the degenerate threshold. v0=(0,0)px,
-// v1=(40,0)px+0/16, v2=(20,0)px+1/16 -> 2*area = 40*16 * 1 = 640? compute below.
+// v1=(40,0)px+0/16, v2=(20,0)px+1/16 -> 2*area = 40*16 * 1 = 640? compute
+// below.
 TEST(Raster, SubPixelSliverRejected) {
   // v0 (10.0,10.0), v1 (26.0,10.0), v2 (18.0, 10+1/16). 2*area =
   // (16*16)*(1) - 0 = 256 -> NOT strictly > eps(256) -> rejected.
@@ -330,10 +336,10 @@ TEST(Raster, ClipsToTileBounds) {
 // overlapping coplanar-in-screen tris with different inv_w.
 TEST(Raster, ZTestNearOccludesFar) {
   // Same screen triangle, two depths. inv_w big = near.
-  int32_t const near_iw = 0x20000;  // 2.0
-  int32_t const far_iw = 0x08000;   // 0.5
-  uint16_t const c_near = (uint16_t)((31u << 11));            // red
-  uint16_t const c_far = (uint16_t)31u;                       // blue
+  int32_t const near_iw = 0x20000;                  // 2.0
+  int32_t const far_iw = 0x08000;                   // 0.5
+  uint16_t const c_near = (uint16_t)((31u << 11));  // red
+  uint16_t const c_far = (uint16_t)31u;             // blue
 
   static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
   static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
@@ -390,6 +396,57 @@ TEST(Raster, ZTestNearOccludesFar) {
   EXPECT_EQ(px2, c_near);
 }
 
+// Non-zero tile index maps to the correct screen rect. Tile 5 (4 tiles/row) is
+// col 1, row 1 -> screen origin (60,60). A triangle in that tile's screen
+// coords fills there and nowhere else, matching the oracle shifted into the
+// tile.
+TEST(Raster, NonZeroTileMapsToScreenRect) {
+  int const tiles_per_row = RDR_SCREEN_W / RDR_TILE_W;
+  int const tile = 5;
+  int const x0 = (tile % tiles_per_row) * RDR_TILE_W;  // 60
+  int const y0 = (tile / tiles_per_row) * RDR_TILE_H;  // 60
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  // Triangle in screen coords inside tile 5's rect [60,120)x[60,120).
+  OneTri o;
+  one_tri(&o, mk_vtx(x0 + 10, y0 + 8, 0, 0, 0x10000),
+          mk_vtx(x0 + 45, y0 + 12, 0, 0, 0x10000),
+          mk_vtx(x0 + 20, y0 + 48, 0, 0, 0x10000));
+  raster_tile(tile, &o.bin, o.pool, fb, zbuf);
+
+  // Oracle reference at the same absolute screen coords (full-screen image).
+  uint8_t fr, fg, fb8;
+  flat_rgb(&fr, &fg, &fb8);
+  uint8_t* ref = (uint8_t*)malloc((size_t)RDR_SCREEN_W * RDR_SCREEN_H * 3);
+  OImage img;
+  img.rgb = ref;
+  img.w = RDR_SCREEN_W;
+  img.h = RDR_SCREEN_H;
+  oracle_image_clear(&img, 0, 0, 0);
+  oracle_fill_tri(&img, o.pool[0].x / 16.0F, o.pool[0].y / 16.0F,
+                  o.pool[1].x / 16.0F, o.pool[1].y / 16.0F, o.pool[2].x / 16.0F,
+                  o.pool[2].y / 16.0F, fr, fg, fb8);
+
+  int diff = 0;
+  for (int y = 0; y < RDR_SCREEN_H; ++y) {
+    for (int x = 0; x < RDR_SCREEN_W; ++x) {
+      uint16_t const px = fb[(y * RDR_SCREEN_W) + x];
+      uint8_t r, g, b;
+      oracle_unpack565(px, &r, &g, &b);
+      size_t const o2 = (((size_t)y * RDR_SCREEN_W) + x) * 3;
+      if (r != ref[o2] || g != ref[o2 + 1] || b != ref[o2 + 2]) {
+        ++diff;
+      }
+    }
+  }
+  free(ref);
+  EXPECT_EQ(diff, 0);
+}
+
 // raster_tile clears the per-tile Z scratch on entry: stale large values from a
 // previous tile must not block the first triangle.
 TEST(Raster, ClearsZScratchOnEntry) {
@@ -407,4 +464,65 @@ TEST(Raster, ClearsZScratchOnEntry) {
   raster_tile(0, &o.bin, o.pool, fb, zbuf);
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px, kFlat565) << "Z scratch not cleared: stale depth blocked fill";
+}
+
+// Committed golden-image regression anchor: a deterministic 2-triangle,
+// Z-tested scene rendered by the REAL raster_tile into a tile-sized RGB8 image
+// and compared to a PNG checked into tests/raster/golden/. This locks the full
+// raster output (coverage + depth resolution + color packing) against
+// regression. Set GOLDEN_REGEN=1 to refresh. Never expected to FAIL/ERROR.
+TEST(Raster, GoldenTileRegression) {
+  // Two overlapping triangles at different depths in tile 0.
+  TVtx pool[6];
+  // Far triangle (blue), left-leaning.
+  pool[0] = mk_vtx(6, 6, 0, 0, 0x08000);
+  pool[1] = mk_vtx(50, 14, 0, 0, 0x08000);
+  pool[2] = mk_vtx(12, 52, 0, 0, 0x08000);
+  // Near triangle (yellow), overlapping the far one.
+  pool[3] = mk_vtx(20, 4, 0, 0, 0x20000);
+  pool[4] = mk_vtx(54, 40, 0, 0, 0x20000);
+  pool[5] = mk_vtx(8, 44, 0, 0, 0x20000);
+  uint16_t const blue = rgb565_pack(40, 80, 220);
+  uint16_t const yellow = rgb565_pack(220, 200, 40);
+  pool[0].rgba = blue;
+  pool[1].rgba = blue;
+  pool[2].rgba = blue;
+  pool[3].rgba = yellow;
+  pool[4].rgba = yellow;
+  pool[5].rgba = yellow;
+  TriRef refs[2];
+  refs[0].v0 = 0;
+  refs[0].v1 = 1;
+  refs[0].v2 = 2;
+  refs[0].material = 0;
+  refs[1].v0 = 3;
+  refs[1].v1 = 4;
+  refs[1].v2 = 5;
+  refs[1].material = 0;
+  TileBin bin;
+  bin.refs = refs;
+  bin.count = 2;
+  bin.cap = 2;
+  bin.dropped = 0;
+
+  uint8_t rgb[RDR_TILE_W * RDR_TILE_H * 3];
+  uint8_t bgr;
+  uint8_t bgg;
+  uint8_t bgb;
+  oracle_unpack565(rgb565_pack(16, 16, 32), &bgr, &bgg, &bgb);
+  render_tile0_to_rgb(&bin, pool, rgb, bgr, bgg, bgb);
+
+  struct GoldenParams p;
+  memset(&p, 0, sizeof p);
+  p.golden_path = RASTER_GOLDEN_DIR "/tile_ztest.png";
+  std::string const tmp_dir = ::testing::TempDir();
+  p.dump_dir = tmp_dir.c_str();
+  p.per_channel = 0;  // raster is deterministic; exact match expected
+  p.max_diff_pixels = 0;
+
+  struct GoldenReport rep;
+  int const r = golden_check(&p, rgb, RDR_TILE_W, RDR_TILE_H, &rep);
+  EXPECT_NE(r, GOLDEN_FAIL)
+      << "first offending pixel (" << rep.first_x << "," << rep.first_y << ")";
+  EXPECT_NE(r, GOLDEN_ERROR);
 }
