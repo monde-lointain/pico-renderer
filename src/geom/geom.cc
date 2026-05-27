@@ -369,10 +369,15 @@ RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
 // Module-local interpreter state threaded through cb_walk as the visitor ctx.
 // Frame owns the durable sinks (pool/bins/mtx/vp/rstate); GeomCtx adds the
 // transient LOAD_VERTS cursor and the last-vertex depth used by BRANCH_LESS_Z.
+// C1 index convention: DRAW_TRIS indices are ABSOLUTE into the current
+// LOAD_VERTS window (index 0 == the first loaded vertex, gSPVertex-style). The
+// frozen load_verts.base (a base-relative window offset) is NOT supported in
+// the thin slice; a nonzero base is rejected at LOAD_VERTS so a windowed stream
+// can never silently misindex. Pinning base-relative vs absolute is a C2
+// handoff (see WORKFLOW.md). vptr==0 (no cursor) draws nothing.
 struct GeomCtx {
   struct Frame* f;
-  const struct Vtx* vptr;  // current LOAD_VERTS base pointer
-  uint16_t vbase;          // index offset applied to draw indices
+  const struct Vtx* vptr;  // current LOAD_VERTS window base (absolute idx 0)
   uint16_t vcount;         // loaded vertex count (bounds the index fetch)
 };
 
@@ -446,8 +451,11 @@ static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
     return;
   }
   for (int i = 1; i + 1 < n; ++i) {
+    // TODO(C2): real render-state version/intern id; combiner.mode was wrong
+    // (it is a combiner enum, not a state id; the blend/tex streams read this
+    // frozen TriRef.material field). 0 until render-state interning lands.
     geom_emit_tri(f, &ring[0], &ring[i], &ring[i + 1], det_sign,
-                  (int)f->rstate.cull, f->rstate.combiner.mode);
+                  (int)f->rstate.cull, 0);
   }
 }
 
@@ -496,8 +504,15 @@ static int geom_visit(void* ctx, const struct Command* c) {
       // in the thin slice; these granular setters are accepted but no-op here.
       return 0;
     case CMD_LOAD_VERTS:
+      if (c->u.load_verts.base != 0) {
+        // Thin slice supports only absolute (base==0) windows; reject a
+        // base-relative load rather than misindex (drop-with-count via a null
+        // cursor so subsequent DRAW_TRIS draw nothing). C2 pins the convention.
+        g->vptr = 0;
+        g->vcount = 0;
+        return 0;
+      }
       g->vptr = c->u.load_verts.ptr;
-      g->vbase = c->u.load_verts.base;
       g->vcount = c->u.load_verts.count;
       return 0;
     case CMD_DRAW_TRIS: {
@@ -546,7 +561,6 @@ RdrErr geom_run(const struct Command* cmds, struct Frame* f) {
   struct GeomCtx g;
   g.f = f;
   g.vptr = 0;
-  g.vbase = 0;
   g.vcount = 0;
   return cb_walk(cmds, geom_visit, &g);
 }
