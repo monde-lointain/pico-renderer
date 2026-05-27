@@ -25,3 +25,10 @@ Work only in your owned globs (`.claude/ownership.json`).
 
 ## Never
 - Never force-push, hard-reset shared refs, or delete others' branches (the destructive-op guard blocks these). Operate only on your own `impl/*` branch.
+
+## Throwaway spikes (hardware probes, experiments)
+A spike gets its **own worktree** (`git worktree add ../wt-spike -b spike/<name> main`), never a
+branch-switch in a tree with uncommitted changes — a `checkout` will silently abort and you can
+commit to the wrong branch (happened in the foundation retro; see WORKFLOW.md). After ANY
+`git checkout`/worktree op, verify `git branch --show-current` before committing. Record only the
+results (e.g. measurements) back to the mainline; discard the spike worktree/branch.

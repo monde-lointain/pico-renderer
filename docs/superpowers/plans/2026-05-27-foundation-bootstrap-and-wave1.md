@@ -22,7 +22,8 @@ Created/modified by this plan (paths relative to repo root):
 - `.claude/ownership.json` — module→owner glob manifest + TaskCreated schema source
 - `.claude/settings.json` — hooks (PreToolUse-bash guard, PostToolUse format, TaskCreated, TaskCompleted, TeammateIdle)
 - `.claude/hooks/{ownership_guard.sh,destructive_guard.sh,format_check.sh,task_schema.sh,task_complete_gate.sh,idle_gate.sh}` — hook scripts
-- `tools/verify_toolchain.sh` — S0 hard-verify; `tools/ci_main.sh` — CI-on-main; `tools/wave_retro.md` — KPI template
+- `tools/verify_toolchain.sh` — S0 hard-verify (tools + Orthodoxy-version + CDC-tty rule); `tools/rename_project.sh` — tested template rename; `tools/ci_main.sh` — CI-on-main
+- `WORKFLOW.md` — workflow retrospective + improvement log (collated by `wave-retro`)
 
 **Project (from template, renamed `picosystem_template`→`renderer`, `PICOSYSTEM_TEMPLATE`→`RENDERER`):**
 - Top `CMakeLists.txt`, `CMakePresets.json`, `Makefile`, `cmake/*`, `.clang-format`, `.clang-tidy`, `.orthodoxy.yml`, `.gitignore`, `.github/`
@@ -74,16 +75,32 @@ id -nG | tr ' ' '\n' | grep -qx dialout || echo "WARN: user not in 'dialout' gro
 [ "$fail" -eq 0 ] && echo "TOOLCHAIN OK" || { echo "TOOLCHAIN INCOMPLETE"; exit 1; }
 ```
 
+> **RETRO (foundation phase, see WORKFLOW.md):** the script also (a) warns if the Orthodoxy plugin
+> version doesn't match the host `clang++` major (the `host` preset uses plain `clang`, so confirm the
+> matching plugin + `.orthodoxy.yml` schema), and (b) checks for the CDC-tty udev rule below — both
+> were costly to discover late.
+
 - [ ] **Step 2: Run it**
 
 Run: `chmod +x tools/verify_toolchain.sh && ./tools/verify_toolchain.sh`
-Expected: `TOOLCHAIN OK` (exit 0). If any `MISSING:` line prints, install the tool before proceeding — bootstrap is blocked until this passes. (Orthodoxy plugin presence is verified at A6 via the CMake REQUIRE flag, not here.)
+Expected: `TOOLCHAIN OK` (exit 0). If any `MISSING:` line prints, install the tool before proceeding — bootstrap is blocked until this passes. (Orthodoxy plugin presence is also verified at A6 via the CMake REQUIRE flag.)
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Install the Pico CDC-serial udev rule (needs sudo, once; unblocks on-target reads)**
+
+`/dev/ttyACM*` defaults to `root:dialout`; `usermod -aG dialout` does **not** bind to a running
+session, and `60-picotool.rules` covers only the USB vendor interface (flashing), not the CDC tty.
+Install a tty rule (group `plugdev`, which the agent is already in — no re-login):
+```bash
+echo 'SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="2e8a", GROUP="plugdev", MODE="0660", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/99-pico-cdc.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+Expected: a future Pico CDC port enumerates as group `plugdev` → readable. **Doing this at S0 avoids the multi-round-trip block hit at S0.5 in the foundation run.**
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add tools/verify_toolchain.sh
-git commit -m "S0: toolchain hard-verify script"
+git commit -m "S0: toolchain hard-verify (incl. Orthodoxy-version + CDC-tty checks) + serial udev rule"
 ```
 
 ## Task A2: Import the template and rename to `renderer`
@@ -100,16 +117,13 @@ rsync -a --exclude='.git' --exclude='build*' ../picosystem-template/ .
 ```
 Expected: `CMakeLists.txt`, `src/`, `tests/`, `cmake/`, `Makefile`, `CMakePresets.json`, `.clang-*`, `.orthodoxy.yml`, `.github/`, `tools/` now present alongside `docs/`.
 
-- [ ] **Step 2: Rename project identifiers (excluding docs/build/deps)**
+- [ ] **Step 2: Rename project identifiers (use the tested script — NOT ad-hoc `xargs`)**
 
-Run:
-```bash
-grep -rlZ --exclude-dir=.git --exclude-dir=docs --exclude-dir=.deps-cache \
-  --exclude-dir=build-host --exclude-dir=build-pico \
-  -e picosystem_template -e PICOSYSTEM_TEMPLATE . \
-  | xargs -0 sed -i -e 's/picosystem_template/renderer/g' -e 's/PICOSYSTEM_TEMPLATE/RENDERER/g'
-```
-Expected: no remaining matches outside docs/ — verify: `! grep -rn --exclude-dir=.git --exclude-dir=docs -e picosystem_template -e PICOSYSTEM_TEMPLATE .`. (`docs/` is excluded so the design specs/this plan — which reference the template by name — are not corrupted. `pimoroni_picosystem` / `memmap_picosystem.ld` are safe: the pattern is the underscore-qualified `picosystem_template` only.)
+> **RETRO:** `grep -rlZ | xargs -0 sed` mis-split and partial-applied in the foundation run; the
+> newline-safe `while read` loop in `tools/rename_project.sh` is the tested path.
+
+Run: `bash tools/rename_project.sh`
+Expected: `rename OK (0 remaining outside docs)`. (`docs/` is excluded so the specs/plan — which name the template — aren't corrupted; `pimoroni_picosystem` / `memmap_picosystem.ld` are safe since the pattern is the underscore-qualified `picosystem_template` only.)
 
 - [ ] **Step 3: Configure + build host**
 
@@ -516,24 +530,35 @@ Goal: measure free RAM, fixed-point throughput proxies, and scanout timing on th
 **Files:**
 - Create (on branch `spike/hw-probe`, never merged to `main`): `tools/spike/spike_main.cc`, `tools/spike/CMakeLists.txt`
 
-- [ ] **Step 1: Branch**
+> **RETRO (foundation run — these were learned the hard way; see WORKFLOW.md):**
+> - **RAM via linker symbols only** (`&__HeapLimit - &__end__`), **NOT malloc-until-fail** — pico
+>   `malloc` panics on OOM and wedged the device, forcing a manual BOOTSEL.
+> - **Arm a watchdog + link the reset stub even in the spike** — a hang/panic otherwise can't be
+>   `picotool`-reset (USB dies), costing a physical button press.
+> - **Defeat dead-code elimination** on benchmarks (volatile sinks) — `MICRORAST` was optimized to a
+>   bogus value — and **set the 250 MHz overclock** before timing (the spike ran at stock clock, so
+>   MULDIV/FILL were unrepresentative).
+> - Use a **dedicated worktree** (below) and verify `git branch --show-current` before committing —
+>   results were committed to the wrong branch in the foundation run.
+
+- [ ] **Step 1: Dedicated worktree (NOT a branch-switch in the working tree)**
 
 Run: `git worktree add ../wt-spike -b spike/hw-probe main`
 
 - [ ] **Step 2: Write the probe firmware**
 
-`tools/spike/spike_main.cc` — a pico program (links pico-sdk, `pico_enable_stdio_usb`, **picotool reset stub + hardware watchdog**) that prints over USB-CDC serial, one `KEY=VALUE` per line:
-- `RAM_FREE=<bytes>` — measured by allocating until failure / reading linker symbols (`__StackLimit - __bss_end__`), minus a 115 KB framebuffer reservation.
-- `MULDIV_NS=<ns>` — time N fixed-point `fx_mul` + SIO-divider `fx_div` ops (proxy for transform cost).
-- `FILL_MBPS=<mbps>` — time a 240×240×2 memset/DMA (proxy for raster/scanout fill bandwidth).
-- `MICRORAST_TRIS_PER_S=<n>` — time a tiny flat-triangle inner loop over a tile (proxy for raster cost).
-- `SCANOUT_US=<us>` — time one ST7789 DMA flush.
+`tools/spike/spike_main.cc` — a pico program (links pico-sdk, `pico_enable_stdio_usb`, **reset stub + hardware watchdog**; sets the 250 MHz overclock; volatile sinks on all benchmarks) that prints one `KEY=VALUE` per line over USB-CDC:
+- `RAM_FREE=<bytes>` — `(uintptr_t)&__HeapLimit - (uintptr_t)&__end__` (the framebuffer is in `.bss`, so this is free RAM beside it). **No malloc.**
+- `MULDIV_NS=<ns>` — N fixed-point `fx_mul` (64-bit synth) + SIO-divider `fx_div`, volatile-accumulated.
+- `FILL_MBPS=<mbps>` — 240×240×2 memset, volatile-touched.
+- `MICRORAST_TRIS_PER_S=<n>` — flat-tri inner loop over a tile, volatile-accumulated (guard against DCE).
+- `SCANOUT_US=<us>` — one ST7789 DMA flush (only once the platform fork B.1-θ exists; else omit + defer to C).
 - Final line `PROBE_DONE`.
 
 - [ ] **Step 3: Build + flash + read**
 
-Run: build the spike `.uf2`, then use the `on-target-probe` skill: `picotool load -x …`, poll `/dev/ttyACM*`, capture lines until `PROBE_DONE`.
-Expected: all six `KEY=VALUE` lines captured (re-run on parse failure; press BOOTSEL if hung).
+Run: build the spike `.uf2`, then use the `on-target-probe` skill: reboot to BOOTSEL (`picotool reboot -f -u`), `picotool load -x …`, poll `/dev/ttyACM*`, read until `PROBE_DONE`.
+Expected: `KEY=VALUE` lines captured (re-run on parse failure; physical BOOTSEL only if the firmware hung — the watchdog should prevent that).
 
 - [ ] **Step 4: Record measurements + architecture decision**
 
