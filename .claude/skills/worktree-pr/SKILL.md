@@ -29,8 +29,20 @@ Work only in your owned globs (`.claude/ownership.json`).
 ## Stay current
 `git merge main` into your branch whenever a dependency lands (e.g. when `impl/fixed` or `impl/harness` merges). Frozen headers keep drift small.
 
+## Authoring files (W1-09 — read before your first write)
+The `Write`/`Edit` tools **do not reliably persist inside a dispatched worktree** — they report
+success but the write lands in the *shared main tree* (the worktree `git status` stays clean). Until
+the harness CWD bug is fixed, **author and modify files with `Bash`** (`cat <<'EOF' > f`, `tee`,
+`printf`, or `python -c`), not Edit/Write. Verify each write took with `git status`/`git diff` in
+*your* worktree before moving on.
+
 ## Land the stream
-1. Green: Stage-1 (`ctest -L <mod>`) + `make format-patch` clean + Orthodoxy clean.
+1. Green: Stage-1 (`ctest -L <mod>`) + `make format-patch` clean + Orthodoxy clean + **clang-tidy
+   clean on owned files** (`clang-tidy-22 -p build-host/tidy --warnings-as-errors=* <owned .cc>` —
+   W1-10: the stream gate previously omitted tidy and 124 readability errors rode into a merge; do
+   NOT rely on `ci_main` to catch them late). Never broad `clang-tidy --fix` (W1-07/W1-11: it edits
+   third-party headers and can introduce compile errors) — scope `--fix` to an explicit owned-file
+   list, then re-run tidy + a build to confirm.
 2. Open a PR (branch diff vs `main` + checklist).
 3. `renderer-reviewer` reviews (lane-scoped); address findings.
 4. After approval + green `tools/ci_main.sh`: **self-merge** to `main` (owners self-merge; the Lead reserves `main` for contract-deltas + the C2 barrier).
