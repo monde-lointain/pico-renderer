@@ -1,0 +1,64 @@
+; screen.pio — 16bpp RGB565 SPI-like output for PicoSystem ST7789
+;
+; Emits 16 bits per pixel, MSB-first, in panel order.
+; ST7789 §8.8.42 (p105): pixels clock MSB (high byte) first.
+; ST7789 §7.4.3 (p44): max serial write clock 62.5 MHz (TSCYCW=16ns).
+;
+; At 250 MHz sys clock, clkdiv=2 → PIO runs at 125 MHz.
+; Each bit takes 2 PIO cycles (set MOSI + toggle SCK), so SCK = 62.5 MHz.
+; 16 bits × 2 cycles = 32 PIO cycles per pixel.
+; 240×240 pixels × 32 cycles / 125 MHz ≈ 14.75 ms per frame — fits 30fps.
+;
+; The OSR shifts LEFT (MSB-first) with autopull threshold=16.
+; DMA feeds 16-bit halfwords; each pull delivers one pixel word into OSR bits 31..16.
+; OSR left-shift config: set_out_shift(left=false) → actually we use shift-left mode.
+;
+; PIO program: pull 16 bits, shift out MSB-first, toggle SCK via sideset.
+; sideset: SCK (GPIO 6, picosystem.hpp line 38: SCK=6)
+; out pins: MOSI (GPIO 7, picosystem.hpp line 38: MOSI=7)
+
+.program screen
+.side_set 1
+
+.wrap_target
+    ; Autopull fills OSR when 16 bits have been shifted out.
+    ; Each pixel: 16 bits shifted MSB-first.
+
+    set x, 15               side 0  ; 16 iterations (x counts down 15..0)
+bitloop:
+    out pins, 1             side 0  ; output bit, SCK low
+    jmp x-- bitloop         side 1  ; SCK high, advance bit; loop if x not zero after decrement
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+#include "hardware/pio.h"
+
+static inline void screen_program_init(PIO pio, uint sm, uint offset,
+                                        uint pin_mosi, uint pin_sck) {
+    pio_sm_config c = screen_program_get_default_config(offset);
+
+    /* Sideset = SCK */
+    sm_config_set_sideset_pins(&c, pin_sck);
+    /* Out pin = MOSI */
+    sm_config_set_out_pins(&c, pin_mosi, 1);
+
+    /* OSR shifts left (MSB-first), autopull at 16 bits */
+    sm_config_set_out_shift(&c, false, true, 16);
+
+    /* Join TX FIFOs for 8-deep buffer (TX only) */
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+
+    /* Clock divider: 2 → SCK = sysclk/4 = 62.5 MHz at 250 MHz */
+    sm_config_set_clkdiv_int_frac(&c, 2, 0);
+
+    /* Claim and configure GPIO */
+    pio_gpio_init(pio, pin_mosi);
+    pio_gpio_init(pio, pin_sck);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_mosi, 1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_sck,  1, true);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

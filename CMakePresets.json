@@ -1,0 +1,90 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "host",
+      "displayName": "PC (SDL3 + ImGui, tests)",
+      "binaryDir": "${sourceDir}/build-host",
+      "cacheVariables": {
+        "PLATFORM": "sdl",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/.deps-cache"
+      }
+    },
+    {
+      "name": "pico",
+      "displayName": "PicoSystem (RP2040, .uf2)",
+      "binaryDir": "${sourceDir}/build-pico",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "PLATFORM": "picosystem",
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "pico-tidy",
+      "displayName": "PicoSystem + inline clang-tidy (arm-none-eabi)",
+      "inherits": "pico",
+      "binaryDir": "${sourceDir}/build-pico-tidy",
+      "cacheVariables": {
+        "RENDERER_PICO_TIDY": "ON"
+      }
+    },
+    {
+      "name": "host-asan",
+      "displayName": "PC + ASan/UBSan (clang-22, Debug)",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "PLATFORM": "sdl",
+        "CMAKE_C_COMPILER": "clang-22",
+        "CMAKE_CXX_COMPILER": "clang++-22",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON",
+        "RENDERER_SANITIZE": "address,undefined",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/.deps-cache"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "host",
+      "configurePreset": "host"
+    },
+    {
+      "name": "pico",
+      "configurePreset": "pico"
+    },
+    {
+      "name": "pico-tidy",
+      "configurePreset": "pico-tidy"
+    },
+    {
+      "name": "host-asan",
+      "configurePreset": "host-asan"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "host",
+      "configurePreset": "host",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-asan",
+      "configurePreset": "host-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

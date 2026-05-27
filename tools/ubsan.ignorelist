@@ -1,0 +1,17 @@
+# UBSan source-level ignorelist (-fsanitize-ignorelist=).
+#
+# ONLY for confirmed-intentional, arm-safe behavior your code relies on —
+# specifically signed-integer-overflow where two's-complement wraparound is
+# deliberate. Each entry MUST cite why it is safe. NEVER ignorelist `alignment`,
+# OOB, or `function` findings: those are genuine cross-platform (arm) UB and
+# must be FIXED, not suppressed.
+#
+# Format (clang SpecialCaseList):
+#   [signed-integer-overflow]
+#   fun:some_function   # why this wraparound is intentional + arm-safe
+#   src:src/game/foo.cc # (file-scoped; prefer fun: granularity)
+#
+# EMPTY by design. Add an entry only for a genuinely-unfixable site after
+# confirming the wraparound is intentional and behaves identically on arm
+# (ILP32). Prefer fixing the source (e.g. unsigned arithmetic, explicit
+# masking) over suppressing.

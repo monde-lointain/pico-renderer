@@ -1,0 +1,51 @@
+---
+# Orthodox C++ rule set for src/{game,gfx,app}.
+# Semantics (orthodoxy clang plugin, clang-22 schema): true = feature ALLOWED,
+# false = feature FORBIDDEN. Any key not listed defaults to allowed.
+# POD structs only; no classes/ctors/dtors/inheritance/virtuals/access.
+Class: false
+NonPOD: false
+Constructor: false
+CopyConstructor: false
+MoveConstructor: false
+ConversionConstructor: false
+Destructor: false
+Inheritance: false
+VirtualMemberFunction: false
+MemberFunction: true         # plain free functions preferred; methods discouraged not banned
+Access: false
+ImplicitThis: true
+EnumClass: false
+# Casts: C-style only.
+NamedCast: false
+StaticCast: false
+DynamicCast: false
+ConstCast: false
+ReinterpretCast: false
+CStyleCast: true
+# References: pointers only. (clang-22 schema: single Reference key covers l/r-value.)
+Reference: false
+# Exceptions / RTTI: none.
+Exception: false
+Throw: false
+TryCatch: false
+# Overloading / defaults / conversions.
+FunctionOverload: false
+OperatorOverload: false
+ConversionOverload: false
+DefaultArgument: false
+UserDefinedLiteral: false
+# Modern features.
+Auto: false
+AutoReturn: false
+RangeBasedLoop: false
+Lambda: false
+New: false
+Mutable: false
+Namespace: false
+# Templates allowed sparingly (containers); concepts/modules/coroutines off.
+Template: true
+Concept: false
+Module: false
+# Headers: C headers only, no STL allocating containers.
+IncludeForbid: ["iostream", "sstream", "vector", "string", "map", "unordered_map", "memory"]
