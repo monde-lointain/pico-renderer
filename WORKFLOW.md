@@ -51,3 +51,33 @@ contract is frozen on `main`; S0.5 measured 138 KiB free → sort-middle confirm
 - Contract-deltas this phase: 0 (within the >2 budget).
 - CI-on-main red after merge: 0 (merged green, 61/61).
 - On-target gate pass: S0.5 measured after 1 firmware fix + 1 manual BOOTSEL (watchdog gap).
+
+## A10 smoke test -> execution-model pivot (2026-05-27)
+
+Ran the A10 validation (one throwaway agent) before the Wave-1 launch. It caught a model-breaking
+assumption — exactly why we validate first.
+
+**Confirmed working:** agent spawning works here; project config loads for spawned agents;
+**PreToolUse/PostToolUse hooks fire for spawned agents** (the destructive guard intercepted a forced
+branch-delete in both a team member and a subagent).
+
+**Model-breaker:** an **agent-TEAM member runs in the lead's working tree** (it committed straight to
+`main`) — no per-teammate worktree isolation. A **subagent with `isolation:worktree` DOES** get its
+own worktree+branch. Teams give a shared task list + messaging but no isolation; subagents give
+isolation but are one-shot.
+
+**Pivot (approved):** Part D moves from the agent-teams vehicle (H1–H3, shared task list, SendMessage)
+to **subagent-driven-in-worktrees** (`superpowers:subagent-driven-development` +
+`dispatching-parallel-agents` + `using-git-worktrees`):
+- The Lead holds the dependency graph and **dispatches a fresh subagent-in-a-worktree per stream**,
+  reviews the returned branch (`renderer-reviewer`), merges to `main`, dispatches the next unblocked
+  streams. Barriers are **lead-sequenced**, not task-list-encoded.
+- **Hook scope:** PreToolUse (destructive guard) + PostToolUse (format) fire per-edit in subagent
+  worktrees. The team-event hooks (`TaskCreated`/`TaskCompleted`/`TeammateIdle`) do **NOT** fire for
+  subagents; their gates move to the **lead's pre-merge gate** (module `ctest -L <mod>` + format +
+  Orthodoxy + reviewer + `ci_main.sh` green) before merging each stream's branch.
+- Modules are independent post-contract-freeze, so the lost messaging/shared-task-list doesn't matter.
+
+**Bonus finding:** the destructive-guard greps the whole Bash command string, so a heredoc containing a
+forced-branch-delete *as documentation text* false-positives. Mitigation: author docs with the
+Write/Edit tools (not bash heredocs); longer term, narrow the guard to the leading command token.

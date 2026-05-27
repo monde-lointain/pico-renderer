@@ -496,6 +496,13 @@ git commit -m "S0: CI-on-main (host tests + Orthodoxy REQUIRE + arm compile-comp
 
 **Files:** none created; this is an operational verification of the novel agent-teams-+-worktrees combination.
 
+> **✅ EXECUTED 2026-05-27 — outcome drove the execution-model pivot (see WORKFLOW.md + spec amendment):**
+> agent spawning works; config loads for spawned agents; **PreToolUse/PostToolUse hooks FIRE for spawned
+> agents**. BUT an agent-team **member runs in the lead's working tree (no worktree isolation — it
+> committed to `main`)**, while a **subagent with `isolation:worktree` gets its own worktree+branch**.
+> ⇒ Part D pivoted to **subagent-driven-in-worktrees** (see the revised C→D Handoff). The steps below
+> are the original team-based smoke test, retained for the record; the pivot supersedes them.
+
 - [ ] **Step 1: Create a throwaway worktree + branch**
 
 Run: `git worktree add ../wt-smoke -b smoke/test main && ls ../wt-smoke`
@@ -657,50 +664,53 @@ Then: review the freeze PR (renderer-reviewer), merge to `main`, run `tools/ci_m
 
 ---
 
-# PART C→D HANDOFF — Launch the Wave-1 Team & Seed the Task List (Lead)
+# PART C→D HANDOFF — Subagent-Dispatch Loop (Lead) — REVISED post-A10
 
-The pivotal transition: with the contract on `main`, the Lead brings up the agent team and turns the Part-D streams into a dependency-encoded shared task list. Without this, nothing in Part D runs.
+> **A10 outcome (see WORKFLOW.md + the spec's Execution-Model Amendment):** agent-team *members* do
+> NOT get worktree isolation; **subagents with `isolation:worktree` do**, and hooks fire for them. So
+> the launch is **not** an agent-team-with-shared-task-list. Instead the **Lead holds the dependency
+> graph and dispatches a fresh subagent-in-a-worktree per stream**, reviews the returned branch,
+> merges to `main`, and dispatches the next unblocked streams. The H1–H3 team-spawn/task-seed tasks
+> below are replaced by this loop.
 
-## Task H1: Create per-owner worktrees
-
-- [ ] **Step 1: One worktree + branch per owner stream, cut from frozen `main`**
-
-Run (via the `worktree-pr` skill):
-```bash
-for s in fixed cmd-arena geom-clip raster shading harness assets on-target-runner platform; do
-  git worktree add "../wt-$s" -b "impl/$s" main
-done
-git worktree list
-```
-Expected: nine worktrees on `impl/*` branches, all based on the Stream-A `main` commit.
-
-## Task H2: Spawn the team in tmux (Opus), one teammate per owner
-
-- [ ] **Step 1: Launch teammates with agent type, worktree cwd, and env**
-
-Bring up the team (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, tmux split panes). Spawn five standing teammates, each with: its **agent type** (`renderer-module-owner` for T1–T4, `infra-tooling` for T5), **cwd = its worktree**, and **env** `MODULE=<mod>` + `BLOCKED_ON=<dep-branch-or-empty>` (the gates read these). Spawn prompt per PROMPT_GUIDELINES: role, owned globs (from `.claude/ownership.json`), branch, the exact verification commands, and success criteria up front. Example (T2):
-
-> "You are T2, the Rasterization owner (`renderer-module-owner` agent). Worktree: `../wt-raster`, branch `impl/raster`, env `MODULE=raster`. You own `src/raster/**`, `src/aa/**` and their tests — touch nothing else. Implement `raster` (flat fill + per-tile Z) test-first via the `orthodox-tdd-cycle` skill against the frozen `src/rdr/types.h`; golden-test tile output vs the oracle once `impl/fixed` and `impl/harness` are on `main` (`git merge main`). Land via the `worktree-pr` skill: PR → `renderer-reviewer` approval + green CI → self-merge. Done = `impl/raster` merged, `ctest -L raster` green, arm-compiles on CI."
-
-Expected: five teammate panes, each in its worktree, hooks confirmed firing (per A10).
-
-## Task H3: Seed the shared task list with the Part-D streams + dependency edges
-
-- [ ] **Step 1: Create one task per stream, with dependencies encoding the barriers**
-
-The Lead creates the team tasks (each carries `files_owned` + `branch` + `verification`, per the TaskCreated schema gate) with these dependency edges so the task system enforces the barriers:
-- `A` (done) → `B.0`, `B.1-α`, `B.1-ε`, `B.1-ζ`, `B.1-η`, `B.1-θ` (all unblocked now).
-- `B.0` **and** `B.1-ε` → `B.1-β`, `B.1-γ`, `B.1-δ` (numeric-green dependents).
-- `B.0, α, β, γ, δ, ε, ζ, η, θ` → `C1` (θ gates device output).
+## The dependency graph (lead-sequenced barriers)
+- `A` (merged) → dispatch now: `B.0 fixed`, `B.1-ε harness`, `B.1-α cmd-arena`, `B.1-ζ assets`,
+  `B.1-η on-target-runner`, `B.1-θ platform`.
+- `B.0` **and** `B.1-ε` merged → dispatch: `B.1-β geom-clip`, `B.1-γ raster`, `B.1-δ shading`
+  (their numeric golden tests need real `fixed` + the oracle).
+- `B.0, α, β, γ, δ, ε, ζ, η, θ` merged → `C1`. `θ` also gates C1's device output.
 - `C1` → `C2` → `C3` → `D`.
 
-Assign B-streams to owners (T1: `fixed`+`geom-clip`; T2: `raster`; T3: `shading`; T4: `cmd-arena`+**`platform`** (the ST7789 565 fork); T5: `harness`+`assets`+`on-target-runner`; raster/sched/platform split into sub-stream tasks for rebalancing per the spec). C1/C2/C3 are assigned to the integrator/perf roles at their barriers.
+## The dispatch loop (repeat until all Wave-1 streams merged)
+- [ ] **Step 1: Dispatch each unblocked stream as a subagent in its own worktree.**
+  Use the Agent tool with `isolation: "worktree"` and `subagent_type` = the stream's role
+  (`renderer-module-owner` for module streams; `infra-tooling` for harness/assets/runner;
+  `integrator`/`perf-profiler` for C1–C3). Dispatch independent streams **in parallel** (multiple
+  Agent calls in one turn). The spawn prompt (per PROMPT_GUIDELINES) states: role; **owned globs** from
+  `.claude/ownership.json` (touch nothing else); the frozen contract (`src/rdr/types.h`); use
+  `contract-first` then `orthodox-tdd-cycle`; for math-bearing modules `fixed-point` + `golden-image-test`;
+  run `make test`/`ctest -L <mod>` + `make format-patch` green before returning; commit on its branch;
+  and **report back** the branch name, test results, and any contract-gap needing a delta.
+  Example (raster): *"You implement `raster` (flat fill + per-tile Z), test-first, in your isolated
+  worktree. Own `src/raster/**`, `src/aa/**` + their tests only. Golden-test tile output vs the oracle.
+  Return with `ctest -L raster` green + `make format-patch` clean; report your branch + results."*
 
-Expected: task list shows the graph; only the unblocked B-streams are claimable; the rest gated until deps complete. **Now Part D executes.**
+- [ ] **Step 2: Lead pre-merge gate for each returned stream** (replaces the team `TaskCompleted` hook,
+  which doesn't fire for subagents): in the subagent's worktree/branch, run module `ctest -L <mod>` +
+  `make format-patch` + Orthodoxy (host build) green; spawn `renderer-reviewer` on the branch diff;
+  then `ci_main.sh` green → **merge the branch to `main`**. On failure, re-dispatch with feedback (the
+  Lead is the circuit-breaker; escalate to the human after repeated failure).
+
+- [ ] **Step 3: Advance the barrier.** After each merge, dispatch any streams whose deps are now all on
+  `main` (per the graph). `git merge main` is implicit — each new subagent's worktree is cut fresh from
+  the current `main`, so it already has merged dependencies.
+
+Expected: streams land on `main` one reviewed branch at a time, barriers respected, `main` green
+throughout (`ci_main.sh`). **This loop IS Part D execution.**
 
 ---
 
-# PART D — Wave-1 Implementation Streams (dispatched to the agent team)
+# PART D — Wave-1 Implementation Streams (dispatched as subagents-in-worktrees; see amendment)
 
 These are **dispatchable units**, not bite-sized TDD walkthroughs: each is executed in its own worktree/branch by the assigned teammate, who runs the emergent red-green-refactor loop via `orthodox-tdd-cycle` against the frozen contract, lands work via `worktree-pr`, and is gated by the hooks + CI. Each carries the parallelize-plan schema.
 
