@@ -183,6 +183,14 @@ green (182 host tests; arm builds).
 - **θ watermark producer unwired:** `s_committed_rows` only advanced by `plat_present_watermark`, which nothing calls → device takes the full-frame fallback; the scanline-race chase/stall path is unexercised on HW until the scheduler (C1/C2) drives it. Add a stall **deadline** (busy-wait has no escape today).
 - **α `cb_walk`** has no stream-length bound (relies on a terminating `CMD_END`) — the geom front-end must END-terminate every DL; **arena backing buffers must be 8B-aligned** on target (`arena_init` aligns offsets, not `base`).
 
+#### C2 / downstream latents surfaced at C1 integration (review follow-up, 2026-05-27)
+These are cross-module semantic items the C1 thin slice deferred — none block C1, all must be pinned before the named downstream consumer.
+- **#1 vertex-window base convention (C2):** DRAW_TRIS indices are ABSOLUTE into the current LOAD_VERTS window in C1 (base==0 only; a nonzero `load_verts.base` is rejected at LOAD_VERTS so a windowed stream cannot silently misindex). Absolute-vs-base-relative MUST be pinned before any multi-LOAD_VERTS / windowed stream lands.
+- **#2 `TriRef.material` (C2, blocks blend/tex):** C1 writes `0` (placeholder). The frozen `TriRef.material` field MUST carry a real render-state version/intern id before the blend/tex streams read it (they key material lookups off it). C1 previously passed `combiner.mode` — wrong (a combiner enum, not a state id); fixed to 0.
+- **#3 `tris_total` counts post-clip fan triangles (C2/telemetry):** the counter increments per binned fan triangle, not per source triangle, so a guard-band-clipped source tri over-counts across the band. Either document this or split a separate source-tri counter before the telemetry/`FRAME_US` numbers are treated as source-poly counts.
+- **#4 `det_sign` from `modelview[mv_top]` only (C2):** backface winding folds in only the modelview determinant sign — a mirror placed in the view/projection slot will NOT flip winding. Pin the "no mirror in the projection slot" precondition, or compute the sign from the composed MVP, before any mirrored-projection scene.
+- **#6 transform range budget (downstream/any scene):** the integer Q16.16 transform path requires |coord| < 2^15 through MVP (`fx_mul` wraps out of domain). The demo uses SCENE_SCALE 0.06 to stay in budget; any new scene must respect it. Consider a debug range-assert in `geom_transform_clip`/`mtx_mvp`.
+
 ### Batch fast-follows (to wave-retro)
 - β `clip` lerps packed-565 rgba as a scalar → carry-bleed across R/G/B; harmless for off-screen guard-band clip, **must be per-channel before near-plane clipping lands** (later wave).
 - β `geom_modelview_det_sign` overflows `fx_mul` at uniform scale ≳180 → flips det sign → inverts cull. Use a 64-bit product or document the operand-range bound.

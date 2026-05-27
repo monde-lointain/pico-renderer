@@ -2,6 +2,8 @@ add_library(Renderer_sched)
 add_library(Renderer::Sched ALIAS Renderer_sched)
 target_sources(Renderer_sched PRIVATE sched.cc)
 target_include_directories(Renderer_sched PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(Renderer_sched PUBLIC renderer::sanitizers)
+target_link_libraries(Renderer_sched
+    PUBLIC renderer::sanitizers
+    PRIVATE Renderer::Geom Renderer::Raster)
 orthodoxy_enforce(Renderer_sched)
 pico_tidy_enable(Renderer_sched)

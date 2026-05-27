@@ -11,7 +11,9 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "cmd/cmd.h"
 #include "fixed/fixed.h"
+#include "rdr/frame.h"
 
 #define FX_ONE (1 << 16)
 
@@ -363,9 +365,202 @@ RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
   return RDR_OK;
 }
 
-// ---- frozen entry (stubbed until Frame is extended at C1) ------------------
+// ---- front-end command interpreter (C1) ------------------------------------
+// Module-local interpreter state threaded through cb_walk as the visitor ctx.
+// Frame owns the durable sinks (pool/bins/mtx/vp/rstate); GeomCtx adds the
+// transient LOAD_VERTS cursor and the last-vertex depth used by BRANCH_LESS_Z.
+// C1 index convention: DRAW_TRIS indices are ABSOLUTE into the current
+// LOAD_VERTS window (index 0 == the first loaded vertex, gSPVertex-style). The
+// frozen load_verts.base (a base-relative window offset) is NOT supported in
+// the thin slice; a nonzero base is rejected at LOAD_VERTS so a windowed stream
+// can never silently misindex. Pinning base-relative vs absolute is a C2
+// handoff (see WORKFLOW.md). vptr==0 (no cursor) draws nothing.
+struct GeomCtx {
+  struct Frame* f;
+  const struct Vtx* vptr;  // current LOAD_VERTS window base (absolute idx 0)
+  uint16_t vcount;         // loaded vertex count (bounds the index fetch)
+};
+
+// Emit one screen-space triangle (already projected TVtx a,b,c) through cull +
+// bin. winding/area is computed here; det_sign folds in the modelview mirror.
+static void geom_emit_tri(struct Frame* f, const struct TVtx* a,
+                          const struct TVtx* b, const struct TVtx* c,
+                          int det_sign, int cull_mode, uint16_t material) {
+  int32_t const area2 = geom_signed_area2(a, b, c);
+  if (geom_cull_backface(area2, det_sign, cull_mode)) {
+    ++f->geom.tris_dropped;
+    return;
+  }
+  uint32_t const i0 = geom_emit_tvert(&f->geom, a);
+  uint32_t const i1 = geom_emit_tvert(&f->geom, b);
+  uint32_t const i2 = geom_emit_tvert(&f->geom, c);
+  if (i0 == UINT32_MAX || i1 == UINT32_MAX || i2 == UINT32_MAX) {
+    ++f->geom.tris_dropped;  // pool exhausted: drop-with-count, never corrupt
+    return;
+  }
+  geom_bin_tri(&f->geom, (uint16_t)i0, (uint16_t)i1, (uint16_t)i2, material);
+}
+
+// Process one source triangle (model-space indices vi0,vi1,vi2): shade ->
+// transform -> per-vertex near reject -> project -> guard-band clip -> fan ->
+// cull + bin. Thin-slice near-clip: if ANY vertex has clip.w <= 0 the whole
+// triangle is rejected (a true Sutherland near-clip in clip space is a later
+// improvement; noted to the Lead).
+static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
+                          uint16_t vi2) {
+  struct Frame* f = g->f;
+  if (g->vptr == 0) {
+    return;  // DRAW_TRIS with no LOAD_VERTS cursor: nothing to fetch
+  }
+  uint16_t const idx[3] = {vi0, vi1, vi2};
+  if (vi0 >= g->vcount || vi1 >= g->vcount || vi2 >= g->vcount) {
+    ++f->geom.tris_dropped;  // out-of-range index: drop-with-count
+    return;
+  }
+
+  const struct Mat4fx* mvp = mtx_mvp(&f->mtx);
+  int const det_sign =
+      geom_modelview_det_sign(&f->mtx.modelview[f->mtx.mv_top]);
+
+  // Shade + transform + project the 3 source verts into a small screen-space
+  // triangle, near-rejecting the whole tri if any vertex is behind the camera.
+  struct TVtx tri[3];
+  for (int k = 0; k < 3; ++k) {
+    const struct Vtx* sv = &g->vptr[idx[k]];
+    uint16_t const rgba =
+        geom_shade_vertex(sv, &f->rstate.lights, f->rstate.lit);
+    struct Vec4fx clip;
+    geom_transform_clip(&clip, mvp, sv);
+    if (clip.w <= 0) {
+      ++f->geom.tris_dropped;  // near reject (thin-slice whole-tri policy)
+      return;
+    }
+    if (geom_project(&tri[k], &clip, &f->vp, sv->uv[0], sv->uv[1], rgba) !=
+        RDR_OK) {
+      ++f->geom.tris_dropped;
+      return;
+    }
+  }
+
+  // Guard-band clip the projected triangle into a convex ring; re-triangulate
+  // as a fan (ring[0], ring[i], ring[i+1]).
+  struct TVtx ring[CLIP_MAX_OUT];
+  int const n = clip_tri(tri, 3, ring);
+  if (n < 3) {
+    ++f->geom.tris_dropped;  // fully guard-clipped
+    return;
+  }
+  for (int i = 1; i + 1 < n; ++i) {
+    // TODO(C2): real render-state version/intern id; combiner.mode was wrong
+    // (it is a combiner enum, not a state id; the blend/tex streams read this
+    // frozen TriRef.material field). 0 until render-state interning lands.
+    geom_emit_tri(f, &ring[0], &ring[i], &ring[i + 1], det_sign,
+                  (int)f->rstate.cull, 0);
+  }
+}
+
+// cb_walk visitor: interpret one non-control command (or score a BRANCH_LESS_Z
+// predicate). Returns the branch predicate for CMD_BRANCH_LESS_Z, else ignored.
+static int geom_visit(void* ctx, const struct Command* c) {
+  struct GeomCtx* g = (struct GeomCtx*)ctx;
+  struct Frame* f = g->f;
+  switch (c->op) {
+    case CMD_SET_MATRIX:
+      if (c->u.set_matrix.mat != 0) {
+        mtx_set(&f->mtx, (int)c->u.set_matrix.target, (int)c->u.set_matrix.push,
+                c->u.set_matrix.mat);
+      }
+      return 0;
+    case CMD_POP_MATRIX:
+      mtx_pop(&f->mtx, MTX_MODELVIEW);
+      return 0;
+    case CMD_SET_VIEWPORT:
+      vp_from_cmd(&f->vp, (int)c->u.viewport.x, (int)c->u.viewport.y,
+                  (int)c->u.viewport.w, (int)c->u.viewport.h);
+      return 0;
+    case CMD_SET_MATERIAL:
+      if (c->u.set_material.state != 0) {
+        f->rstate = *c->u.set_material.state;
+      }
+      return 0;
+    case CMD_SET_COMBINER:
+      return 0;  // thin slice: combiner id carried via material, not used yet
+    case CMD_SET_PRIM_COLOR:
+      f->rstate.prim_color = c->u.set_color.color;
+      return 0;
+    case CMD_SET_ENV_COLOR:
+      f->rstate.env_color = c->u.set_color.color;
+      return 0;
+    case CMD_SET_FOG:
+      f->rstate.fog.near_z = c->u.set_fog.near_z;
+      f->rstate.fog.far_z = c->u.set_fog.far_z;
+      f->rstate.fog.color = c->u.set_fog.color;
+      f->rstate.fog.enabled = 1;
+      return 0;
+    case CMD_SET_RENDERMODE:
+    case CMD_SET_LIGHTS:
+    case CMD_SET_TEXGEN:
+      // SET_MATERIAL carries the full RenderState (incl. lights/zmode/texgen)
+      // in the thin slice; these granular setters are accepted but no-op here.
+      return 0;
+    case CMD_LOAD_VERTS:
+      if (c->u.load_verts.base != 0) {
+        // Thin slice supports only absolute (base==0) windows; reject a
+        // base-relative load rather than misindex (drop-with-count via a null
+        // cursor so subsequent DRAW_TRIS draw nothing). C2 pins the convention.
+        g->vptr = 0;
+        g->vcount = 0;
+        return 0;
+      }
+      g->vptr = c->u.load_verts.ptr;
+      g->vcount = c->u.load_verts.count;
+      return 0;
+    case CMD_DRAW_TRIS: {
+      const uint16_t* tridx = c->u.draw_tris.idx;
+      if (tridx == 0) {
+        return 0;
+      }
+      for (uint16_t t = 0; t < c->u.draw_tris.tri_count; ++t) {
+        geom_draw_one(g, tridx[(t * 3) + 0], tridx[(t * 3) + 1],
+                      tridx[(t * 3) + 2]);
+      }
+      return 0;
+    }
+    case CMD_CLEAR:
+      f->clear_color = c->u.clear.color;
+      f->clear_pending = 1;
+      return 0;
+    case CMD_BRANCH_LESS_Z: {
+      // Predicate: take the branch when the referenced loaded vertex is CLOSER
+      // than the threshold. Depth proxy is the transformed vertex inv_w (larger
+      // == closer); threshold z is fx_invw in the same space. "less z" (nearer)
+      // => take when our inv_w > z. Out-of-range / no cursor: do not take.
+      if (g->vptr == 0 || c->u.branch_less_z.vtx >= g->vcount) {
+        return 0;
+      }
+      const struct Vtx* sv = &g->vptr[c->u.branch_less_z.vtx];
+      struct Vec4fx clip;
+      geom_transform_clip(&clip, mtx_mvp(&f->mtx), sv);
+      if (clip.w <= 0) {
+        return 0;
+      }
+      fx_invw const inv_w = fx_div(FX_ONE, clip.w);
+      return (inv_w > c->u.branch_less_z.z) ? 1 : 0;
+    }
+    case CMD_CULL_VOLUME:
+    default:
+      return 0;  // CULL_VOLUME not implemented in the thin slice
+  }
+}
+
+// ---- frozen entry (C1: real front end) -------------------------------------
 RdrErr geom_run(const struct Command* cmds, struct Frame* f) {
-  (void)cmds;
-  (void)f;
-  return RDR_OK;
+  if (cmds == 0 || f == 0) {
+    return RDR_EINVAL;
+  }
+  struct GeomCtx g;
+  g.f = f;
+  g.vptr = 0;
+  g.vcount = 0;
+  return cb_walk(cmds, geom_visit, &g);
 }
