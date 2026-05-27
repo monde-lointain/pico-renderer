@@ -33,6 +33,47 @@ static int count_non_clear(const uint16_t* fb, int n, uint16_t clear) {
   return drawn;
 }
 
+// Unpack RGB565 -> 8-bit channels (matches gfx/framebuffer.h rgb565()).
+static void unpack565(uint16_t c, int* r, int* g, int* b) {
+  *r = ((c >> 11) & 0x1F) << 3;
+  *g = ((c >> 5) & 0x3F) << 2;
+  *b = (c & 0x1F) << 3;
+}
+
+// Tally pixels matching the cube's distinct face colors over the whole frame.
+// The flat face colors are well separated, so a simple per-pixel bucket pins
+// which faces are visible -> which side the camera is on. Front (+Z) = RED;
+// the away-side faces the wrong-side camera would reveal are top (+Y) = GREEN
+// and bottom (-Y) = ORANGE.
+struct FaceTally {
+  long red;     // cube +Z front (and pyramid apex)
+  long green;   // cube +Y top
+  long orange;  // cube -Y bottom
+};
+static void tally_faces(const uint16_t* fb, int n, uint16_t clear,
+                        struct FaceTally* t) {
+  t->red = 0;
+  t->green = 0;
+  t->orange = 0;
+  for (int i = 0; i < n; ++i) {
+    uint16_t const px = fb[i];
+    if (px == clear) {
+      continue;
+    }
+    int r;
+    int g;
+    int b;
+    unpack565(px, &r, &g, &b);
+    if (r > 180 && g < 60 && b < 60) {
+      ++t->red;
+    } else if (r < 60 && g > 180 && b < 60) {
+      ++t->green;
+    } else if (r > 180 && g > 60 && g < 180 && b < 60) {
+      ++t->orange;
+    }
+  }
+}
+
 TEST(DemoSceneGuard, SceneRendersTrisAndPixels) {
   struct Command cmds[DEMO_CMD_CAP];
   uint32_t const n = demo_scene_build(cmds, DEMO_CMD_CAP, 0.0F, 0.0F);
@@ -64,4 +105,22 @@ TEST(DemoSceneGuard, SceneRendersTrisAndPixels) {
   int const drawn =
       count_non_clear(g_frame.fb, RDR_SCREEN_W * RDR_SCREEN_H, clear);
   EXPECT_GT(drawn, 0) << "no non-clear pixels — scene binned but did not draw";
+
+  // CAMERA-SIDE / CULL-SENSE GUARD (the wrong-side regression):
+  // at angle 0 gldemo's camera (eye +Z, real lookAt) sees the cube FRONT (+Z,
+  // RED) head-on and NOT its top (+Y, green) or bottom (-Y, orange) faces. A
+  // wrong-side camera (the bug: a bare +Z translate that drops the lookAt
+  // rotation -> 180deg orbit) reveals those away-faces — measured green~2160 /
+  // orange~2160 px on the wrong build vs 0 on the fixed build. So: RED must
+  // dominate, and the away-side green+orange must be negligible. This FAILS on
+  // the wrong-side build (green/orange present) and PASSES after the lookAt.
+  struct FaceTally t;
+  tally_faces(g_frame.fb, RDR_SCREEN_W * RDR_SCREEN_H, clear, &t);
+  EXPECT_GT(t.red, 4000) << "cube front (+Z red) not dominant — red=" << t.red;
+  // The away-faces (top green / bottom orange) must be nearly absent; allow a
+  // tiny margin for edge/AA pixels but reject the wrong-side build's ~2160
+  // each.
+  EXPECT_LT(t.green + t.orange, 400)
+      << "wrong-side camera / inverted cull: away-faces visible — green="
+      << t.green << " orange=" << t.orange << " (red=" << t.red << ")";
 }

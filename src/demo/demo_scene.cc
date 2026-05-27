@@ -142,10 +142,62 @@ static void push(uint8_t op, const struct Command* fill) {
   cb_push(&s_cb, &c);
 }
 
-// guLookAt: camera at world -Z looking toward +Z (renderer +z-forward), origin
-// in front of the camera. Reduces to a translate by +eye on z. Eye z = 18
-// (scaled 300) => world-origin geometry lands at view-z ~ +18, inside [0.6,60].
-static void build_view(void) { m_translate(&s_view, 0.0, 0.0, 18.0); }
+// Real lookAt (column-major), matched to the renderer's +z-FORWARD clip
+// convention: view-z(p) = dot(forward, p - eye), forward = normalize(center -
+// eye), so world points IN FRONT of the camera get POSITIVE view-z (the
+// perspective slot m[11]=1 => clip.w = +view_z). A bare +z translate would put
+// the eye on the -Z side (180deg orbit from gldemo) and show the away-faces;
+// the real lookAt places the eye on gldemo's side (eye +Z looking at origin),
+// so the +Z world faces (gldemo front, e.g. cube front = red) are nearest and
+// visible as a SOLID silhouette. Basis (s,u,f) is right-handed orthonormal
+// (det +1, a rotation, NOT a mirror) so it does not disturb det_sign / cull.
+static void m_lookat(struct Mat4fx* m, double ex, double ey, double ez,
+                     double cx, double cy, double cz, double ux, double uy,
+                     double uz) {
+  // forward f = normalize(center - eye)  (view-z axis; +z toward the scene)
+  double fx = cx - ex;
+  double fy = cy - ey;
+  double fz = cz - ez;
+  double const flen = sqrt((fx * fx) + (fy * fy) + (fz * fz));
+  if (flen > 0.0) {
+    fx /= flen;
+    fy /= flen;
+    fz /= flen;
+  }
+  // s = normalize(f x up)  (view-x axis)
+  double sx = (fy * uz) - (fz * uy);
+  double sy = (fz * ux) - (fx * uz);
+  double sz = (fx * uy) - (fy * ux);
+  double const slen = sqrt((sx * sx) + (sy * sy) + (sz * sz));
+  if (slen > 0.0) {
+    sx /= slen;
+    sy /= slen;
+    sz /= slen;
+  }
+  // u = s x f  (view-y axis; already unit)
+  double const vx = (sy * fz) - (sz * fy);
+  double const vy = (sz * fx) - (sx * fz);
+  double const vz = (sx * fy) - (sy * fx);
+  // Rows of R are (s, u, f); translation is -R*eye. Column-major store.
+  m_identity(m);
+  m->m[0] = fxd(sx);
+  m->m[4] = fxd(sy);
+  m->m[8] = fxd(sz);
+  m->m[1] = fxd(vx);
+  m->m[5] = fxd(vy);
+  m->m[9] = fxd(vz);
+  m->m[2] = fxd(fx);
+  m->m[6] = fxd(fy);
+  m->m[10] = fxd(fz);
+  m->m[12] = fxd(-((sx * ex) + (sy * ey) + (sz * ez)));
+  m->m[13] = fxd(-((vx * ex) + (vy * ey) + (vz * ez)));
+  m->m[14] = fxd(-((fx * ex) + (fy * ey) + (fz * ez)));
+}
+
+// gldemo camera: eye at +Z (z=18 scaled from 300) looking at the origin, up +Y.
+static void build_view(void) {
+  m_lookat(&s_view, 0.0, 0.0, 18.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+}
 
 uint32_t demo_scene_build(struct Command* buf, uint32_t cap, float pyr_angle,
                           float cube_angle) {
