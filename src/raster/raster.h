@@ -45,4 +45,13 @@
 void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
                  uint16_t* fb, uint16_t* zbuf);
 
+// Same as raster_tile but DOES NOT clear `zbuf` on entry — it rasterizes
+// directly against whatever depths are already present. raster_tile is exactly
+// {clear zbuf; raster_tile_noclear}. Intended for the dual-core depth-hazard
+// demonstration (tests/sched) which drives the real rasterizer over a shared,
+// un-recleared scratch to prove per-worker zbuf isolation is load-bearing.
+// Production callers want raster_tile (the per-tile clear is part of the spec).
+void raster_tile_noclear(int tile, const struct TileBin* bin,
+                         const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf);
+
 #endif  // RDR_RASTER_H

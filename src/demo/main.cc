@@ -6,18 +6,44 @@
 //
 // NOT orthodoxy_enforced (app-level carve-out, like src/app). Still C-like.
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "demo/demo_scene.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"
-#include "rdr/frame.h"
+#include "rdr/frame.h"  // struct Frame, RDR_NUM_RASTER_WORKERS
 #include "rdr/rdr.h"
 
 #ifndef DEMO_FRAMES
 /* 0 = run forever (device); >0 = bounded (host smoke). */
 #define DEMO_FRAMES 0
 #endif
+
+// Active raster-worker count for the telemetry line: the firmware dual-core
+// dispatch fans across both cores; host/SDL serial uses one.
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+#define DEMO_RASTER_WORKERS RDR_NUM_RASTER_WORKERS
+#else
+#define DEMO_RASTER_WORKERS 1
+#endif
+
+// CRC32 (IEEE, reflected) over the presented framebuffer — the on-target
+// determinism assertion compares this against the host serial CRC for the same
+// scene/angle (dual-core output must be bit-identical to single-core).
+static uint32_t fb_crc32(const uint16_t* fb, int n) {
+  const uint8_t* p = (const uint8_t*)fb;
+  size_t const len = (size_t)n * sizeof(uint16_t);
+  uint32_t crc = 0xFFFFFFFFU;
+  for (size_t i = 0; i < len; ++i) {
+    crc ^= p[i];
+    for (int k = 0; k < 8; ++k) {
+      uint32_t const mask = (uint32_t)(-(int32_t)(crc & 1U));
+      crc = (crc >> 1) ^ (0xEDB88320U & mask);
+    }
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
 
 // ---- animation state -------------------------------------------------------
 static float s_pyr_angle = 0.0F;
@@ -56,9 +82,11 @@ int main(void) {
     plat_present(&s_present_fb);
     uint32_t const t1 = plat_millis();
 
-    plat_log("frame_ms=%u tris=%u dropped=%u\n", (unsigned)(t1 - t0),
-             (unsigned)s_frame.geom.tris_total,
-             (unsigned)s_frame.geom.tris_dropped);
+    uint32_t const fb_crc = fb_crc32(s_present_fb.px, SCREEN_W * SCREEN_H);
+    plat_log("frame_ms=%u tris=%u dropped=%u workers=%u fb_crc=%08x\n",
+             (unsigned)(t1 - t0), (unsigned)s_frame.geom.tris_total,
+             (unsigned)s_frame.geom.tris_dropped, (unsigned)DEMO_RASTER_WORKERS,
+             (unsigned)fb_crc);
 
     update_animation();
     ++frame;

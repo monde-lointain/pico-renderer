@@ -16,6 +16,14 @@
 
 #include <stdint.h>
 
+// C2: number of back-end raster workers. The dual-core dispatch
+// (src/sched/dispatch_pico.cc) runs the tile sweep across both RP2040 cores;
+// each core gets its OWN per-tile depth scratch (zbuf[core_id]) so tiles stay
+// independent and the output is bit-identical to the single-core serial sweep.
+// The host/serial dispatch uses only worker 0. Front-end geometry stays
+// single-core; this is a back-end-raster-only fan-out.
+#define RDR_NUM_RASTER_WORKERS 2
+
 #include "arena/arena.h"
 #include "geom/geom.h"
 #include "rdr/config.h"
@@ -57,8 +65,10 @@ struct Frame {
   uint16_t clear_color;
   uint8_t clear_pending;  // nonzero if a CLEAR was recorded this frame
 
-  // One-tile depth scratch reused across tiles by the rasterize driver.
-  uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  // Per-worker one-tile depth scratch reused across the tiles a worker claims
+  // (raster_tile clears it on entry). One independent scratch per raster worker
+  // so dual-core tiles never share depth state — the bit-identical invariant.
+  uint16_t zbuf[RDR_NUM_RASTER_WORKERS][RDR_TILE_W * RDR_TILE_H];
 };
 
 #endif  // RDR_FRAME_H
