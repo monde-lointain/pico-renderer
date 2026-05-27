@@ -8,7 +8,7 @@ gtest_discover_tests(smoke_test)
 
 # Per-subsystem test suites own their own tests/<sub>/CMakeLists.txt (no shared
 # file contention). EXISTS-guarded so the scaffold builds before they land.
-foreach(sub game gfx app rdr fixed arena cmd geom clip raster aa tex shade blend sched)
+foreach(sub game gfx app rdr fixed arena cmd geom clip raster aa tex shade blend sched harness)
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${sub}/CMakeLists.txt)
     add_subdirectory(${sub})
   endif()
