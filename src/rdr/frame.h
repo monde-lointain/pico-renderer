@@ -4,8 +4,9 @@
 // intentionally left undefined there ("defined where the renderer owns it"). C1
 // owns the concrete layout: it bundles the per-frame backing memory the
 // single-core pipeline fills (arena + transformed-vertex pool + per-tile TriRef
-// segments + GeomOut + matrix/viewport/render state + a one-tile depth
-// scratch). This header is shared by the renderer façade (rdr.cc), the geometry
+// segments + GeomOut + matrix/viewport/render state + per-worker one-tile depth
+// + coverage scratch + the 2D sky-blit list). This header is shared by the
+// renderer façade (rdr.cc), the geometry
 // front end (geom.cc), and the single-core driver (sched.cc) so the layout
 // lives in ONE place; it is NOT part of the cross-module frozen contract (not
 // in types.h).
@@ -25,6 +26,7 @@
 #define RDR_NUM_RASTER_WORKERS 2
 
 #include "arena/arena.h"
+#include "blit2d/blit2d.h"
 #include "geom/geom.h"
 #include "rdr/config.h"
 #include "rdr/types.h"
@@ -45,6 +47,13 @@
 // before the dual-core raster reads it (immutable during raster → bit-identical
 // invariant preserved).
 #define RDR_MAX_MATERIALS 16
+
+// Φ2 (terrain wave): screen-space 2D background sky blits. rdr owns ORDERING
+// via this list on Frame (keeps rdr platform-free; the demo fills it). The
+// scene needs panorama + clouds = 2 (run full-frame BEFORE the 3D sweep at T3 —
+// no depth, does not seed zbuf); 4 leaves headroom. Layout-coupled (sizes the
+// blits[] array) so it lives here beside the struct, not in config.h.
+#define RDR_MAX_BLITS 4
 
 struct Frame {
   // Output target (caller-owned full-screen RGB565, row-major).
@@ -84,6 +93,21 @@ struct Frame {
   // (raster_tile clears it on entry). One independent scratch per raster worker
   // so dual-core tiles never share depth state — the bit-identical invariant.
   uint16_t zbuf[RDR_NUM_RASTER_WORKERS][RDR_TILE_W * RDR_TILE_H];
+
+  // Φ2: screen-space 2D sky blits drawn full-frame BEFORE the 3D sweep. The
+  // demo fills [0,blit_count); rdr owns ordering (T3 wires blit2d_render into
+  // rdr.cc — storing Blit2dRect by value here adds only a header-type
+  // dependency, no link until then).
+  struct Blit2dRect blits[RDR_MAX_BLITS];
+  uint16_t blit_count;
+
+  // Φ2: per-worker one-tile coverage scratch for the RDP-adapted AA resolve
+  // (R.3-AA). One byte/pixel analytic coverage, one independent scratch per
+  // raster worker — the same dual-core independence as zbuf, preserving the
+  // bit-identical invariant. Born here; written + consumed by R.3-AA's per-tile
+  // resolve (the 565 + per-tile-coverage build, config.h). Untouched until R.3
+  // lands — like TVtx.fog, defined where born so there are no stray bytes.
+  uint8_t cov[RDR_NUM_RASTER_WORKERS][RDR_TILE_W * RDR_TILE_H];
 };
 
 #endif  // RDR_FRAME_H
