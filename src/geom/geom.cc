@@ -428,10 +428,15 @@ uint32_t geom_material_overflow_count(void) { return s_material_overflow; }
 // the thin slice; a nonzero base is rejected at LOAD_VERTS so a windowed stream
 // can never silently misindex. Pinning base-relative vs absolute is a C2
 // handoff (see WORKFLOW.md). vptr==0 (no cursor) draws nothing.
+//
+// G1 (geom-share): verts are TRANSFORMED ONCE at LOAD_VERTS time and pooled
+// contiguously from vbase. DRAW_TRIS re-uses the pooled tverts by index.
+// Sentinels (inv_w < 0) mark behind-near verts; tris referencing them drop.
 struct GeomCtx {
   struct Frame* f;
-  const struct Vtx* vptr;  // current LOAD_VERTS window base (absolute idx 0)
+  const struct Vtx* vptr;  // current LOAD_VERTS window base (for BRANCH_LESS_Z)
   uint16_t vcount;         // loaded vertex count (bounds the index fetch)
+  uint32_t vbase;          // pool index of first tvert for current window
   // Current interned material id, resolved LAZILY at draw time and cached:
   // material_dirty is set whenever a command mutates f->rstate so the next
   // DRAW_TRIS re-interns once (avoids a value-compare scan per triangle, and
@@ -460,20 +465,37 @@ static void geom_emit_tri(struct Frame* f, const struct TVtx* a,
   geom_bin_tri(&f->geom, (uint16_t)i0, (uint16_t)i1, (uint16_t)i2, material);
 }
 
-// Process one source triangle (model-space indices vi0,vi1,vi2): shade ->
-// transform -> per-vertex near reject -> project -> guard-band clip -> fan ->
-// cull + bin. Thin-slice near-clip: if ANY vertex has clip.w <= 0 the whole
-// triangle is rejected (a true Sutherland near-clip in clip space is a later
-// improvement; noted to the Lead).
+// Process one source triangle (pooled indices vi0,vi1,vi2 into the current
+// window): resolve the three pre-projected TVtx from the pool, reject any
+// near-sentinel (inv_w<0), then fast-path all-inside tris directly to
+// geom_bin_tri (zero new tverts) or clip-path tris through geom_emit_tri.
+//
+// G1 (geom-share): verts were transformed ONCE at LOAD_VERTS time. This
+// function never re-projects; it only indexes into the pool at vbase+vi.
 static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
                           uint16_t vi2) {
   struct Frame* f = g->f;
   if (g->vptr == 0) {
     return;  // DRAW_TRIS with no LOAD_VERTS cursor: nothing to fetch
   }
-  uint16_t const idx[3] = {vi0, vi1, vi2};
   if (vi0 >= g->vcount || vi1 >= g->vcount || vi2 >= g->vcount) {
     ++f->geom.tris_dropped;  // out-of-range index: drop-with-count
+    return;
+  }
+
+  // Resolve pooled tverts for this window (g->vbase was recorded at
+  // LOAD_VERTS).
+  uint32_t const pi0 = g->vbase + vi0;
+  uint32_t const pi1 = g->vbase + vi1;
+  uint32_t const pi2 = g->vbase + vi2;
+  const struct TVtx* a = &f->pool[pi0];
+  const struct TVtx* b = &f->pool[pi1];
+  const struct TVtx* c = &f->pool[pi2];
+
+  // Near-sentinel check: inv_w < 0 means this vert was behind the near plane
+  // at LOAD_VERTS time. Drop the whole tri (thin-slice whole-tri near policy).
+  if (a->inv_w < 0 || b->inv_w < 0 || c->inv_w < 0) {
+    ++f->geom.tris_dropped;
     return;
   }
 
@@ -485,32 +507,39 @@ static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
     g->material_dirty = 0;
   }
 
-  const struct Mat4fx* mvp = mtx_mvp(&f->mtx);
   int const det_sign =
       geom_modelview_det_sign(&f->mtx.modelview[f->mtx.mv_top]);
 
-  // Shade + transform + project the 3 source verts into a small screen-space
-  // triangle, near-rejecting the whole tri if any vertex is behind the camera.
-  struct TVtx tri[3];
-  for (int k = 0; k < 3; ++k) {
-    const struct Vtx* sv = &g->vptr[idx[k]];
-    uint16_t const rgba =
-        geom_shade_vertex(sv, &f->rstate.lights, f->rstate.lit);
-    struct Vec4fx clip;
-    geom_transform_clip(&clip, mvp, sv);
-    if (clip.w <= 0) {
-      ++f->geom.tris_dropped;  // near reject (thin-slice whole-tri policy)
-      return;
-    }
-    if (geom_project(&tri[k], &clip, &f->vp, sv->uv[0], sv->uv[1], rgba) !=
-        RDR_OK) {
+  // Guard-band rect (constant per frame; computed once per call is cheap —
+  // it is just a few multiplies of constants).
+  struct ClipRect gr;
+  clip_guard_rect(&gr);
+
+  // Fast path: all three verts inside the guard band -> bin directly using the
+  // pooled indices (zero new tverts, O(1) per tri).
+  int const a_in = (a->x >= gr.minx && a->x <= gr.maxx && a->y >= gr.miny &&
+                    a->y <= gr.maxy);
+  int const b_in = (b->x >= gr.minx && b->x <= gr.maxx && b->y >= gr.miny &&
+                    b->y <= gr.maxy);
+  int const c_in = (c->x >= gr.minx && c->x <= gr.maxx && c->y >= gr.miny &&
+                    c->y <= gr.maxy);
+  if (a_in && b_in && c_in) {
+    int32_t const area2 = geom_signed_area2(a, b, c);
+    if (geom_cull_backface(area2, det_sign, (int)f->rstate.cull)) {
       ++f->geom.tris_dropped;
-      return;
+    } else {
+      geom_bin_tri(&f->geom, (uint16_t)pi0, (uint16_t)pi1, (uint16_t)pi2,
+                   g->cur_material_id);
     }
+    return;
   }
 
-  // Guard-band clip the projected triangle into a convex ring; re-triangulate
-  // as a fan (ring[0], ring[i], ring[i+1]).
+  // Clip path: at least one vert is outside the guard band. Build the local
+  // tri array from the pooled verts and run guard-band clip + fan emit.
+  struct TVtx tri[3];
+  tri[0] = *a;
+  tri[1] = *b;
+  tri[2] = *c;
   struct TVtx ring[CLIP_MAX_OUT];
   int const n = clip_tri(tri, 3, ring);
   if (n < 3) {
@@ -583,8 +612,45 @@ static int geom_visit(void* ctx, const struct Command* c) {
         g->vcount = 0;
         return 0;
       }
-      g->vptr = c->u.load_verts.ptr;
-      g->vcount = c->u.load_verts.count;
+      {
+        // G1 (geom-share): transform ALL verts ONCE at load time (matches N64
+        // gSPVertex semantics: shade+transform at load, index at draw).
+        // Pool them contiguously from vbase; sentinel (inv_w=-1) for near
+        // clips.
+        const struct Vtx* sv = c->u.load_verts.ptr;
+        uint16_t const cnt = c->u.load_verts.count;
+        g->vptr = sv;
+        g->vcount = 0;
+        g->vbase = f->geom.tvert_count;
+        const struct Mat4fx* mvp = mtx_mvp(&f->mtx);
+        uint16_t i;
+        for (i = 0; i < cnt; ++i) {
+          uint16_t const rgba =
+              geom_shade_vertex(&sv[i], &f->rstate.lights, f->rstate.lit);
+          struct Vec4fx clip;
+          geom_transform_clip(&clip, mvp, &sv[i]);
+          struct TVtx tv;
+          memset(&tv, 0, sizeof tv);
+          if (clip.w <= 0) {
+            // Near-reject sentinel: inv_w = -1 (no valid vert ever has
+            // inv_w<0).
+            tv.inv_w = -1;
+          } else {
+            if (geom_project(&tv, &clip, &f->vp, sv[i].uv[0], sv[i].uv[1],
+                             rgba) != RDR_OK) {
+              // geom_project failed (w<=0 re-check): sentinel.
+              tv.inv_w = -1;
+            }
+          }
+          uint32_t const emitted = geom_emit_tvert(&f->geom, &tv);
+          if (emitted == UINT32_MAX) {
+            // Pool full mid-window: stop; only i verts were emitted.
+            g->vcount = i;
+            return 0;
+          }
+          g->vcount = (uint16_t)(i + 1);
+        }
+      }
       return 0;
     case CMD_DRAW_TRIS: {
       const uint16_t* tridx = c->u.draw_tris.idx;
@@ -636,6 +702,7 @@ RdrErr geom_run(const struct Command* cmds, struct Frame* f) {
   g.f = f;
   g.vptr = 0;
   g.vcount = 0;
+  g.vbase = 0;
   g.cur_material_id = 0;
   g.material_dirty = 1;  // force the first draw to intern the current rstate
   return cb_walk(cmds, geom_visit, &g);

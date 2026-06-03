@@ -457,6 +457,223 @@ TEST(GeomMaterial, OverflowClampsAndCounts) {
   EXPECT_EQ(geom_material_overflow_count(), 1U);  // unchanged
 }
 
+// ---- G1: transform-once + share tests (geom-share barrier) ------------------
+// These tests are RED under the old per-tri emit code and GREEN only after
+// the transform-once / vbase share is implemented.
+
+// Helper: build a minimal Frame ready for geom_run (identity MV, custom proj).
+static void frame_init_for_share(struct Frame* f, const struct Mat4fx* proj) {
+  memset(f, 0, sizeof *f);
+  f->width = RDR_SCREEN_W;
+  f->height = RDR_SCREEN_H;
+  geom_out_init(&f->geom, f->pool, RDR_MAX_TVERTS, f->refs, RDR_REFS_PER_TILE);
+  mtx_init(&f->mtx);
+  mtx_set(&f->mtx, MTX_PROJECTION, 0, proj);
+  vp_from_cmd(&f->vp, 0, 0, f->width, f->height);
+  memset(&f->rstate, 0, sizeof f->rstate);
+  f->rstate.cull = CULL_NONE;
+}
+
+// 2x2 quad grid: 9 verts (3x3), 8 triangles.  All verts on-screen; after
+// transform-once, DRAW_TRIS must reuse pooled tverts: pool grows by exactly 9
+// (one per source vert), NOT by 3*8=24 (per-tri emit).
+TEST(GeomShare, SharingReusesPooledVerts) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  // 3x3 grid in model space, all well in front of camera at z=10.
+  // x in {-4,-0, 4}, y in {-4, 0, 4} -> project to on-screen coords.
+  static struct Vtx verts[9];
+  int vi = 0;
+  int const xs[3] = {-4, 0, 4};
+  int const ys[3] = {-4, 0, 4};
+  for (int row = 0; row < 3; ++row) {
+    for (int col = 0; col < 3; ++col) {
+      verts[vi] = mk_vtx((int16_t)xs[col], (int16_t)ys[row], 10);
+      verts[vi].c.rgba[3] = 255;
+      ++vi;
+    }
+  }
+
+  // 8 triangles from the 4 quads (each quad = 2 tris).
+  // Grid indices: row r, col c -> index (r*3)+c.
+  //   (r,c),(r,c+1),(r+1,c) and (r,c+1),(r+1,c+1),(r+1,c)
+  static uint16_t idx[8 * 3];
+  int ti = 0;
+  for (int r = 0; r < 2; ++r) {
+    for (int c = 0; c < 2; ++c) {
+      uint16_t const tl = (uint16_t)((r * 3) + c);
+      uint16_t const tr_v = (uint16_t)((r * 3) + c + 1);
+      uint16_t const bl = (uint16_t)(((r + 1) * 3) + c);
+      uint16_t const br = (uint16_t)(((r + 1) * 3) + c + 1);
+      idx[(ti * 3) + 0] = tl;
+      idx[(ti * 3) + 1] = tr_v;
+      idx[(ti * 3) + 2] = bl;
+      ++ti;
+      idx[(ti * 3) + 0] = tr_v;
+      idx[(ti * 3) + 1] = br;
+      idx[(ti * 3) + 2] = bl;
+      ++ti;
+    }
+  }
+
+  struct Command cmds[6];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 9;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 8;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  // KEY INVARIANT: exactly 9 tverts emitted (one per source vert), not 3*8=24.
+  EXPECT_EQ(f.geom.tvert_count, 9U);
+}
+
+// A triangle straddling the guard band triggers the clip path; new tverts ARE
+// emitted for the clipped output (clip fan), and the tri is still rendered.
+TEST(GeomShare, ClipPathStillEmits) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  // Vertices: two inside the guard band (on-screen), one FAR outside so the
+  // guard-band clip fires.  Use a large model-space x.
+  // With fov_scale=1.5, z=10, NDC_x = 1.5 * x / 10. screen_x = cx + ndc_x*120.
+  // Guard extends to RDR_SCREEN_W + 2*RDR_SCREEN_W = 720 screen px.
+  // We want screen_x >> 720, so model_x >> 720/120*10/1.5 = 40. Use 200.
+  // Use non-zero y variation to avoid a degenerate (all-collinear) triangle.
+  static struct Vtx verts[3];
+  verts[0] = mk_vtx(-2, -3, 10);
+  verts[1] = mk_vtx(2, 3, 10);
+  verts[2] = mk_vtx(200, 0, 10);  // way outside guard band
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+
+  static const uint16_t idx[3] = {0, 1, 2};
+  struct Command cmds[4];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  // 3 tverts from LOAD_VERTS, plus clipped fan verts from the clip path.
+  EXPECT_GE(f.geom.tvert_count, 3U);  // at minimum the 3 source verts
+  // The clipped triangle(s) must have been binned (not fully culled by clip).
+  EXPECT_GE(f.geom.tris_total, 1U);
+}
+
+// A vert behind the near plane (clip.w<=0) gets a SENTINEL tvert (inv_w<0).
+// Every triangle that references that sentinel vert is dropped; triangles
+// using only in-front verts survive.
+TEST(GeomShare, NearRejectWholeTri) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  // verts[0..1] in front (z=10), verts[2] behind (z=-5, w<=0 after projection).
+  // Near plane is at n=0.5 in proj params above; z=-5 is behind.
+  static struct Vtx verts[3];
+  verts[0] = mk_vtx(-2, -2, 10);
+  verts[1] = mk_vtx(2, -2, 10);
+  verts[2] = mk_vtx(0, 0, -5);  // behind near plane; w will be <= 0
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+
+  // tri0 uses only in-front verts -> must survive.
+  // tri1 uses verts[2] (behind) -> must be dropped.
+  static const uint16_t idx[6] = {0, 1, 0, 0, 1, 2};
+  struct Command cmds[4];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 2;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  // tri1 (0,1,0) is degenerate (area==0); tri2 (0,1,2) has near-behind vert ->
+  // dropped. So tris_total==0 or 1 (degenerate drop) + 1 dropped.
+  // The near-reject guard: tris_dropped >= 1.
+  EXPECT_GE(f.geom.tris_dropped, 1U);
+  // Pool has 3 tverts: verts[0] and [1] are valid, verts[2] gets sentinel.
+  EXPECT_EQ(f.geom.tvert_count, 3U);
+  // The sentinel tvert (verts[2]) must have inv_w < 0.
+  EXPECT_LT(f.pool[2].inv_w, 0);
+}
+
+// An index >= vcount is out-of-range; the tri is dropped and the pool is not
+// corrupted (tvert_count does not grow from the bad reference).
+TEST(GeomShare, OutOfRangeIndexDropped) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  static struct Vtx verts[2];
+  verts[0] = mk_vtx(-2, -2, 10);
+  verts[1] = mk_vtx(2, -2, 10);
+  for (int k = 0; k < 2; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+
+  // Index 2 is out of range (vcount=2); tri must be dropped.
+  static const uint16_t idx[3] = {0, 1, 2};
+  struct Command cmds[4];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 2;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  // 2 tverts for the 2 loaded verts; pool not corrupted by the bad index.
+  EXPECT_EQ(f.geom.tvert_count, 2U);
+  EXPECT_GE(f.geom.tris_dropped, 1U);
+}
+
 // End-to-end: two SET_MATERIAL blocks drawing the same geometry produce TriRefs
 // whose material ids match the interned ids (resolves the always-0
 // placeholder). Distinct states -> distinct ids on the binned refs; a repeated

@@ -339,3 +339,20 @@ App-side of the T0 "real-density geometry + deterministic camera" milestone. Sel
 | TW-10 plans in repo | DONE — Wave-E plan committed to `docs/superpowers/plans/` | — | live (this retro) |
 
 **Next wave drafted:** `docs/superpowers/plans/2026-06-03-waveE-rlane-t0.md` (T0 on-target barrier + serialized R-lane R.1→R.4 + T1–T5; contract-delta = D1 `TVtx.fog` + Φ2 cov/blit scratch + `src/aa/` + `RDR_MAX_TVERTS`→2048-after-T0-indexed-swap).
+
+## G1 — geom-share barrier (transform-once + vert sharing) — 2026-06-03 (branch `impl/geom-share`)
+
+**Change:** verts now transformed ONCE at CMD_LOAD_VERTS time (matching N64 gSPVertex semantics) and pooled contiguously from `vbase`. DRAW_TRIS resolves pooled TVtx by index; all-inside tris go directly to `geom_bin_tri` (zero new tverts). Clip-path (guard-band crossing) still emits clip-fan tverts. Near-behind verts get a sentinel (inv_w=-1); tris referencing a sentinel drop.
+
+**Pool before/after on the 2x2 quad grid test (SharingReusesPooledVerts):** 9 source verts, 8 tris.
+- Before: per-tri emit → 3×8 = 24 tverts (old code; test fails).
+- After: transform-once → 9 tverts (new code; test passes).
+
+**Terrain relevance:** D.1's 1024-tri mesh needs ~3072 tverts with per-tri emit (over `RDR_MAX_TVERTS`=3000). With sharing: up to ~1152 unique tverts (depends on vert reuse factor), fits comfortably.
+
+**Bit-identical:** all 267 host-suite fb_crc goldens pass unchanged. The fast path bins the SAME pooled TVtx values the old path would have re-projected identically; culling and bin order are unchanged; clipped tris go through the same geom_emit_tri path.
+
+**Friction:**
+- Test `ClipPathStillEmits` initially used all-collinear verts (y=0 for all three → degenerate after projection → tris_total=0); caught on RED check. Fixed by giving verts non-zero y spread.
+- `misc-const-correctness` on `cnt` (geom.cc) and `xs`/`ys`/quad-index vars (geom_test.cc); `readability-math-missing-parentheses` on `r*3+c` expressions in test. All fixed before commit; tidy exit=0, zero `error:` lines.
+- `make tidy` background-task false-green risk (D2-01/D3-2 lesson applied): ran via `cmake --build build-host --target tidy 2>&1; echo "EXIT:$?"` chained with a grep, confirmed exit=0 and zero `error:` before marking tidy clean.
