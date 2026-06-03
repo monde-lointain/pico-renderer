@@ -31,12 +31,23 @@
 #include "rdr/config.h"
 #include "rdr/types.h"
 
-// Per-tile TriRef segment capacity (thin-slice C1 value). The bin is a fixed
-// per-tile segment; overflow drops-with-count (never corrupts) per the binning
-// contract. Sized small for the bring-up demo's tri budget; the real ~3000-tri
-// tune lands with the S0.5 on-device confirmation (config.h note). Total bin
-// storage = GEOM_NUM_TILES * RDR_REFS_PER_TILE * sizeof(TriRef).
-#define RDR_REFS_PER_TILE 256
+// Arena-backed variable bins (Wave-E, T0 finding). The OLD model pre-sliced one
+// fixed RDR_REFS_PER_TILE segment per tile — but real-density terrain packs
+// >256 tris into a hot 60x60 tile (measured worst single-tile demand = 759), so
+// fixed segments dropped real geometry every frame, and sizing them up (759*16
+// tiles = ~96-128 KB) blew the SRAM budget. Instead the bins draw from ONE
+// shared pool, sized to the worst-frame TOTAL tile-ref demand (measured max =
+// 1606 over the full scripted loop), so a hot tile takes what cold tiles don't.
+// Binning DEFERS: geom_bin_tri buffers each surviving tri (a TriRef) into
+// bin_jobs[] and tallies per-tile demand; geom_bin_finalize prefix-sums the
+// demands into contiguous per-tile segments of bin_pool[] and replays the jobs
+// IN EMISSION ORDER — so the per-tile ref order (hence the rasterized output)
+// is identical to the old append order: the dual-core bit-identical invariant
+// holds. Pool/job overflow drops-with-count (never corrupts), same contract but
+// GLOBAL not per-tile. Both are tunables (S0.5/scene-tuned), like
+// RDR_MAX_TVERTS.
+#define RDR_BIN_POOL_REFS 2048  // shared contiguous per-tile segments (16 KB)
+#define RDR_BIN_MAX_JOBS 1536   // deferred surviving-tri list (12 KB)
 
 // Φ (terrain wave): per-frame interned render-state table. TriRef.material
 // indexes it (resolves C2 latent #2 — C1/C2 wrote 0). The scene's distinct
@@ -66,9 +77,13 @@ struct Frame {
   struct Arena arena;
   alignas(8) uint8_t arena_buf[RDR_CMD_ARENA_BYTES];
 
-  // Transformed-vertex pool + per-tile TriRef bin storage (the sort-middle).
+  // Transformed-vertex pool + arena-backed bin storage (the sort-middle).
+  // bin_jobs: deferred surviving-tri list (buffered during the geom pass).
+  // bin_pool: the shared ref pool finalize packs into contiguous per-tile
+  // segments. See RDR_BIN_* above.
   struct TVtx pool[RDR_MAX_TVERTS];
-  struct TriRef refs[GEOM_NUM_TILES * RDR_REFS_PER_TILE];
+  struct TriRef bin_jobs[RDR_BIN_MAX_JOBS];
+  struct TriRef bin_pool[RDR_BIN_POOL_REFS];
   struct GeomOut geom;
 
   // Front-end state mutated by the command stream.

@@ -107,24 +107,49 @@ struct GeomOut {
   uint32_t tvert_count;
   uint32_t tvert_cap;
   struct TileBin tiles[GEOM_NUM_TILES];
-  uint32_t tris_total;    // accepted triangles (binned, counted vs cap)
-  uint32_t tris_dropped;  // dropped on overflow / cull / clip
+  uint32_t tris_total;    // accepted triangles (placed in bins by finalize)
+  uint32_t tris_dropped;  // dropped on overflow / cull / clip / near
+  // Arena-backed variable bins (Wave-E). geom_bin_tri DEFERS: it buffers each
+  // surviving tri (a TriRef) into jobs[] and tallies per-tile demand in
+  // tiles[].count. geom_bin_finalize prefix-sums those demands into contiguous
+  // segments of the shared pool[] and replays jobs IN ORDER. See rdr/frame.h.
+  struct TriRef* jobs;  // deferred surviving-tri buffer (caller-owned storage)
+  uint32_t jobs_count;  // tris buffered this frame
+  uint32_t jobs_cap;    // capacity; overflow drops-with-count (tris_dropped)
+  struct TriRef* pool;  // shared ref pool finalize packs per-tile segments into
+  uint32_t pool_cap;    // capacity; overflow drops-with-count (tiles[].dropped)
+  uint32_t pool_used;   // slots consumed by finalize (high-water; telemetry)
 };
-// Initialize bins to empty using caller-provided ref storage (one segment per
-// tile, each of `refs_per_tile` capacity). tverts pool/cap set separately.
+// Initialize bins to empty using caller-provided storage: `pool` (the shared
+// per-tile ref segments, capacity `pool_cap`) and `jobs` (the deferred
+// surviving-tri buffer, capacity `jobs_cap`). tverts pool/cap set separately.
 void geom_out_init(struct GeomOut* o, struct TVtx* tverts, uint32_t tvert_cap,
-                   struct TriRef* refs, uint32_t refs_per_tile);
+                   struct TriRef* pool, uint32_t pool_cap, struct TriRef* jobs,
+                   uint32_t jobs_cap);
 
 // Append a transformed vertex to the pool; returns its index, or UINT32_MAX on
 // overflow.
 uint32_t geom_emit_tvert(struct GeomOut* o, const struct TVtx* v);
 
 // Bin a triangle (already-clipped, projected, culled) referencing pool indices
-// v0,v1,v2 with material id. Computes the screen bbox, appends a TriRef to
-// every overlapped tile. Overflow drops+counts (never corrupts). Returns RDR_OK
-// or RDR_EOVERFLOW.
+// v0,v1,v2 with material id. DEFERRED (Wave-E arena bins): buffers the TriRef
+// into jobs[] and tallies per-tile demand (tiles[].count, += 1 per overlapped
+// tile) — it does NOT write the pool yet. Call geom_bin_finalize after the
+// geometry pass to pack the segments. Returns RDR_OK, or RDR_EOVERFLOW (+counts
+// tris_dropped) if the job buffer is full (drop-with-count, never corrupts).
 RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
                     uint16_t material);
+
+// Finalize binning after the geometry pass: prefix-sum the per-tile demand
+// (tiles[].count, tallied by geom_bin_tri) into contiguous segments of the
+// shared pool, then replay the buffered jobs IN EMISSION ORDER into them. After
+// this, tiles[].refs/count are the ready-to-raster per-tile lists (flat +
+// contiguous — raster consumption is unchanged, and per-tile order matches the
+// old append order so the bit-identical invariant holds). Sets tris_total
+// (placed jobs); a job that can't fully place (pool exhausted for some tile)
+// counts tris_dropped + tiles[].dropped. geom_run calls this automatically;
+// direct geom_bin_tri callers (tests) must call it before reading tiles[].refs.
+void geom_bin_finalize(struct GeomOut* o);
 
 // ---- material interning (Wave-D D.4) ---------------------------------------
 // Intern the per-frame distinct RenderStates into frame->rstate_table so each

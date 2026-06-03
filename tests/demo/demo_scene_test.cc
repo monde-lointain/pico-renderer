@@ -401,13 +401,12 @@ TEST(TerrainSceneGuard, DumpFbCrcReferenceSequence) {
   for (long f = 0; f < frames; ++f) {
     render_terrain(&cam, &scroll, &telem);
     uint32_t const crc = host_fb_crc32(g_fb.px, RDR_SCREEN_W * RDR_SCREEN_H);
-    // Sum per-tile bin overflow: the ONLY "lost geometry" drop possible here
-    // (pool can't exhaust — peak tverts < cap; mesh indices are valid). The
-    // rest of tris_dropped is legitimate backface-cull / near-reject /
-    // guard-clip. binof>0 is the real missing-geometry alarm the plan means.
+    // Sum per-tile bin overflow (shortfall when the shared pool can't give a
+    // tile its full demand). With arena bins sized to the worst-frame total
+    // demand this is 0 — binof>0 is the missing-geometry alarm. maxtile = worst
+    // single-tile demand; poolused = shared-pool high-water this frame.
     uint32_t binof = 0;
-    uint32_t maxtile = 0;  // worst single-tile demand = count + dropped (the
-                           // RDR_REFS_PER_TILE the worst tile actually needs)
+    uint32_t maxtile = 0;
     for (int t = 0; t < GEOM_NUM_TILES; ++t) {
       binof += g_frame.geom.tiles[t].dropped;
       uint32_t const demand =
@@ -416,13 +415,61 @@ TEST(TerrainSceneGuard, DumpFbCrcReferenceSequence) {
         maxtile = demand;
       }
     }
-    printf("frame=%u fb_crc=%08x dropped=%u tris=%u binof=%u maxtile=%u\n",
-           (unsigned)f, crc, (unsigned)g_frame.geom.tris_dropped,
-           (unsigned)g_frame.geom.tris_total, (unsigned)binof,
-           (unsigned)maxtile);
+    printf(
+        "frame=%u fb_crc=%08x dropped=%u tris=%u binof=%u maxtile=%u "
+        "poolused=%u jobs=%u\n",
+        (unsigned)f, crc, (unsigned)g_frame.geom.tris_dropped,
+        (unsigned)g_frame.geom.tris_total, (unsigned)binof, (unsigned)maxtile,
+        (unsigned)g_frame.geom.pool_used, (unsigned)g_frame.geom.jobs_count);
     demo_camera_advance(&cam, 0, 0);
     demo_scroll_advance(&scroll);
   }
+}
+
+// ARENA-BINS GUARD (Wave-E): the T0 probe found the OLD fixed per-tile bins
+// (RDR_REFS_PER_TILE=256) overflowed every frame — worst single tile demanded
+// 759 tris, dropping real geometry. Arena-backed variable bins draw from one
+// shared pool sized to the worst-frame TOTAL demand, so NO geometry is lost.
+// Sweep the whole scripted loop and assert: zero per-tile overflow, and the
+// shared-pool + job-buffer high-water stay under their caps (with headroom). A
+// regression that under-sizes a cap or loses the variable-bin behavior trips
+// this. Prints the high-water marks for the T0 report.
+TEST(TerrainSceneGuard, ArenaBinsNoOverflowAcrossScriptedLoop) {
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);
+  demo_scroll_init(&scroll);
+
+  uint32_t peak_pool = 0;
+  uint32_t peak_jobs = 0;
+  uint32_t total_overflow = 0;
+  uint32_t const total_frames = (uint32_t)SCRIPTED_FRAME_COUNT;
+  for (uint32_t f = 0; f < total_frames; ++f) {
+    render_terrain(&cam, &scroll, &telem);
+    if (g_frame.geom.pool_used > peak_pool) {
+      peak_pool = g_frame.geom.pool_used;
+    }
+    if (g_frame.geom.jobs_count > peak_jobs) {
+      peak_jobs = g_frame.geom.jobs_count;
+    }
+    for (int t = 0; t < GEOM_NUM_TILES; ++t) {
+      total_overflow += g_frame.geom.tiles[t].dropped;
+    }
+    demo_camera_advance(&cam, 0, 0);
+    demo_scroll_advance(&scroll);
+  }
+  fprintf(stderr,
+          "[arena-bins] peak pool=%u/%d  peak jobs=%u/%d  bin overflow=%u\n",
+          peak_pool, RDR_BIN_POOL_REFS, peak_jobs, RDR_BIN_MAX_JOBS,
+          total_overflow);
+  // No geometry lost to bins (the whole point of the fix).
+  EXPECT_EQ(total_overflow, 0U) << "shared pool too small — bins still drop";
+  // High-water under cap, with headroom (caps are sized to the measured worst).
+  EXPECT_LT(peak_pool, (uint32_t)RDR_BIN_POOL_REFS)
+      << "pool high-water at/over cap — size RDR_BIN_POOL_REFS up";
+  EXPECT_LT(peak_jobs, (uint32_t)RDR_BIN_MAX_JOBS)
+      << "job high-water at/over cap — size RDR_BIN_MAX_JOBS up";
 }
 
 // Locate the PROJECTION-target SET_MATRIX command in a built stream; returns

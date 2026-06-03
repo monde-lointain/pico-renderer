@@ -28,8 +28,10 @@ RdrErr rdr_begin_frame(struct Frame* f) {
   arena_init(&f->arena, f->arena_buf, (uint32_t)sizeof f->arena_buf);
   arena_reset(&f->arena);
 
-  // Bind the geometry sinks to the Frame's pool + per-tile ref segments.
-  geom_out_init(&f->geom, f->pool, RDR_MAX_TVERTS, f->refs, RDR_REFS_PER_TILE);
+  // Bind the geometry sinks to the Frame's pool + arena-backed bins (shared ref
+  // pool + deferred-job buffer; geom_bin_finalize packs the per-tile segments).
+  geom_out_init(&f->geom, f->pool, RDR_MAX_TVERTS, f->bin_pool,
+                RDR_BIN_POOL_REFS, f->bin_jobs, RDR_BIN_MAX_JOBS);
 
   mtx_init(&f->mtx);
   vp_from_cmd(&f->vp, 0, 0, f->width, f->height);

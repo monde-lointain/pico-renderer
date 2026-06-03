@@ -263,16 +263,25 @@ int geom_cull_backface(int32_t area2, int det_sign, int cull_mode) {
 
 // ---- tile binning ----------------------------------------------------------
 void geom_out_init(struct GeomOut* o, struct TVtx* tverts, uint32_t tvert_cap,
-                   struct TriRef* refs, uint32_t refs_per_tile) {
+                   struct TriRef* pool, uint32_t pool_cap, struct TriRef* jobs,
+                   uint32_t jobs_cap) {
   o->tverts = tverts;
   o->tvert_count = 0;
   o->tvert_cap = tvert_cap;
   o->tris_total = 0;
   o->tris_dropped = 0;
+  o->jobs = jobs;
+  o->jobs_count = 0;
+  o->jobs_cap = jobs_cap;
+  o->pool = pool;
+  o->pool_cap = pool_cap;
+  o->pool_used = 0;
   for (int i = 0; i < GEOM_NUM_TILES; ++i) {
-    o->tiles[i].refs = &refs[(size_t)i * refs_per_tile];
+    // refs/cap assigned by geom_bin_finalize (prefix-sum); count is the demand
+    // tally during the geom pass, then the write cursor during finalize.
+    o->tiles[i].refs = 0;
     o->tiles[i].count = 0;
-    o->tiles[i].cap = refs_per_tile;
+    o->tiles[i].cap = 0;
     o->tiles[i].dropped = 0;
   }
 }
@@ -301,8 +310,13 @@ static int tile_index(int32_t coord_q4, int tile_px, int ntiles) {
   return idx;
 }
 
-RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
-                    uint16_t material) {
+// Tile-bbox span [tx0..tx1] x [ty0..ty1] a triangle (pool indices) covers.
+// Pure function of the three projected TVtx, so the demand-tally pass
+// (geom_bin_tri) and the fill pass (geom_bin_finalize) derive the SAME span ->
+// the per-tile slot accounting matches exactly.
+static void geom_tri_tile_span(const struct GeomOut* o, uint16_t v0,
+                               uint16_t v1, uint16_t v2, int* tx0, int* tx1,
+                               int* ty0, int* ty1) {
   const struct TVtx* a = &o->tverts[v0];
   const struct TVtx* b = &o->tverts[v1];
   const struct TVtx* c = &o->tverts[v2];
@@ -337,33 +351,91 @@ RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
     maxy = c->y;
   }
 
-  int const tx0 = tile_index(minx, RDR_TILE_W, GEOM_TILES_X);
-  int const tx1 = tile_index(maxx, RDR_TILE_W, GEOM_TILES_X);
-  int const ty0 = tile_index(miny, RDR_TILE_H, GEOM_TILES_Y);
-  int const ty1 = tile_index(maxy, RDR_TILE_H, GEOM_TILES_Y);
+  *tx0 = tile_index(minx, RDR_TILE_W, GEOM_TILES_X);
+  *tx1 = tile_index(maxx, RDR_TILE_W, GEOM_TILES_X);
+  *ty0 = tile_index(miny, RDR_TILE_H, GEOM_TILES_Y);
+  *ty1 = tile_index(maxy, RDR_TILE_H, GEOM_TILES_Y);
+}
 
-  int overflowed = 0;
-  for (int ty = ty0; ty <= ty1; ++ty) {
-    for (int tx = tx0; tx <= tx1; ++tx) {
-      struct TileBin* bin = &o->tiles[(ty * GEOM_TILES_X) + tx];
-      if (bin->count >= bin->cap) {
-        ++bin->dropped;
-        overflowed = 1;
-        continue;
-      }
-      struct TriRef* ref = &bin->refs[bin->count++];
-      ref->v0 = v0;
-      ref->v1 = v1;
-      ref->v2 = v2;
-      ref->material = material;
-    }
-  }
-  if (overflowed) {
+RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
+                    uint16_t material) {
+  // DEFERRED (arena bins): buffer the surviving tri + tally per-tile demand;
+  // geom_bin_finalize packs the segments. Job-buffer full -> drop-with-count.
+  if (o->jobs_count >= o->jobs_cap) {
     ++o->tris_dropped;
     return RDR_EOVERFLOW;
   }
-  ++o->tris_total;
+
+  int tx0 = 0;
+  int tx1 = 0;
+  int ty0 = 0;
+  int ty1 = 0;
+  geom_tri_tile_span(o, v0, v1, v2, &tx0, &tx1, &ty0, &ty1);
+
+  // Tally per-tile demand (tiles[].count) — the prefix-sum input for finalize.
+  for (int ty = ty0; ty <= ty1; ++ty) {
+    for (int tx = tx0; tx <= tx1; ++tx) {
+      ++o->tiles[(ty * GEOM_TILES_X) + tx].count;
+    }
+  }
+
+  // Buffer the tri; finalize replays jobs[] in this (emission) order.
+  struct TriRef* job = &o->jobs[o->jobs_count++];
+  job->v0 = v0;
+  job->v1 = v1;
+  job->v2 = v2;
+  job->material = material;
   return RDR_OK;
+}
+
+void geom_bin_finalize(struct GeomOut* o) {
+  // Pass 1 — prefix-sum the per-tile demand into contiguous pool segments. A
+  // tile whose demand runs past the shared pool gets a truncated segment; the
+  // shortfall drops-with-count (tiles[].dropped), never corrupts.
+  uint32_t offset = 0;
+  for (int i = 0; i < GEOM_NUM_TILES; ++i) {
+    uint32_t const demand = o->tiles[i].count;
+    uint32_t const avail =
+        o->pool_cap - offset;  // offset <= pool_cap (invariant)
+    uint32_t seg = demand;
+    if (seg > avail) {
+      o->tiles[i].dropped += demand - avail;
+      seg = avail;
+    }
+    o->tiles[i].refs = o->pool + offset;
+    o->tiles[i].cap = seg;
+    o->tiles[i].count = 0;  // reset: now the write cursor for pass 2
+    offset += seg;
+  }
+  o->pool_used = offset;
+
+  // Pass 2 — replay buffered jobs IN ORDER into their tiles' segments, so each
+  // tile's ref order matches the old append order (bit-identical raster
+  // output).
+  for (uint32_t j = 0; j < o->jobs_count; ++j) {
+    const struct TriRef* job = &o->jobs[j];
+    int tx0 = 0;
+    int tx1 = 0;
+    int ty0 = 0;
+    int ty1 = 0;
+    geom_tri_tile_span(o, job->v0, job->v1, job->v2, &tx0, &tx1, &ty0, &ty1);
+    int placed_all = 1;
+    for (int ty = ty0; ty <= ty1; ++ty) {
+      for (int tx = tx0; tx <= tx1; ++tx) {
+        struct TileBin* bin = &o->tiles[(ty * GEOM_TILES_X) + tx];
+        if (bin->count >= bin->cap) {
+          placed_all = 0;  // pool slot exhausted (already counted in pass 1)
+          continue;
+        }
+        bin->refs[bin->count++] = *job;
+      }
+    }
+    if (placed_all) {
+      ++o->tris_total;
+    } else {
+      ++o->tris_dropped;
+    }
+  }
 }
 
 // ---- material interning (Wave-D D.4) ---------------------------------------
@@ -707,5 +779,9 @@ RdrErr geom_run(const struct Command* cmds, struct Frame* f) {
   g.vbase = 0;
   g.cur_material_id = 0;
   g.material_dirty = 1;  // force the first draw to intern the current rstate
-  return cb_walk(cmds, geom_visit, &g);
+  RdrErr const rc = cb_walk(cmds, geom_visit, &g);
+  // Pack the deferred per-tile bins (prefix-sum + replay) so f->geom.tiles[]
+  // are ready-to-raster segments before sched_rasterize reads them.
+  geom_bin_finalize(&f->geom);
+  return rc;
 }

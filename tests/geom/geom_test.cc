@@ -223,12 +223,13 @@ TEST(Geom, ModelviewDetSign) {
   EXPECT_EQ(geom_modelview_det_sign(&m), -1);
 }
 
-// ---- tile binning ----------------------------------------------------------
+// ---- tile binning (arena-backed variable bins, Wave-E) ----------------------
 TEST(Geom, BinTriHitsOverlappedTiles) {
   static struct TVtx pool[16];
-  static struct TriRef refs[GEOM_NUM_TILES * 8];
+  static struct TriRef bin_pool[GEOM_NUM_TILES * 8];
+  static struct TriRef bin_jobs[8];
   struct GeomOut o;
-  geom_out_init(&o, pool, 16, refs, 8);
+  geom_out_init(&o, pool, 16, bin_pool, GEOM_NUM_TILES * 8, bin_jobs, 8);
 
   // Triangle covering the whole screen -> hits every tile.
   struct TVtx v0;
@@ -247,18 +248,25 @@ TEST(Geom, BinTriHitsOverlappedTiles) {
   uint32_t const i1 = geom_emit_tvert(&o, &v1);
   uint32_t const i2 = geom_emit_tvert(&o, &v2);
   ASSERT_NE(i0, UINT32_MAX);
+  // Deferred: bin buffers, finalize packs the per-tile segments.
   ASSERT_EQ(geom_bin_tri(&o, (uint16_t)i0, (uint16_t)i1, (uint16_t)i2, 0),
             RDR_OK);
+  EXPECT_EQ(o.jobs_count, 1U);
+  geom_bin_finalize(&o);
   // Tile (0,0) must be hit (the triangle covers the top-left corner).
   EXPECT_GE(o.tiles[0].count, 1U);
   EXPECT_EQ(o.tris_total, 1U);
 }
 
-TEST(Geom, BinOverflowDropsAndCounts) {
+// Pool (not per-tile) overflow now drops-with-count: a multi-tile tri whose
+// total demand exceeds the shared pool can't fully place -> tris_dropped + the
+// shortfall recorded in tiles[].dropped. Never corrupts.
+TEST(Geom, BinPoolOverflowDropsAndCounts) {
   static struct TVtx pool[8];
-  static struct TriRef refs[GEOM_NUM_TILES * 1];  // cap 1 per tile
+  static struct TriRef bin_pool[1];  // shared pool: ONE ref slot total
+  static struct TriRef bin_jobs[8];
   struct GeomOut o;
-  geom_out_init(&o, pool, 8, refs, 1);
+  geom_out_init(&o, pool, 8, bin_pool, 1, bin_jobs, 8);
 
   struct TVtx v0;
   struct TVtx v1;
@@ -268,18 +276,50 @@ TEST(Geom, BinOverflowDropsAndCounts) {
   memset(&v2, 0, sizeof v2);
   v0.x = (fx12_4)0;
   v0.y = (fx12_4)0;
-  v1.x = (fx12_4)(RDR_TILE_W / 2 * 16);
+  v1.x = (fx12_4)((RDR_SCREEN_W - 1) * 16);  // span the full width...
   v1.y = (fx12_4)0;
   v2.x = (fx12_4)0;
+  v2.y = (fx12_4)((RDR_SCREEN_H - 1) * 16);  // ...and height -> all tiles
+  uint32_t const i0 = geom_emit_tvert(&o, &v0);
+  uint32_t const i1 = geom_emit_tvert(&o, &v1);
+  uint32_t const i2 = geom_emit_tvert(&o, &v2);
+  // Buffers fine; the tri spans every tile but the pool holds only 1 ref.
+  EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_OK);
+  geom_bin_finalize(&o);
+  EXPECT_EQ(o.pool_used, 1U);     // only one slot was available
+  EXPECT_EQ(o.tris_total, 0U);    // the tri could not FULLY place
+  EXPECT_EQ(o.tris_dropped, 1U);  // ...so it drops-with-count
+  uint32_t tile_dropped = 0;
+  for (int t = 0; t < GEOM_NUM_TILES; ++t) {
+    tile_dropped += o.tiles[t].dropped;
+  }
+  EXPECT_GE(tile_dropped, 1U);
+}
+
+// Job-buffer overflow (more surviving tris than jobs_cap) also
+// drops-with-count.
+TEST(Geom, BinJobBufferOverflowDropsAndCounts) {
+  static struct TVtx pool[8];
+  static struct TriRef bin_pool[GEOM_NUM_TILES * 4];
+  static struct TriRef bin_jobs[1];  // ONE job slot
+  struct GeomOut o;
+  geom_out_init(&o, pool, 8, bin_pool, GEOM_NUM_TILES * 4, bin_jobs, 1);
+
+  struct TVtx v0;
+  struct TVtx v1;
+  struct TVtx v2;
+  memset(&v0, 0, sizeof v0);
+  memset(&v1, 0, sizeof v1);
+  memset(&v2, 0, sizeof v2);
+  v1.x = (fx12_4)(RDR_TILE_W / 2 * 16);
   v2.y = (fx12_4)(RDR_TILE_H / 2 * 16);
   uint32_t const i0 = geom_emit_tvert(&o, &v0);
   uint32_t const i1 = geom_emit_tvert(&o, &v1);
   uint32_t const i2 = geom_emit_tvert(&o, &v2);
-  // First into tile 0 ok; second overflows that tile's cap-1 segment.
-  EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_OK);
-  EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_EOVERFLOW);
-  EXPECT_EQ(o.tiles[0].count, 1U);
-  EXPECT_GE(o.tiles[0].dropped, 1U);
+  EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_OK);  // fills the buffer
+  EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_EOVERFLOW);  // buffer full
+  EXPECT_EQ(o.jobs_count, 1U);
+  EXPECT_EQ(o.tris_dropped, 1U);
 }
 
 // ---- lighting --------------------------------------------------------------
@@ -466,7 +506,8 @@ static void frame_init_for_share(struct Frame* f, const struct Mat4fx* proj) {
   memset(f, 0, sizeof *f);
   f->width = RDR_SCREEN_W;
   f->height = RDR_SCREEN_H;
-  geom_out_init(&f->geom, f->pool, RDR_MAX_TVERTS, f->refs, RDR_REFS_PER_TILE);
+  geom_out_init(&f->geom, f->pool, RDR_MAX_TVERTS, f->bin_pool,
+                RDR_BIN_POOL_REFS, f->bin_jobs, RDR_BIN_MAX_JOBS);
   mtx_init(&f->mtx);
   mtx_set(&f->mtx, MTX_PROJECTION, 0, proj);
   vp_from_cmd(&f->vp, 0, 0, f->width, f->height);
@@ -684,7 +725,8 @@ TEST(GeomMaterial, EmittedTriRefsCarryInternedId) {
   f.fb = 0;  // unused; geom_run does not touch the framebuffer
   f.width = RDR_SCREEN_W;
   f.height = RDR_SCREEN_H;
-  geom_out_init(&f.geom, f.pool, RDR_MAX_TVERTS, f.refs, RDR_REFS_PER_TILE);
+  geom_out_init(&f.geom, f.pool, RDR_MAX_TVERTS, f.bin_pool, RDR_BIN_POOL_REFS,
+                f.bin_jobs, RDR_BIN_MAX_JOBS);
   mtx_init(&f.mtx);
   vp_from_cmd(&f.vp, 0, 0, f.width, f.height);
   memset(&f.rstate, 0, sizeof f.rstate);
