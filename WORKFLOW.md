@@ -313,3 +313,29 @@ App-side of the T0 "real-density geometry + deterministic camera" milestone. Sel
 - **Result:** pico `renderer_demo.elf` LINKS; ~3.3 KiB RAM margin on this lane (freed 13.2 KB vs the 7.77 KB overflow). The two `.bss` giants are renderer-owned, NOT mine: `s_frame` 127,080 B (pool+bins+16 KB arena+zbuf) + `s_present_fb` 115,200 B (240×240 framebuffer) = 242 KB of the 248 KB `.bss`. My demo's own remaining `.bss` is ~1 KB (matrices+cmd buf). **Headroom note for the Lead:** further RAM beyond my fix is a Frame/cap budget decision (arena size / `RDR_MAX_TVERTS` pool / framebuffer), outside the demo lane.
 - **closed-loop guard:** `FlashConstGeometryMatchesFillApi` asserts the committed const arrays are byte-identical (field-wise for `Vtx` since its union has no unique object representation — memcmp would be UB/tidy-flagged; memcmp is fine for the plain `uint16` index arrays) to what the fill functions produce. Edit the fill math without regenerating → test fails. Keeps the committed flash geometry honest.
 - **GATE EXTENDED (the host gate missed this):** D.7 now runs `cmake --preset pico && cmake --build --preset pico` and confirms `renderer_demo.elf` links (no `region RAM overflowed`) AFTER the host gate. **Lesson for the dispatch/worktree skill:** any lane that adds static buffers or owns the demo MUST run the pico link as a gate — the host gate is structurally blind to target SRAM. (PICO_SDK_PATH=~/development/repos/pico-sdk needed for the pico preset; not in env by default.)
+
+## Wave-D RETRO (2026-06-03, landed `c65d24a`, remote 6-job CI green)
+
+**KPIs**
+- **Contract-delta count: 2** — Δ3 (`TEXFMT_RGBA5551`) + Φ (`frame.h rstate_table`), both pre-wave Lead micro-barriers. **ZERO stream-driven deltas**: every "need" resolved in a stream-owned header (`BlendMode`→blend.h, `Blit2dRect`→blit2d.h, TLUT→decoded-as-5551-no-field). ≤2 ⇒ **the freeze held; not premature.** Under the budgeted Δ3/D1/D2/D4 (D1/D2/D4 deferred to R-lane/T4).
+- **CI-on-main red frequency: 0** — all 5 pushes green; the lone gate failure (the N7 RAM overflow) was caught by LOCAL integrated `ci_main` **before** push → never reddened main. The multi-layer gate (stream lane → review → integrated ci_main incl. pico link → remote) is the reason.
+- **rework-after-review: 5/6 streams (D.4 clean), stratified:** 1 real correctness gap (D.2 untested upper-triangle 3-point branch — caught by review, fixed with fail-before/pass-after teeth); 2 doc-only (D.3 parity-comment latent trap, D.5 horizon doc); **2 Lead-decision reworks** (D.1 atlas, D.7 offline-bake — locked-decision *conformance*, not review defects); +1 integration-gate rework (D.7 RAM, caught by ci_main not review). The high rate is foundation-bar depth + 2 locked-decision deviations, not sloppy streams.
+- **on-target gate pass rate: N/A** — no on-target probe this wave (host + pico-*build* only); pico **link** passed post-RAM-fix. T0 is the first on-target probe.
+- **PR cycle (open→merge-ready):** ~15–65 min/stream concurrent; critical path D.7 (3 rounds: build→camera-rework→RAM-fix). 6-wide fan-out; serial Lead fan-in + per-merge union of WORKFLOW.md (`merge=union` driver added this wave eliminated the 5× conflict).
+
+**Two findings the gate layers earned their keep on:** D.2's untested inverted-fraction branch (review) and D.7's target-SRAM overflow (integrated ci_main — host-blind). Both pre-merge, both now guarded.
+
+**Triage → `.claude` changes (ship with Wave-E contract-delta PR; bind at next spawn unless LIVE):**
+| Friction | Change | Target | When |
+|---|---|---|---|
+| TW-04 probe validity | checklist: Release/-O3/NDEBUG, hot-code-in-SRAM, `volatile` sink vs DCE, confirm SYSCLK, SDK structs for HW regs | `on-target-probe` skill + `perf-profiler` agent | next-spawn |
+| D.7-ΔΔ pico-link blind spot | rule: any lane owning the demo / adding static buffers MUST run `cmake --build --preset pico` link as a gate (host gate is SRAM-blind); needs `PICO_SDK_PATH` | `renderer-module-owner` agent gate def | next-spawn |
+| D2-01/D3-2 tidy false-green | `ci_main.sh` greps the tidy log for `error:` (belt-and-braces); dispatch note: harness TUs must pass `make tidy`, grep the log when backgrounding | ci_main.sh (LIVE) + dispatch template | live + next-spawn |
+| TW-06 spike→consumer handoff | consuming stream's prompt cites the gating spike's locked outputs as guards | dispatch template / `worktree-pr` | next-spawn |
+| D.5 new-module CMake | R8 carve-out: a genuinely-new module's single `add_subdirectory` line is the new owner's to add (no contention) | `worktree-pr` R8 rule | next-spawn |
+| TW-09 glossary / D3-3 K_-naming | dispatch-template lines: "mesh-cell" vs "screen-tile"; file-scope `static const` in tests → `K_…` | dispatch template | next-spawn |
+| TW-01 task_schema | hook reads `.task.metadata.*` OR reject-msg → "track in WORKFLOW.md" | `.claude/hooks/task_schema.sh` (LIVE) | live |
+| TW-02 spike discard | `tools/discard_spike.sh` or `spike/*` guard allowlist | tools/ + guard | next-spawn |
+| TW-10 plans in repo | DONE — Wave-E plan committed to `docs/superpowers/plans/` | — | live (this retro) |
+
+**Next wave drafted:** `docs/superpowers/plans/2026-06-03-waveE-rlane-t0.md` (T0 on-target barrier + serialized R-lane R.1→R.4 + T1–T5; contract-delta = D1 `TVtx.fog` + Φ2 cov/blit scratch + `src/aa/` + `RDR_MAX_TVERTS`→2048-after-T0-indexed-swap).
