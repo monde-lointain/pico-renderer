@@ -26,10 +26,10 @@ static uint16_t pack5551(int r5, int g5, int b5, int a1) {
 // Oracle: convert an RGBA5551 word to RGB565 (5->6 green expand, alpha
 // dropped).
 static uint16_t ref_5551_to_565(uint16_t px) {
-  int r5 = (px >> 11) & 0x1F;
-  int g5 = (px >> 6) & 0x1F;
-  int b5 = (px >> 1) & 0x1F;
-  int g6 = (g5 << 1) | (g5 >> 4);
+  int const r5 = (px >> 11) & 0x1F;
+  int const g5 = (px >> 6) & 0x1F;
+  int const b5 = (px >> 1) & 0x1F;
+  int const g6 = (g5 << 1) | (g5 >> 4);
   return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
 }
 
@@ -61,8 +61,8 @@ TEST(Blit2dDecodeCi8, IndexFetchPointSampledMatchesOracle) {
   int const w = 4;
   for (int y = 0; y < 2; ++y) {
     for (int x = 0; x < 4; ++x) {
-      uint8_t idx = ci8[y * w + x];
-      uint16_t want = ref_5551_to_565(tlut[idx]);
+      uint8_t const idx = ci8[(y * w) + x];
+      uint16_t const want = ref_5551_to_565(tlut[idx]);
       EXPECT_EQ(blit2d_decode_ci8(ci8, tlut, w, x, y), want)
           << "x=" << x << " y=" << y;
     }
@@ -86,7 +86,9 @@ TEST(Blit2dDecodeCi8, AlphaBitDroppedOpaqueTarget) {
 
 TEST(Blit2dDecodeI8, ReturnsRawIntensity) {
   uint8_t i8[6] = {0, 64, 127, 128, 200, 255};
-  for (int x = 0; x < 6; ++x) EXPECT_EQ(blit2d_decode_i8(i8, 6, x, 0), i8[x]);
+  for (int x = 0; x < 6; ++x) {
+    EXPECT_EQ(blit2d_decode_i8(i8, 6, x, 0), i8[x]);
+  }
 }
 
 TEST(Blit2dDecodeI8, NullSrcReturnsZero) {
@@ -105,9 +107,13 @@ TEST(Blit2dDecodeI8, RowMajorIndexing) {
 
 TEST(Blit2dHorizon, RescaleMatchesRoundedRatio) {
   // dst row = round(src_horizon_row * dst_h / src_h).
-  struct {
-    int src_row, src_h, dst_h, want;
-  } cases[] = {
+  struct HorizonCase {
+    int src_row;
+    int src_h;
+    int dst_h;
+    int want;
+  };
+  struct HorizonCase const cases[] = {
       {120, 240, 240, 120},  // identity height -> identity
       {120, 240, 120, 60},   // half-height band
       {90, 240, 240, 90},    // upper horizon stays put at equal height
@@ -136,9 +142,9 @@ TEST(Blit2dHorizon, DegenerateSrcHeightClampsZero) {
 TEST(Blit2dHorizon, SeamFreeAt1to1Panel) {
   enum { SRC_H = 240, PANEL_H = 240 };
   // Several plausible authored horizon rows.
-  int rows[] = {96, 108, 120, 132};
+  int const rows[] = {96, 108, 120, 132};
   for (size_t i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
-    int dst = blit2d_horizon_row_1to1(rows[i], SRC_H, PANEL_H);
+    int const dst = blit2d_horizon_row_1to1(rows[i], SRC_H, PANEL_H);
     // 240->240 is identity; the 3D pass queries the same helper -> same row ->
     // no seam.
     EXPECT_EQ(dst, rows[i]) << "row=" << rows[i];
@@ -192,9 +198,14 @@ TEST(Blit2dPanorama, HorizontalWrapMatchesOracle) {
   uint8_t src[SRCW * SRCH];
   uint16_t tlut[256];
   memset(tlut, 0, sizeof tlut);
-  for (int i = 0; i < 256; ++i) tlut[i] = pack5551(i & 31, (i >> 1) & 31, 7, 0);
-  for (int y = 0; y < SRCH; ++y)
-    for (int x = 0; x < SRCW; ++x) src[y * SRCW + x] = (uint8_t)x;  // col index
+  for (int i = 0; i < 256; ++i) {
+    tlut[i] = pack5551(i & 31, (i >> 1) & 31, 7, 0);
+  }
+  for (int y = 0; y < SRCH; ++y) {
+    for (int x = 0; x < SRCW; ++x) {
+      src[(y * SRCW) + x] = (uint8_t)x;  // col index
+    }
+  }
 
   struct Framebuffer fb;
   memset(&fb, 0, sizeof fb);
@@ -206,9 +217,9 @@ TEST(Blit2dPanorama, HorizontalWrapMatchesOracle) {
   // Top dst row maps to source row 0 (elevation 0, horizon at mid). Column c
   // -> source column (scroll + c) % SRCW.
   for (int c = 0; c < SCREEN_W; ++c) {
-    int sx = (scroll + c) % SRCW;
-    uint16_t want = ref_5551_to_565(tlut[(uint8_t)sx]);
-    EXPECT_EQ(fb.px[0 * SCREEN_W + c], want) << "col=" << c;
+    int const sx = (scroll + c) % SRCW;
+    uint16_t const want = ref_5551_to_565(tlut[(uint8_t)sx]);
+    EXPECT_EQ(fb.px[(0 * SCREEN_W) + c], want) << "col=" << c;
   }
 }
 
@@ -218,9 +229,14 @@ TEST(Blit2dPanorama, VerticalBandSelectsSourceRows) {
   uint8_t src[SRCW * SRCH];
   uint16_t tlut[256];
   memset(tlut, 0, sizeof tlut);
-  for (int i = 0; i < 256; ++i) tlut[i] = pack5551(i & 31, 0, 0, 0);
-  for (int y = 0; y < SRCH; ++y)
-    for (int x = 0; x < SRCW; ++x) src[y * SRCW + x] = (uint8_t)y;  // row index
+  for (int i = 0; i < 256; ++i) {
+    tlut[i] = pack5551(i & 31, 0, 0, 0);
+  }
+  for (int y = 0; y < SRCH; ++y) {
+    for (int x = 0; x < SRCW; ++x) {
+      src[(y * SRCW) + x] = (uint8_t)y;  // row index
+    }
+  }
 
   struct Framebuffer fb;
   memset(&fb, 0, sizeof fb);
@@ -233,9 +249,11 @@ TEST(Blit2dPanorama, VerticalBandSelectsSourceRows) {
   // wrap vertically — clamp band). Verify against that oracle.
   for (int row = 0; row < SCREEN_H; ++row) {
     int sy = (row * SRCH) / SCREEN_H;
-    if (sy >= SRCH) sy = SRCH - 1;
-    uint16_t want = ref_5551_to_565(tlut[(uint8_t)sy]);
-    EXPECT_EQ(fb.px[row * SCREEN_W + 0], want) << "row=" << row;
+    if (sy >= SRCH) {
+      sy = SRCH - 1;
+    }
+    uint16_t const want = ref_5551_to_565(tlut[(uint8_t)sy]);
+    EXPECT_EQ(fb.px[(row * SCREEN_W) + 0], want) << "row=" << row;
   }
 }
 
@@ -245,23 +263,32 @@ TEST(Blit2dPanorama, ElevationShiftsBand) {
   uint8_t src[SRCW * SRCH];
   uint16_t tlut[256];
   memset(tlut, 0, sizeof tlut);
-  for (int i = 0; i < 256; ++i) tlut[i] = pack5551(i & 31, 0, 0, 0);
-  for (int y = 0; y < SRCH; ++y)
-    for (int x = 0; x < SRCW; ++x) src[y * SRCW + x] = (uint8_t)y;
+  for (int i = 0; i < 256; ++i) {
+    tlut[i] = pack5551(i & 31, 0, 0, 0);
+  }
+  for (int y = 0; y < SRCH; ++y) {
+    for (int x = 0; x < SRCW; ++x) {
+      src[(y * SRCW) + x] = (uint8_t)y;
+    }
+  }
 
-  struct Framebuffer fb0, fb1;
+  struct Framebuffer fb0;
+  struct Framebuffer fb1;
   memset(&fb0, 0, sizeof fb0);
   memset(&fb1, 0, sizeof fb1);
-  struct Blit2dRect r0, r1;
+  struct Blit2dRect r0;
+  struct Blit2dRect r1;
   make_pano(&r0, src, tlut, SRCW, SRCH, 0);
   make_pano(&r1, src, tlut, SRCW, SRCH, 0);
   r1.elevation = 2;  // shift the band down by 2 source rows
   ASSERT_EQ(blit2d_panorama(&r0, fb0.px), RDR_OK);
   ASSERT_EQ(blit2d_panorama(&r1, fb1.px), RDR_OK);
   // Row 0 with elevation 2 must equal the source row reached at base map + 2.
-  int base_sy = (0 * SRCH) / SCREEN_H;
+  int const base_sy = (0 * SRCH) / SCREEN_H;
   int el_sy = base_sy + 2;
-  if (el_sy >= SRCH) el_sy = SRCH - 1;
+  if (el_sy >= SRCH) {
+    el_sy = SRCH - 1;
+  }
   EXPECT_EQ(fb1.px[0], ref_5551_to_565(tlut[(uint8_t)el_sy]));
 }
 
@@ -271,16 +298,20 @@ TEST(Blit2dPanorama, ElevationShiftsBand) {
 
 // Oracle: per-channel alpha-over of cloud over grad with rounding.
 static int over8(int a, int cloud, int grad) {
-  return (a * cloud + (255 - a) * grad + 127) / 255;
+  return ((a * cloud) + ((255 - a) * grad) + 127) / 255;
 }
 
 // Oracle: vertical gradient row -> RGB565, lerp sky_top..sky_horizon over the
 // band [dst_y, horizon_row]; clamped below the horizon to sky_horizon.
 static void grad_565(uint16_t top, uint16_t hor, int row, int dst_y,
                      int horizon_row, int* r, int* g, int* b) {
-  int tr = (top >> 11) & 0x1F, tg = (top >> 5) & 0x3F, tb = top & 0x1F;
-  int hr = (hor >> 11) & 0x1F, hg = (hor >> 5) & 0x3F, hb = hor & 0x1F;
-  int span = horizon_row - dst_y;
+  int const tr = (top >> 11) & 0x1F;
+  int const tg = (top >> 5) & 0x3F;
+  int const tb = top & 0x1F;
+  int const hr = (hor >> 11) & 0x1F;
+  int const hg = (hor >> 5) & 0x3F;
+  int const hb = hor & 0x1F;
+  int const span = horizon_row - dst_y;
   int t = row - dst_y;
   if (span <= 0) {
     *r = hr;
@@ -288,11 +319,15 @@ static void grad_565(uint16_t top, uint16_t hor, int row, int dst_y,
     *b = hb;
     return;
   }
-  if (t < 0) t = 0;
-  if (t > span) t = span;
-  *r = tr + (hr - tr) * t / span;
-  *g = tg + (hg - tg) * t / span;
-  *b = tb + (hb - tb) * t / span;
+  if (t < 0) {
+    t = 0;
+  }
+  if (t > span) {
+    t = span;
+  }
+  *r = tr + (((hr - tr) * t) / span);
+  *g = tg + (((hg - tg) * t) / span);
+  *b = tb + (((hb - tb) * t) / span);
 }
 
 TEST(Blit2dClouds, RejectsBadDescriptor) {
@@ -334,10 +369,12 @@ TEST(Blit2dClouds, ZeroAlphaIsPureGradient) {
   r.cloud_color = rgb565(255, 255, 255);
   ASSERT_EQ(blit2d_clouds(&r, fb.px), RDR_OK);
   for (int row = 0; row < SCREEN_H; ++row) {
-    int gr, gg, gb;
+    int gr;
+    int gg;
+    int gb;
     grad_565(r.sky_top, r.sky_horizon, row, 0, r.horizon_row, &gr, &gg, &gb);
-    uint16_t want = (uint16_t)((gr << 11) | (gg << 5) | gb);
-    EXPECT_EQ(fb.px[row * SCREEN_W + 0], want) << "row=" << row;
+    uint16_t const want = (uint16_t)((gr << 11) | (gg << 5) | gb);
+    EXPECT_EQ(fb.px[(row * SCREEN_W) + 0], want) << "row=" << row;
   }
 }
 
@@ -361,7 +398,9 @@ TEST(Blit2dClouds, FullAlphaIsPureCloud) {
   r.cloud_color = rgb565(248, 252, 248);  // 565-exact white-ish
   ASSERT_EQ(blit2d_clouds(&r, fb.px), RDR_OK);
   // a=255 -> over8 returns the cloud channel exactly -> whole frame == cloud.
-  for (int i = 0; i < SCREEN_PIXELS; ++i) EXPECT_EQ(fb.px[i], r.cloud_color);
+  for (int i = 0; i < SCREEN_PIXELS; ++i) {
+    EXPECT_EQ(fb.px[i], r.cloud_color);
+  }
 }
 
 TEST(Blit2dClouds, MidAlphaMatchesOracle) {
@@ -385,14 +424,19 @@ TEST(Blit2dClouds, MidAlphaMatchesOracle) {
   r.cloud_color = rgb565(255, 255, 255);
   ASSERT_EQ(blit2d_clouds(&r, fb.px), RDR_OK);
   int const a = 128;
-  int cr = (r.cloud_color >> 11) & 0x1F, cg = (r.cloud_color >> 5) & 0x3F,
-      cb = r.cloud_color & 0x1F;
+  int const cr = (r.cloud_color >> 11) & 0x1F;
+  int const cg = (r.cloud_color >> 5) & 0x3F;
+  int const cb = r.cloud_color & 0x1F;
   for (int row = 0; row < SCREEN_H; ++row) {
-    int gr, gg, gb;
+    int gr;
+    int gg;
+    int gb;
     grad_565(r.sky_top, r.sky_horizon, row, 0, r.horizon_row, &gr, &gg, &gb);
-    int wr = over8(a, cr, gr), wg = over8(a, cg, gg), wb = over8(a, cb, gb);
-    uint16_t want = (uint16_t)((wr << 11) | (wg << 5) | wb);
-    EXPECT_EQ(fb.px[row * SCREEN_W + 0], want) << "row=" << row;
+    int const wr = over8(a, cr, gr);
+    int const wg = over8(a, cg, gg);
+    int const wb = over8(a, cb, gb);
+    uint16_t const want = (uint16_t)((wr << 11) | (wg << 5) | wb);
+    EXPECT_EQ(fb.px[(row * SCREEN_W) + 0], want) << "row=" << row;
   }
 }
 
@@ -413,9 +457,12 @@ TEST(Blit2dRender, DispatchesPanorama) {
   uint8_t src[SRCW * SRCH];
   uint16_t tlut[256];
   memset(tlut, 0, sizeof tlut);
-  for (int i = 0; i < 256; ++i) tlut[i] = pack5551(i & 31, 0, 0, 0);
+  for (int i = 0; i < 256; ++i) {
+    tlut[i] = pack5551(i & 31, 0, 0, 0);
+  }
   memset(src, 2, sizeof src);
-  struct Framebuffer a, b;
+  struct Framebuffer a;
+  struct Framebuffer b;
   memset(&a, 0, sizeof a);
   memset(&b, 0, sizeof b);
   struct Blit2dRect r;

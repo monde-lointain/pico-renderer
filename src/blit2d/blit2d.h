@@ -59,10 +59,14 @@ struct Blit2dRect {
   int16_t elevation;  // vertical band offset in source texels (camera pitch);
                       // selects which source rows map to the dst band.
 
-  // --- horizon (both modes) ------------------------------------------------
+  // --- horizon -------------------------------------------------------------
   int16_t
       horizon_row;  // dst row (screen Y) where the sky meets the 3D horizon;
-                    // shared with the 3D pass so the seam disappears.
+                    // shared with the 3D pass so the seam disappears. NOTE:
+                    // read by BLIT2D_CLOUDS only (gradient endpoint). PANORAMA
+                    // IGNORES this field — its band alignment is the caller's
+                    // job via blit2d_horizon_row_1to1 (to compute dst_y/dst_h)
+                    // + elevation, NOT horizon_row.
 
   // --- CLOUDS gradient + cloud color ---------------------------------------
   uint16_t sky_top;      // RGB565 sky color at dst_y (top of the gradient)
@@ -95,6 +99,10 @@ uint8_t blit2d_decode_i8(const void* i8, int w, int x, int y);
 // (scroll_x + c) mod src_w; dst row r samples source row clamped by elevation.
 // Writes opaque RGB565 (no depth, no zbuf). Returns RDR_EINVAL on a bad
 // descriptor (wrong mode / null fb / zero dims), else RDR_OK.
+// NOTE: panorama IGNORES r->horizon_row. Seam-free band alignment is the
+// caller's job — set dst_y/dst_h (e.g. from blit2d_horizon_row_1to1) and
+// elevation so the band meets the 3D horizon; horizon_row is a CLOUDS-only
+// field. (Wiring horizon_row into the band anchor is deferred to T3.)
 RdrErr blit2d_panorama(const struct Blit2dRect* r, uint16_t* fb);
 
 // Render a single cloud blit (BLIT2D_CLOUDS) into `fb`. For each dst pixel:
