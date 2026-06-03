@@ -1,18 +1,120 @@
 // blend.cc — framebuffer blend ops over packed RGB565. See blend.h.
-// v1: opaque copy only. The N64 blender computes p*a + m*b; the opaque
-// rendermode forces a=1, b=0 (src wins). Here both operands are already packed
-// RGB565 (the combiner/pack step ran upstream), so the opaque path is a copy of
-// src; dst is unused. Alpha-over/add and ordered dither are W-later.
+//
+// The N64 blender computes p*a + m*b; the opaque rendermode forces a=1, b=0
+// (src wins). RGB565 has no destination alpha (design spec section 8b), so only
+// a SOURCE-alpha "over" (BLEND_ALPHA) and a clamped additive blend (BLEND_ADD)
+// are expressible; the caller supplies the source alpha (8-bit).
+//
+// XLU-ALPHA NOTE (for R.2/R.3 sequencing): the translucent (XLU) tree pass
+// blends on TEXEL alpha, NOT coverage. From the N64 source the tree combiner
+// alpha = TEXEL0, so the alpha passed to blend_pixel_alpha is the
+// combiner/texel alpha; coverage AA (R.3) is a separate, downstream concern.
+// R.2 (two-pass translucent) therefore does NOT depend on R.3 (coverage AA).
+// This module just takes a source-alpha argument and stays agnostic to where it
+// came from.
+//
+// FIXED-POINT PARITY: channels are unpacked to 8-bit, blended with integer
+// math, then repacked to 565. The alpha-over and additive blends divide an
+// 8-bit product sum by 255; both operands are non-negative so the divide
+// truncates toward zero == floor -- same floor discipline as raster's num/area2
+// (raster.cc), and bit-identical host<->device. NOTE: the +127 is an
+// INDEPENDENT round-to-nearest bias applied BEFORE the /255 -- this is NOT what
+// num/area2 does (that divide is pure truncation, no bias). Do not "reconcile"
+// the two: the +127 is deliberate here and the whole expression is validated
+// bit-exact against the float oracle (oracle_blend) across all inputs.
 #include "blend/blend.h"
+
+#include "gfx/framebuffer.h"
+
+// Unpack RGB565 -> 8-bit channels with bit replication (matches the oracle's
+// oracle_unpack565 and the inverse of gfx/framebuffer.h rgb565()).
+static void blend_unpack565(uint16_t c, uint8_t* r, uint8_t* g, uint8_t* b) {
+  uint8_t const r5 = (uint8_t)((c >> 11) & 0x1F);
+  uint8_t const g6 = (uint8_t)((c >> 5) & 0x3F);
+  uint8_t const b5 = (uint8_t)(c & 0x1F);
+  *r = (uint8_t)((r5 << 3) | (r5 >> 2));
+  *g = (uint8_t)((g6 << 2) | (g6 >> 4));
+  *b = (uint8_t)((b5 << 3) | (b5 >> 2));
+}
+
+// out = round(s*a + d*(255-a) over 255). s,d,a in [0,255]; result in [0,255].
+static uint8_t blend_over_channel(uint8_t s, uint8_t d, uint8_t a) {
+  uint32_t const num = ((uint32_t)s * a) + ((uint32_t)d * (255U - a)) + 127U;
+  return (uint8_t)(num / 255U);  // non-negative -> truncates toward zero
+}
+
+// out = clamp255(round(s*a over 255) + d). Additive with source pre-scaled by
+// a.
+static uint8_t blend_add_channel(uint8_t s, uint8_t d, uint8_t a) {
+  uint32_t const scaled =
+      (((uint32_t)s * a) + 127U) / 255U;  // round-to-nearest
+  uint32_t const sum = scaled + d;
+  return (uint8_t)(sum > 255U ? 255U : sum);
+}
 
 uint16_t blend_pixel(uint8_t mode, uint16_t src, uint16_t dst) {
   switch (mode) {
     case BLEND_OPAQUE:
     default:
-      // v1: opaque copy (src wins), dst unused. Unsupported modes fall back to
-      // opaque (never silently corrupt the FB). BLEND_ALPHA/BLEND_ADD + ordered
-      // dither land W-later, when each gets its own non-clone branch.
+      // Opaque copy (src wins), dst unused. The source-alpha modes need an
+      // explicit alpha, so they live in blend_pixel_alpha; any mode reaching
+      // here also falls back to opaque (never silently corrupt the FB).
       (void)dst;
       return src;
   }
+}
+
+uint16_t blend_pixel_alpha(uint8_t mode, uint16_t src, uint8_t src_alpha,
+                           uint16_t dst) {
+  if (mode == BLEND_OPAQUE) {
+    (void)dst;
+    (void)src_alpha;
+    return src;  // src wins, alpha ignored
+  }
+
+  uint8_t sr;
+  uint8_t sg;
+  uint8_t sb;
+  uint8_t dr;
+  uint8_t dg;
+  uint8_t db;
+  blend_unpack565(src, &sr, &sg, &sb);
+  blend_unpack565(dst, &dr, &dg, &db);
+
+  uint8_t orr;
+  uint8_t og;
+  uint8_t ob;
+  switch (mode) {
+    case BLEND_ALPHA:
+      orr = blend_over_channel(sr, dr, src_alpha);
+      og = blend_over_channel(sg, dg, src_alpha);
+      ob = blend_over_channel(sb, db, src_alpha);
+      break;
+    case BLEND_ADD:
+      orr = blend_add_channel(sr, dr, src_alpha);
+      og = blend_add_channel(sg, dg, src_alpha);
+      ob = blend_add_channel(sb, db, src_alpha);
+      break;
+    default:
+      return src;  // unknown -> opaque fallback
+  }
+  return rgb565(orr, og, ob);
+}
+
+uint16_t fog_lerp(uint16_t color, uint16_t fog_color, uint8_t factor) {
+  uint8_t cr;
+  uint8_t cg;
+  uint8_t cb;
+  uint8_t fr;
+  uint8_t fg;
+  uint8_t fb;
+  blend_unpack565(color, &cr, &cg, &cb);
+  blend_unpack565(fog_color, &fr, &fg, &fb);
+  // lerp toward fog: out = color*(255-factor) + fog*factor, scaled by /255.
+  // factor reuses the alpha-over channel op with (s=fog, d=color, a=factor):
+  // fog*factor + color*(255-factor) over 255.
+  uint8_t const orr = blend_over_channel(fr, cr, factor);
+  uint8_t const og = blend_over_channel(fg, cg, factor);
+  uint8_t const ob = blend_over_channel(fb, cb, factor);
+  return rgb565(orr, og, ob);
 }
