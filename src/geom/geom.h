@@ -126,4 +126,38 @@ uint32_t geom_emit_tvert(struct GeomOut* o, const struct TVtx* v);
 RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
                     uint16_t material);
 
+// ---- material interning (Wave-D D.4) ---------------------------------------
+// Intern the per-frame distinct RenderStates into frame->rstate_table so each
+// emitted TriRef.material indexes [0, rstate_count) (resolves C2 latent #2 —
+// C1/C2 wrote 0 always). Interned single-core in geom BEFORE the dual-core
+// raster reads the table, so the table is immutable during raster (the
+// bit-identical invariant holds). Dedup is a deterministic linear VALUE compare
+// (memcmp over the RenderState POD) — pointer identity is insufficient because
+// geom copies SET_MATERIAL state into the single frame->rstate buffer, so every
+// intern sees the same pointer. A few distinct states per scene (≈6), so a
+// linear scan over <=RDR_MAX_MATERIALS entries is ample (no hash needed).
+//
+// Design split (do NOT store 128 RenderStates): the terrain's 128 mesh-cells
+// SHARE one RenderState and differ only by texture pointer; that per-cell
+// texture is a SEPARATE axis (a later concern), NOT a distinct material. This
+// interns RenderState only — material id and texture binding stay separable.
+
+// Reset the interned table to empty (rstate_count := 0) and clear the
+// overflow-drop counter. Call once at the start of the frame's command walk.
+void geom_material_reset(struct Frame* f);
+
+// Return the interned id for `rs`: the id of an existing value-equal entry
+// (dedup), else append a new entry and return its id. On a full table
+// (rstate_count == RDR_MAX_MATERIALS) with no match, DROP-WITH-COUNT: the table
+// is left untouched, the overflow counter is bumped, and the last valid id is
+// returned (clamp; RDR_MAX_MATERIALS-1, or 0 if the table is somehow empty) so
+// emitted TriRefs always carry an in-range, never-corrupting id. `rs` defaults
+// to &f->rstate when null.
+uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs);
+
+// Count of intern requests dropped on a full table this frame (debug-surfaced,
+// mirrors the bin/cmd drop-with-count convention). Reset by
+// geom_material_reset.
+uint32_t geom_material_overflow_count(void);
+
 #endif  // RDR_GEOM_H

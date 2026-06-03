@@ -11,6 +11,7 @@
 #include "gtest/gtest.h"
 #include "oracle.h"
 #include "rdr/config.h"
+#include "rdr/frame.h"  // struct Frame + RDR_MAX_MATERIALS (material interning)
 
 // ---- helpers ---------------------------------------------------------------
 static fx16_16 fx(double v) { return (fx16_16)lrint(v * 65536.0); }
@@ -336,4 +337,227 @@ TEST(Geom, DirectionalLightShading) {
   oracle_unpack565(pa, &ra, &ga, &ba);
   EXPECT_GT((int)gf, (int)ga);  // facing brighter
   EXPECT_LE((int)ga, 64);       // away ~ ambient only
+}
+
+// ---- material interning (Wave-D D.4) ---------------------------------------
+// A distinct, deterministic RenderState keyed off a small integer tag. Each tag
+// yields a different value, so value-compare dedup treats them as distinct
+// materials; the same tag reproduces a value-equal state (must dedup).
+static struct RenderState mk_rstate(int tag) {
+  struct RenderState rs;
+  memset(&rs, 0, sizeof rs);
+  rs.zmode = (uint8_t)(tag & 0x3);
+  rs.cull = CULL_BACK;
+  rs.prim_color = (uint16_t)(0x1000 + tag);
+  rs.env_color = (uint16_t)(0x2000 + tag);
+  rs.combiner.mode = (uint8_t)tag;
+  return rs;
+}
+
+TEST(GeomMaterial, ResetEmptiesTable) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  f.rstate_count = 7;  // stale from a prior frame
+  geom_material_reset(&f);
+  EXPECT_EQ(f.rstate_count, 0U);
+  EXPECT_EQ(geom_material_overflow_count(), 0U);
+}
+
+// Distinct RenderStates -> distinct ascending ids; the table grows by one each.
+TEST(GeomMaterial, DistinctStatesGetDistinctIds) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState const a = mk_rstate(1);
+  struct RenderState const b = mk_rstate(2);
+  struct RenderState const c = mk_rstate(3);
+  uint16_t const ia = geom_material_intern(&f, &a);
+  uint16_t const ib = geom_material_intern(&f, &b);
+  uint16_t const ic = geom_material_intern(&f, &c);
+  EXPECT_EQ(ia, 0U);
+  EXPECT_EQ(ib, 1U);
+  EXPECT_EQ(ic, 2U);
+  EXPECT_EQ(f.rstate_count, 3U);
+  // Interned values landed in the table verbatim. memcmp is sound: every state
+  // here is mk_rstate (memset-zero + field assign) so padding is uniformly 0.
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  EXPECT_EQ(memcmp(&f.rstate_table[0], &a, sizeof a), 0);
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  EXPECT_EQ(memcmp(&f.rstate_table[1], &b, sizeof b), 0);
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  EXPECT_EQ(memcmp(&f.rstate_table[2], &c, sizeof c), 0);
+}
+
+// Identical (value-equal) RenderState -> same id (dedup); count does not grow.
+// Pointer identity is irrelevant: two distinct buffers holding the same value
+// must collapse to one id.
+TEST(GeomMaterial, IdenticalStateDedups) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState const a = mk_rstate(5);
+  struct RenderState const a_copy =
+      mk_rstate(5);  // distinct buffer, same value
+  struct RenderState const b = mk_rstate(6);
+  uint16_t const ia = geom_material_intern(&f, &a);
+  uint16_t const ib = geom_material_intern(&f, &b);
+  uint16_t const ia2 = geom_material_intern(&f, &a_copy);
+  uint16_t const ia3 = geom_material_intern(&f, &a);  // re-intern same buffer
+  EXPECT_EQ(ia, 0U);
+  EXPECT_EQ(ib, 1U);
+  EXPECT_EQ(ia2, 0U);  // deduped to the first 'a'
+  EXPECT_EQ(ia3, 0U);
+  EXPECT_EQ(f.rstate_count, 2U);  // only two distinct values stored
+}
+
+// Null rs defaults to &f->rstate (intern the current state).
+TEST(GeomMaterial, NullInternsCurrentState) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+  f.rstate = mk_rstate(9);
+  uint16_t const id = geom_material_intern(&f, 0);
+  EXPECT_EQ(id, 0U);
+  EXPECT_EQ(f.rstate_count, 1U);
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  EXPECT_EQ(memcmp(&f.rstate_table[0], &f.rstate, sizeof f.rstate), 0);
+}
+
+// Fill exactly to the cap with distinct states, then overflow: count never
+// exceeds RDR_MAX_MATERIALS, the overflow request is dropped-with-count, and
+// the returned id is a clamped, in-range last valid id (never corrupts the
+// table).
+TEST(GeomMaterial, OverflowClampsAndCounts) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  for (int i = 0; i < RDR_MAX_MATERIALS; ++i) {
+    struct RenderState const rs = mk_rstate(100 + i);
+    uint16_t const id = geom_material_intern(&f, &rs);
+    EXPECT_EQ((int)id, i);
+  }
+  EXPECT_EQ((int)f.rstate_count, RDR_MAX_MATERIALS);
+  EXPECT_EQ(geom_material_overflow_count(), 0U);
+
+  // One more distinct state overflows: dropped-with-count, clamped id.
+  struct RenderState const extra = mk_rstate(999);
+  uint16_t const oid = geom_material_intern(&f, &extra);
+  EXPECT_EQ((int)f.rstate_count, RDR_MAX_MATERIALS);  // table did not grow
+  EXPECT_LT((int)oid, RDR_MAX_MATERIALS);      // in-range, never corrupts
+  EXPECT_EQ((int)oid, RDR_MAX_MATERIALS - 1);  // clamp policy: last slot
+  EXPECT_EQ(geom_material_overflow_count(), 1U);
+
+  // A value that IS already in the full table still dedups (no extra drop).
+  struct RenderState const present = mk_rstate(100);  // id 0, first inserted
+  uint16_t const pid = geom_material_intern(&f, &present);
+  EXPECT_EQ(pid, 0U);
+  EXPECT_EQ(geom_material_overflow_count(), 1U);  // unchanged
+}
+
+// End-to-end: two SET_MATERIAL blocks drawing the same geometry produce TriRefs
+// whose material ids match the interned ids (resolves the always-0
+// placeholder). Distinct states -> distinct ids on the binned refs; a repeated
+// state dedups.
+TEST(GeomMaterial, EmittedTriRefsCarryInternedId) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  f.fb = 0;  // unused; geom_run does not touch the framebuffer
+  f.width = RDR_SCREEN_W;
+  f.height = RDR_SCREEN_H;
+  geom_out_init(&f.geom, f.pool, RDR_MAX_TVERTS, f.refs, RDR_REFS_PER_TILE);
+  mtx_init(&f.mtx);
+  vp_from_cmd(&f.vp, 0, 0, f.width, f.height);
+  memset(&f.rstate, 0, sizeof f.rstate);
+  f.rstate.cull = CULL_NONE;  // keep both windings (don't depend on cull sign)
+
+  // Projection that maps the verts comfortably in front of the camera.
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  // Two materials (value-distinct) + a repeat of the first.
+  struct RenderState mat_a = mk_rstate(11);
+  mat_a.cull = CULL_NONE;
+  struct RenderState mat_b = mk_rstate(22);
+  mat_b.cull = CULL_NONE;
+
+  // One screen-filling triangle, drawn under each material (pre-lit verts).
+  struct Vtx verts[3];
+  verts[0] = mk_vtx(-3, -3, 10);
+  verts[1] = mk_vtx(3, -3, 10);
+  verts[2] = mk_vtx(0, 3, 10);
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+  static const uint16_t idx[3] = {0, 1, 2};
+
+  struct Command cmds[10];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_SET_MATRIX;
+  cmds[n].u.set_matrix.target = MTX_PROJECTION;
+  cmds[n].u.set_matrix.push = 0;
+  cmds[n].u.set_matrix.mat = &proj;
+  ++n;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_SET_MATERIAL;
+  cmds[n].u.set_material.state = &mat_a;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_SET_MATERIAL;
+  cmds[n].u.set_material.state = &mat_b;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_SET_MATERIAL;  // back to mat_a -> must dedup to id 0
+  cmds[n].u.set_material.state = &mat_a;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_END;
+  ++n;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  EXPECT_EQ(f.rstate_count, 2U);  // mat_a, mat_b; the mat_a repeat deduped
+  ASSERT_EQ(f.geom.tris_total, 3U);
+
+  // Each binned TriRef must carry an in-range interned id. Across all tiles the
+  // two mat_a draws contribute id 0 and the mat_b draw id 1; no ref carries the
+  // old always-0 placeholder for mat_b, and none is out of range.
+  int seen0 = 0;
+  int seen1 = 0;
+  int seen_other = 0;
+  for (int t = 0; t < GEOM_NUM_TILES; ++t) {
+    for (uint32_t i = 0; i < f.geom.tiles[t].count; ++i) {
+      uint16_t const m = f.geom.tiles[t].refs[i].material;
+      ASSERT_LT((int)m, (int)f.rstate_count);  // never corrupt / out of range
+      if (m == 0) {
+        ++seen0;
+      } else if (m == 1) {
+        ++seen1;
+      } else {
+        ++seen_other;
+      }
+    }
+  }
+  // The mat_a triangle is binned to its tile set twice (two draws); mat_b once.
+  // So mat_b (id 1) refs == half the mat_a (id 0) refs across the screen.
+  EXPECT_GT(seen0, 0);
+  EXPECT_GT(seen1, 0);
+  EXPECT_EQ(seen0, 2 * seen1);  // mat_a drawn twice, mat_b once (same geometry)
+  EXPECT_EQ(seen_other, 0);
 }
