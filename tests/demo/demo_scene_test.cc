@@ -472,6 +472,41 @@ TEST(TerrainSceneGuard, ArenaBinsNoOverflowAcrossScriptedLoop) {
       << "job high-water at/over cap — size RDR_BIN_MAX_JOBS up";
 }
 
+// FB_CRC STREAM GOLDEN (NIT-1): pin the demo scene's full per-frame fb_crc
+// stream — the arena-bins model's actual rendered OUTPUT — so any change to
+// determinism or visible geometry trips a host test. There is no golden vs the
+// OLD (fixed-bin) model: it overflowed and dropped visible geometry, so its
+// output was wrong; the on-device host==device cross-check is the only other
+// anchor. Folds all SCRIPTED_FRAME_COUNT per-frame CRCs into one CRC32 digest
+// (same poly as host_fb_crc32). On mismatch: if the change is intended, rebake
+// the constant from the printed digest; else it's a regression — localize via
+// `DUMP_FB_CRC_FRAMES=480 <demo_scene_test> --gtest_filter=*DumpFbCrc*`.
+TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);
+  demo_scroll_init(&scroll);
+  uint32_t digest = 0xFFFFFFFFU;
+  for (uint32_t f = 0; f < (uint32_t)SCRIPTED_FRAME_COUNT; ++f) {
+    render_terrain(&cam, &scroll, &telem);
+    uint32_t const crc = host_fb_crc32(g_fb.px, RDR_SCREEN_W * RDR_SCREEN_H);
+    for (int k = 0; k < 4; ++k) {  // fold the 4 CRC bytes into the digest
+      digest ^= (uint32_t)((crc >> (k * 8)) & 0xFFU);
+      for (int b = 0; b < 8; ++b) {
+        uint32_t const mask = (uint32_t)(-(int32_t)(digest & 1U));
+        digest = (digest >> 1) ^ (0xEDB88320U & mask);
+      }
+    }
+    demo_camera_advance(&cam, 0, 0);
+    demo_scroll_advance(&scroll);
+  }
+  digest ^= 0xFFFFFFFFU;
+  fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
+  EXPECT_EQ(digest, 0x9ab0a0f9U)
+      << "demo scene fb_crc stream changed — rebake if intended, else regress";
+}
+
 // Locate the PROJECTION-target SET_MATRIX command in a built stream; returns
 // its matrix pointer, or null if absent.
 static const struct Mat4fx* find_proj_matrix(const struct Command* cmds,

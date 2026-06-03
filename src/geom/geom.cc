@@ -310,13 +310,18 @@ static int tile_index(int32_t coord_q4, int tile_px, int ntiles) {
   return idx;
 }
 
+// Inclusive tile-bbox a triangle covers (the coherent unit both binning passes
+// pass around). POD; returned by value (no out-params).
+struct TileSpan {
+  int tx0, tx1, ty0, ty1;
+};
+
 // Tile-bbox span [tx0..tx1] x [ty0..ty1] a triangle (pool indices) covers.
 // Pure function of the three projected TVtx, so the demand-tally pass
 // (geom_bin_tri) and the fill pass (geom_bin_finalize) derive the SAME span ->
 // the per-tile slot accounting matches exactly.
-static void geom_tri_tile_span(const struct GeomOut* o, uint16_t v0,
-                               uint16_t v1, uint16_t v2, int* tx0, int* tx1,
-                               int* ty0, int* ty1) {
+static struct TileSpan geom_tri_tile_span(const struct GeomOut* o, uint16_t v0,
+                                          uint16_t v1, uint16_t v2) {
   const struct TVtx* a = &o->tverts[v0];
   const struct TVtx* b = &o->tverts[v1];
   const struct TVtx* c = &o->tverts[v2];
@@ -351,10 +356,12 @@ static void geom_tri_tile_span(const struct GeomOut* o, uint16_t v0,
     maxy = c->y;
   }
 
-  *tx0 = tile_index(minx, RDR_TILE_W, GEOM_TILES_X);
-  *tx1 = tile_index(maxx, RDR_TILE_W, GEOM_TILES_X);
-  *ty0 = tile_index(miny, RDR_TILE_H, GEOM_TILES_Y);
-  *ty1 = tile_index(maxy, RDR_TILE_H, GEOM_TILES_Y);
+  struct TileSpan s;
+  s.tx0 = tile_index(minx, RDR_TILE_W, GEOM_TILES_X);
+  s.tx1 = tile_index(maxx, RDR_TILE_W, GEOM_TILES_X);
+  s.ty0 = tile_index(miny, RDR_TILE_H, GEOM_TILES_Y);
+  s.ty1 = tile_index(maxy, RDR_TILE_H, GEOM_TILES_Y);
+  return s;
 }
 
 RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
@@ -366,15 +373,11 @@ RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
     return RDR_EOVERFLOW;
   }
 
-  int tx0 = 0;
-  int tx1 = 0;
-  int ty0 = 0;
-  int ty1 = 0;
-  geom_tri_tile_span(o, v0, v1, v2, &tx0, &tx1, &ty0, &ty1);
+  struct TileSpan const s = geom_tri_tile_span(o, v0, v1, v2);
 
   // Tally per-tile demand (tiles[].count) — the prefix-sum input for finalize.
-  for (int ty = ty0; ty <= ty1; ++ty) {
-    for (int tx = tx0; tx <= tx1; ++tx) {
+  for (int ty = s.ty0; ty <= s.ty1; ++ty) {
+    for (int tx = s.tx0; tx <= s.tx1; ++tx) {
       ++o->tiles[(ty * GEOM_TILES_X) + tx].count;
     }
   }
@@ -414,14 +417,10 @@ void geom_bin_finalize(struct GeomOut* o) {
   // output).
   for (uint32_t j = 0; j < o->jobs_count; ++j) {
     const struct TriRef* job = &o->jobs[j];
-    int tx0 = 0;
-    int tx1 = 0;
-    int ty0 = 0;
-    int ty1 = 0;
-    geom_tri_tile_span(o, job->v0, job->v1, job->v2, &tx0, &tx1, &ty0, &ty1);
+    struct TileSpan const s = geom_tri_tile_span(o, job->v0, job->v1, job->v2);
     int placed_all = 1;
-    for (int ty = ty0; ty <= ty1; ++ty) {
-      for (int tx = tx0; tx <= tx1; ++tx) {
+    for (int ty = s.ty0; ty <= s.ty1; ++ty) {
+      for (int tx = s.tx0; tx <= s.tx1; ++tx) {
         struct TileBin* bin = &o->tiles[(ty * GEOM_TILES_X) + tx];
         if (bin->count >= bin->cap) {
           placed_all = 0;  // pool slot exhausted (already counted in pass 1)

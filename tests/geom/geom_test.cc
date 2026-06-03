@@ -322,6 +322,38 @@ TEST(Geom, BinJobBufferOverflowDropsAndCounts) {
   EXPECT_EQ(o.tris_dropped, 1U);
 }
 
+// Degenerate edge: a zero-capacity pool (mis-sizing) must drop everything
+// without writing — finalize's prefix-sum gives every tile seg=0 (avail starts
+// at 0), so no ref is written and the job drops-with-count. Pins the no-OOB
+// boundary of the avail = pool_cap - offset arithmetic.
+TEST(Geom, BinZeroPoolDropsAllSafely) {
+  static struct TVtx pool[8];
+  static struct TriRef bin_jobs[8];
+  struct GeomOut o;
+  geom_out_init(&o, pool, 8, nullptr, 0, bin_jobs, 8);  // pool_cap == 0
+
+  struct TVtx v0;
+  struct TVtx v1;
+  struct TVtx v2;
+  memset(&v0, 0, sizeof v0);
+  memset(&v1, 0, sizeof v1);
+  memset(&v2, 0, sizeof v2);
+  v1.x = (fx12_4)(RDR_TILE_W / 2 * 16);
+  v2.y = (fx12_4)(RDR_TILE_H / 2 * 16);
+  uint32_t const i0 = geom_emit_tvert(&o, &v0);
+  uint32_t const i1 = geom_emit_tvert(&o, &v1);
+  uint32_t const i2 = geom_emit_tvert(&o, &v2);
+  EXPECT_EQ(geom_bin_tri(&o, i0, i1, i2, 0), RDR_OK);  // buffers fine
+  geom_bin_finalize(&o);                               // must not write/OOB
+  EXPECT_EQ(o.pool_used, 0U);
+  EXPECT_EQ(o.tris_total, 0U);
+  EXPECT_EQ(o.tris_dropped, 1U);
+  for (int t = 0; t < GEOM_NUM_TILES; ++t) {
+    EXPECT_EQ(o.tiles[t].cap, 0U);
+    EXPECT_EQ(o.tiles[t].count, 0U);
+  }
+}
+
 // ---- lighting --------------------------------------------------------------
 // Pre-lit path: rgba passes through to a packed 565 color.
 TEST(Geom, PrelitPassThrough) {
