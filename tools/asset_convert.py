@@ -607,8 +607,16 @@ def bake_terrain_atlas_vertices(grid_verts, atlas_w, atlas_h, tiles_per_row,
 def bake_terrain_tile_indices():
     """Return the 8-triangle index pattern for a 3x3 vertex block (per-tile).
 
-    9 vertices in row-major order (local idx = cy*3 + cx).
-    2x2 quads, each split into 2 triangles (NW,NE,SW + NE,SE,SW).
+    9 vertices in row-major order (local idx = cy*3 + cx; cx->X, cy->Z).
+    2x2 quads, each split into 2 triangles.
+
+    WINDING: adapted to OUR renderer's convention, not N64's. The N64 source
+    winds NW,NE,SW which (with our Y-up world + screen-Y-down clip) yields a
+    DOWN-facing triangle (normal.y < 0) -> a camera-ABOVE the terrain culls it
+    as a back-face under CULL_BACK (the whole field renders black). We emit the
+    SWAPPED winding (NW,SW,NE / NE,SW,SE) so the up-side is front-facing for our
+    CULL_BACK + camera-above, exactly as the converter already adapts byte-order,
+    pre-scale, and UVs to our conventions. (T0 finding.)
     Returns a flat list of 24 uint16 indices (8 tris * 3 verts).
     """
     indices = []
@@ -618,10 +626,10 @@ def bake_terrain_tile_indices():
             ne = nw + 1
             sw = nw + 3
             se = sw + 1
-            # Tri1: NW, NE, SW (CCW winding matching N64 G_CULL_BACK)
-            indices += [nw, ne, sw]
-            # Tri2: NE, SE, SW
-            indices += [ne, se, sw]
+            # Tri1: NW, SW, NE (up-facing for our Y-up CULL_BACK)
+            indices += [nw, sw, ne]
+            # Tri2: NE, SW, SE
+            indices += [ne, sw, se]
     return indices
 
 

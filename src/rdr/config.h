@@ -21,7 +21,11 @@
 
 // ---- capacities (S0.5-CONFIRMED: 138 KiB free beside FB > budget; see
 //      docs/superpowers/specs/hardware-measurements.md). Sized to ~3000-tri. --
-#define RDR_MAX_TVERTS 3000  // transformed-vertex pool (~14 B each)
+// T0: dropped 3000->2400. Post-G1 vertex sharing makes peak pool occupancy
+// ~scene-vert-count, not tris*3. Measured peak over the full scripted loop at
+// real density (1024 terrain + 252 tree tris) = 1827 tverts (PeakTvert probe);
+// 2400 = ~31% headroom over the worst-framing peak (TVtx 20 B -> ~47 KB pool).
+#define RDR_MAX_TVERTS 2400  // transformed-vertex pool (20 B each)
 #define RDR_MAX_TRIS 3000    // bin triangle cap (drop-with-count on overflow)
 #define RDR_CMD_ARENA_BYTES (16 * 1024)
 

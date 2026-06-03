@@ -1,75 +1,92 @@
 #!/usr/bin/env python3
-"""gen_debug_terrain.py — OFFLINE bake of the D.7 placeholder terrain + tree
-billboard INPUT geometry to a committed FLASH-CONST header
-(src/demo/debug_terrain_gen.h).
+"""gen_debug_terrain.py — OFFLINE bake of the D.7/T0 terrain + tree billboard
+INPUT geometry to a committed FLASH-CONST header (src/demo/debug_terrain_gen.h).
 
-WHY (integration gate, target-SRAM only): the placeholder input geometry was
-computed into static buffers at init, so s_terrain_vtx/idx + s_tree_vtx/idx
-lived in .bss (RAM) ~13 KB and overflowed the RP2040 RAM region when D.7 merged
-with the other lanes. It is static deterministic data — bake it to const flash
-arrays (like camera_path_gen.h / assets_gen) so it leaves .bss entirely; the
-demo submits LOAD_VERTS/DRAW_TRIS pointers straight at the flash arrays.
+WHY (integration gate, target-SRAM only): the demo's input geometry must not
+live in .bss (RAM) — at ~1152 terrain verts + 504 tree verts + indices it would
+overflow the RP2040 RAM region. It is static deterministic data, so bake it to
+const flash arrays (like camera_path_gen.h / the asset_gen headers); the demo
+submits LOAD_VERTS/DRAW_TRIS pointers straight at the flash arrays.
 
-The runtime demo_terrain_geometry/demo_tree_geometry FILL functions stay (host
-tests + the T0 D.1 swap seam still want a fill API), but the renderer_demo /
-the committed path use these const arrays. This generator reproduces the C fill
-math EXACTLY (positions, per-cell debug colors, indices, winding) so all the
-determinism / debug-color-histogram / near-plane guards keep passing.
+T0 SWAP: the terrain is now D.1's REAL baked mesh (assets/terrain/
+terrain_grid_vtx.h) — positions + UVs verbatim, with the N64 pre-lit gray
+overridden by a DISTINCT debug color per mesh-cell (tile = vert/9, tile-major).
+Indices are the shared per-tile pattern (terrain_grid_idx.h) expanded over all
+128 tiles (pattern[k] + tile*9). Trees stay procedural upright debug-colored
+quads at the real scenery density (126).
+
+This generator reproduces demo_terrain_geometry / demo_tree_geometry in
+demo_scene.cc EXACTLY (positions, UVs, per-cell debug colors, indices, winding)
+so the FlashConstGeometryMatchesFillApi drift guard + the determinism / debug-
+color-histogram / near-plane guards keep passing.
 
 Build does NOT run Python; debug_terrain_gen.h is committed data. Regenerate
-when the placeholder layout changes:
+when the placeholder layout or the baked mesh changes:
 
     python3 src/demo/gen_debug_terrain.py src/demo/debug_terrain_gen.h
 """
 
 import os
+import re
+import struct
 import sys
 
 # ---- layout constants (MUST mirror src/demo/demo_scene.{h,cc}) -------------
-TERRAIN_COLS = 30      # DEMO_TERRAIN_COLS
-TERRAIN_ROWS = 15      # DEMO_TERRAIN_ROWS
-TREE_COUNT = 12        # DEMO_TREE_COUNT
-TERRAIN_HALF = 18      # world half-extent in X and Z (pre-scaled units)
-TERRAIN_BASE_Y = 0     # ground plane Y
+TERRAIN_TILES = 128          # DEMO_TERRAIN_TILES
+VERTS_PER_TILE = 9           # DEMO_TERRAIN_VERTS_PER_TILE
+TERRAIN_VERTS = TERRAIN_TILES * VERTS_PER_TILE  # 1152
+TREE_COUNT = 126             # DEMO_TREE_COUNT
+TERRAIN_BASE_Y = 0           # ground plane Y
+VTX_STRIDE = 14              # packed Vtx: pos[3] + uv[2] + rgba[4]
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_GRID_VTX_H = os.path.join(_HERE, 'assets', 'terrain', 'terrain_grid_vtx.h')
+_GRID_IDX_H = os.path.join(_HERE, 'assets', 'terrain', 'terrain_grid_idx.h')
 
 
-def cell_debug_color(cx, cy):
-    """Mirror cell_debug_color() in demo_scene.cc (3 saw waves, coprime)."""
-    h = (cx * 5) + (cy * 3)
-    r = 64 + ((h * 37) & 0xBF)
-    g = 64 + (((cy * 53) + 17) & 0xBF)
-    b = 64 + (((cx * 61) + 31) & 0xBF)
+def _parse_hex_bytes(path):
+    """Flat list of the 0xNN byte literals in a generated C header."""
+    text = open(path).read()
+    return [int(x, 16) for x in re.findall(r'0x([0-9a-fA-F]{2})\b', text)]
+
+
+def tile_debug_color(tile):
+    """Mirror tile_debug_color() in demo_scene.cc (3 saw waves, coprime)."""
+    r = 64 + ((tile * 37) & 0xBF)
+    g = 64 + (((tile * 53) + 17) & 0xBF)
+    b = 64 + (((tile * 61) + 31) & 0xBF)
     return r, g, b
 
 
-def terrain_height(cx, cy):
-    """Mirror terrain_height() in demo_scene.cc."""
-    h = ((((cx * 7) + (cy * 11)) % 5) - 2)
-    return TERRAIN_BASE_Y + h
-
-
 def build_terrain():
-    cols, rows = TERRAIN_COLS, TERRAIN_ROWS
-    vx = cols + 1
-    verts = []  # (px,py,pz, r,g,b)
-    for gy in range(rows + 1):
-        for gx in range(cols + 1):
-            wx = -TERRAIN_HALF + ((2 * TERRAIN_HALF * gx) // cols)
-            wz = -TERRAIN_HALF + ((2 * TERRAIN_HALF * gy) // rows)
-            r, g, b = cell_debug_color(gx, gy)
-            verts.append((wx, terrain_height(gx, gy), wz, r, g, b))
+    """D.1 baked mesh, debug-recolored per mesh-cell + expanded indices."""
+    raw = bytes(_parse_hex_bytes(_GRID_VTX_H))
+    n = len(raw) // VTX_STRIDE
+    if n != TERRAIN_VERTS:
+        sys.stderr.write('WARNING: grid vtx count %d != %d\n'
+                         % (n, TERRAIN_VERTS))
+    verts = []  # (px,py,pz, u,v, r,g,b)
+    for i in range(n):
+        px, py, pz, u, v = struct.unpack_from('<hhhhh', raw, i * VTX_STRIDE)
+        r, g, b = tile_debug_color(i // VERTS_PER_TILE)
+        verts.append((px, py, pz, u, v, r, g, b))
+
+    # Shared per-tile index pattern, expanded with a +tile*9 offset.
+    pat_text = open(_GRID_IDX_H).read()
+    body = pat_text.split('{', 1)[1].split('}', 1)[0]
+    pattern = [int(x, 0) for x in re.findall(r'0x[0-9a-fA-F]+|\d+', body)]
+    # The asset pattern is already wound up-facing for our CULL_BACK (the
+    # converter's bake_terrain_tile_indices adapts the N64 winding), so expand
+    # verbatim: tile t's indices are pattern[k] + t*9.
     idx = []
-    for gy in range(rows):
-        for gx in range(cols):
-            a = (gy * vx) + gx
-            b = (gy * vx) + gx + 1
-            c = ((gy + 1) * vx) + gx
-            d = ((gy + 1) * vx) + gx + 1
-            idx += [a, b, c, b, d, c]  # CCW-from-+Y; provoking v0 = a / b
+    for t in range(TERRAIN_TILES):
+        vbase = t * VERTS_PER_TILE
+        idx += [k + vbase for k in pattern]
     return verts, idx
 
 
 def build_trees():
+    """Mirror demo_tree_geometry() in demo_scene.cc (uv = 0)."""
     verts = []
     idx = []
     for t in range(TREE_COUNT):
@@ -84,16 +101,17 @@ def build_trees():
         corner = ((-hw, 0), (hw, 0), (-hw, ht), (hw, ht))
         for k in range(4):
             verts.append((cx + corner[k][0], TERRAIN_BASE_Y + corner[k][1], cz,
-                          r, g, b))
+                          0, 0, r, g, b))
         a, bb, c, d = base + 0, base + 1, base + 2, base + 3
         idx += [a, c, bb, bb, c, d]  # -Z-facing order (CULL_BACK drops the back)
     return verts, idx
 
 
 def fmt_vtx(v):
-    # struct Vtx aggregate init: {{pos}, {uv}, {{rgba}}}. uv=0; alpha=255.
-    px, py, pz, r, g, b = v
-    return '{{%d, %d, %d}, {0, 0}, {{%d, %d, %d, 255}}}' % (px, py, pz, r, g, b)
+    # struct Vtx aggregate init: {{pos}, {uv}, {{rgba}}}. alpha=255.
+    px, py, pz, u, vv, r, g, b = v
+    return '{{%d, %d, %d}, {%d, %d}, {{%d, %d, %d, 255}}}' % (
+        px, py, pz, u, vv, r, g, b)
 
 
 def emit(name_v, name_i, verts, idx, lines):
@@ -115,12 +133,14 @@ def emit_header(path):
     lines = []
     lines.append('// clang-format off')
     lines.append('// debug_terrain_gen.h — GENERATED by src/demo/gen_debug_terrain.py.')
-    lines.append('// DO NOT EDIT. Committed FLASH-CONST placeholder terrain + tree')
-    lines.append('// billboard input geometry for the D.7 demo. Baked OFFLINE so the')
-    lines.append('// input geometry leaves .bss (RAM) -> fits the RP2040 RAM region')
-    lines.append('// (integration-gate overflow fix). Reproduces demo_terrain_geometry')
-    lines.append('// / demo_tree_geometry exactly (positions, per-cell debug colors,')
-    lines.append('// indices, winding). The build does not run Python; committed data.')
+    lines.append('// DO NOT EDIT. Committed FLASH-CONST terrain + tree billboard input')
+    lines.append('// geometry for the D.7/T0 demo. Baked OFFLINE so the input geometry')
+    lines.append('// leaves .bss (RAM) -> fits the RP2040 RAM region. Terrain = D.1\'s')
+    lines.append('// real baked mesh (assets/terrain/terrain_grid_vtx.h) debug-recolored')
+    lines.append('// per mesh-cell; trees = procedural upright debug quads. Reproduces')
+    lines.append('// demo_terrain_geometry / demo_tree_geometry exactly (positions, UVs,')
+    lines.append('// per-cell debug colors, indices, winding). The build does not run')
+    lines.append('// Python; committed data.')
     lines.append('// Regenerate: python3 src/demo/gen_debug_terrain.py src/demo/debug_terrain_gen.h')
     lines.append('#ifndef DEMO_DEBUG_TERRAIN_GEN_H')
     lines.append('#define DEMO_DEBUG_TERRAIN_GEN_H')
@@ -142,8 +162,8 @@ def emit_header(path):
 
 
 def main(argv):
-    out = argv[1] if len(argv) > 1 else os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), 'debug_terrain_gen.h')
+    out = argv[1] if len(argv) > 1 else os.path.join(_HERE,
+                                                     'debug_terrain_gen.h')
     size, nv, ni, rv, ri = emit_header(out)
     sys.stderr.write(
         'wrote %s: %d bytes (terrain %dv/%di, trees %dv/%di)\n'

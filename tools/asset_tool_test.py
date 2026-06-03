@@ -342,12 +342,13 @@ class TerrainIndexTests(unittest.TestCase):
         # 8-triangle index pattern for a 3x3 block
         indices = ac.bake_terrain_tile_indices()
         self.assertEqual(len(indices), 24)  # 8 tris * 3 verts
+        # Up-facing winding (NW,SW,NE / NE,SW,SE) for our Y-up CULL_BACK.
         # First quad: NW=0, NE=1, SW=3, SE=4
-        self.assertEqual(indices[:6], [0, 1, 3, 1, 4, 3])
+        self.assertEqual(indices[:6], [0, 3, 1, 1, 3, 4])
         # Second quad (qx=1): NW=1, NE=2, SW=4, SE=5
-        self.assertEqual(indices[6:12], [1, 2, 4, 2, 5, 4])
+        self.assertEqual(indices[6:12], [1, 4, 2, 2, 4, 5])
         # Third quad (qy=1, qx=0): NW=3, NE=4, SW=6, SE=7
-        self.assertEqual(indices[12:18], [3, 4, 6, 4, 7, 6])
+        self.assertEqual(indices[12:18], [3, 6, 4, 4, 6, 7])
 
 
 class TerrainVertexBakeTests(unittest.TestCase):

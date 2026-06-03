@@ -50,23 +50,34 @@ uint32_t demo_scene_build(struct Command* buf, uint32_t cap, float pyr_angle,
 // once during the (float) matrix/geometry setup, never in the per-frame path.
 #define DEMO_SCENE_SCALE 0.005
 
-// Terrain placeholder density. A vertex grid of (COLS+1) x (ROWS+1) verts,
-// every quad split into 2 tris -> COLS*ROWS*2 tris. Sized so the transformed-
-// vertex pool (RDR_MAX_TVERTS=3000) is not exhausted: each tri emits 3 tverts
-// (no vertex sharing in the thin slice), so terrain_tris*3 + tree_tris*3 must
-// stay under RDR_MAX_TVERTS. 30x15 = 900 tris -> 2700 tverts, leaving headroom
-// for the tree billboards. Representative of the N64 33x17 / 9-vert-8-tri
-// layout. (The REAL baked mesh from D.1 replaces this at T0 via
-// demo_terrain_geometry — keep the swap seam clean.)
+// Terrain density = D.1's REAL baked mesh (src/demo/assets/terrain/
+// terrain_grid_vtx.h): 128 mesh-cells (N64 texture-window tiles), each a 3x3
+// vertex patch (9 verts) triangulated into 8 tris by the shared per-tile index
+// pattern (terrain_grid_idx.h), expanded with a +tile*9 offset. TILE-MAJOR, so
+// a vertex's mesh-cell index = vert_index / 9. The mesh is flat-shaded with a
+// DISTINCT debug color per mesh-cell (overriding the N64 pre-lit gray) so
+// transform/cull/winding bugs stay catchable — a uniform-gray blob would blind
+// the orientation check that caught the C1 regressions.
+//
+// Pool sizing (post-G1): geom transforms each LOAD_VERTS window ONCE into the
+// pool and the all-inside fast path bins shared indices (zero new tverts), so
+// peak pool occupancy is ~terrain_verts + tree_verts (+ near-clip fans, none on
+// the off-near-plane scripted path), NOT tris*3. ~1152 + 504 = ~1656 tverts,
+// well under RDR_MAX_TVERTS — the T0 peak-tvert probe drives the cap drop.
 enum {
-  DEMO_TERRAIN_COLS = 30,
-  DEMO_TERRAIN_ROWS = 15,
-  DEMO_TERRAIN_QUADS = DEMO_TERRAIN_COLS * DEMO_TERRAIN_ROWS,
-  DEMO_TERRAIN_TRIS = DEMO_TERRAIN_QUADS * 2,
-  DEMO_TERRAIN_VERTS = (DEMO_TERRAIN_COLS + 1) * (DEMO_TERRAIN_ROWS + 1),
-  DEMO_TERRAIN_IDX = DEMO_TERRAIN_TRIS * 3,
-  // Tree billboard quads (2 tris / 4 verts each), distinct debug sprite color.
-  DEMO_TREE_COUNT = 12,
+  DEMO_TERRAIN_TILES = 128,
+  DEMO_TERRAIN_VERTS_PER_TILE = 9,
+  DEMO_TERRAIN_TRIS_PER_TILE = 8,
+  DEMO_TERRAIN_VERTS =
+      DEMO_TERRAIN_TILES * DEMO_TERRAIN_VERTS_PER_TILE,                 // 1152
+  DEMO_TERRAIN_TRIS = DEMO_TERRAIN_TILES * DEMO_TERRAIN_TRIS_PER_TILE,  // 1024
+  DEMO_TERRAIN_IDX = DEMO_TERRAIN_TRIS * 3,                             // 3072
+  // Tree billboard placeholders at the REAL scenery density (126 instances,
+  // terrain_scenery.h): static upright debug-colored quads (2 tris / 4 verts).
+  // True per-frame camera-facing billboarding needs float -> deferred; the
+  // static quad keeps the per-frame path float-free. Bumped to real density so
+  // the peak-tvert probe reflects the actual scene load.
+  DEMO_TREE_COUNT = 126,
   DEMO_TREE_VERTS = DEMO_TREE_COUNT * 4,
   DEMO_TREE_TRIS = DEMO_TREE_COUNT * 2,
   DEMO_TREE_IDX = DEMO_TREE_TRIS * 3
@@ -148,13 +159,14 @@ struct DemoTelemetry {
   uint32_t scroll_phase;     // panorama/cloud scroll phase this frame
 };
 
-// ---- terrain geometry boundary (T0 swap seam) -------------------------------
-// Fill caller-provided arrays with the placeholder procedural terrain: a
-// debug-colored height-field grid (distinct flat color per mesh cell so
-// transform/cull/winding bugs are catchable — uniform N64 gray would render one
-// blob). The provoking-vertex color encodes the cell index. T0 (Lead) replaces
-// THIS function with D.1's real baked mesh; the rest of demo_terrain_build is
-// geometry-agnostic, so the swap is local to this boundary.
+// ---- terrain geometry boundary (T0 swap seam, realized) ---------------------
+// Fill caller-provided arrays with D.1's REAL baked terrain mesh: positions +
+// UVs are copied verbatim from g_terrain_grid_vtx (flash-const), and the N64
+// pre-lit gray is overridden with a DISTINCT debug color per mesh-cell (tile =
+// vert/9, tile-major) so transform/cull/winding bugs are catchable. Indices are
+// the shared per-tile pattern expanded over all tiles (pattern[k] + tile*9).
+// The rest of demo_terrain_build is geometry-agnostic, so this boundary is the
+// only mesh-specific code.
 //   verts: out, capacity >= DEMO_TERRAIN_VERTS
 //   idx:   out, capacity >= DEMO_TERRAIN_IDX
 // Returns the vertex count written (DEMO_TERRAIN_VERTS).

@@ -10,6 +10,7 @@
 #include "demo/demo_scene.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "demo/camera_path_gen.h"  // committed scripted V*P table (float-free)
@@ -314,6 +315,46 @@ TEST(TerrainSceneGuard, ScriptedPathStaysOffNearPlane) {
       demo_scroll_advance(&scroll);
     }
   }
+}
+
+// PEAK TVERT PROBE (T0 cap-drop driver): with G1 transform-once sharing, geom
+// transforms each LOAD_VERTS window ONCE into the pool and the all-inside fast
+// path bins shared indices (zero new tverts), so peak pool occupancy is
+// ~terrain_verts + tree_verts (+ near-clip fans, none on this path) regardless
+// of how the field frames. Sweep the whole scripted loop and record the high-
+// water geom.tvert_count; it must stay under RDR_MAX_TVERTS and pins the
+// headroom that justifies dropping the cap. Prints the measured peak for the T0
+// report.
+TEST(TerrainSceneGuard, PeakTvertUnderCapAcrossScriptedLoop) {
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);
+  demo_scroll_init(&scroll);
+
+  uint32_t peak = 0;
+  uint32_t const total_frames = (uint32_t)SCRIPTED_FRAME_COUNT;
+  for (uint32_t f = 0; f < total_frames; ++f) {
+    render_terrain(&cam, &scroll, &telem);
+    if (g_frame.geom.tvert_count > peak) {
+      peak = g_frame.geom.tvert_count;
+    }
+    demo_camera_advance(&cam, 0, 0);
+    demo_scroll_advance(&scroll);
+  }
+  fprintf(
+      stderr, "[T0] peak tverts = %u (cap RDR_MAX_TVERTS=%d, scene verts=%u)\n",
+      peak, RDR_MAX_TVERTS, (unsigned)(DEMO_TERRAIN_VERTS + DEMO_TREE_VERTS));
+  // Sharing holds: peak ~= scene vert count + a small guard-band screen-clip
+  // fan slack (NOT tris*3 — the pre-G1 no-sharing worst case 1024*3+252*3=3828
+  // would blow the cap). A regression that loses sharing (re-emitting per tri)
+  // spikes this well past the bound below. 512 = clip-fan headroom (fresh fan
+  // tverts from tris crossing the screen guard band).
+  uint32_t const scene_verts = (uint32_t)(DEMO_TERRAIN_VERTS + DEMO_TREE_VERTS);
+  EXPECT_LT(peak, scene_verts + 512U)
+      << "peak tverts far above the loaded vert count — vertex sharing "
+         "regressed?";
+  EXPECT_LT(peak, (uint32_t)RDR_MAX_TVERTS) << "peak tverts over the pool cap";
 }
 
 // Locate the PROJECTION-target SET_MATRIX command in a built stream; returns

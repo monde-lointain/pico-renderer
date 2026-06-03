@@ -16,8 +16,10 @@
 #include <string.h>
 
 #include "cmd/cmd.h"
-#include "demo/camera_path_gen.h"    // committed Q16.16 scripted V*P table
-#include "demo/debug_terrain_gen.h"  // committed FLASH-CONST placeholder geometry
+#include "demo/assets/terrain/terrain_grid_idx.h"  // shared per-tile index pattern
+#include "demo/assets/terrain/terrain_grid_vtx.h"  // D.1 baked terrain mesh (pos/UV)
+#include "demo/camera_path_gen.h"  // committed Q16.16 scripted V*P table
+#include "demo/debug_terrain_gen.h"  // committed FLASH-CONST debug-colored geometry
 #include "fixed/fixed.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"  // enum Button (free-fly toggle/nudge)
@@ -297,83 +299,57 @@ uint32_t demo_scene_build(struct Command* buf, uint32_t cap, float pyr_angle,
 // host==device.
 
 // ---- terrain layout (pre-scaled world INTEGER model coords) ----------------
-// The placeholder grid is a GROUND height-field in the XZ plane (Y up), like
-// the N64 terrain demo: the camera flies above and looks down/forward, so the
-// field fills the frame (the "near-terrain fill" worst case). Y carries a small
-// per- cell height; X,Z span [-HALF,+HALF]. World half-extent matches the
-// pre-scaled N64 patch scale (~18 units); the camera (N64 eye ~36 units
-// up/back) keeps the whole field in front of the near plane for the entire
-// path. Model coords are int16 (Vtx.pos); modelview is identity (verts authored
-// directly in pre-scaled world units). The REAL baked mesh from D.1 replaces
-// demo_terrain_geometry at T0 — the rest of the build is geometry-agnostic, so
-// KEEP THIS SEAM CLEAN.
-#define TERRAIN_HALF 18  /* world half-extent in X and Z (pre-scaled units) */
-#define TERRAIN_BASE_Y 0 /* ground plane Y */
+// D.1's REAL baked mesh is a GROUND height-field in the XZ plane (Y up): the
+// camera flies above and looks down/forward, so the field fills the frame (the
+// "near-terrain fill" worst case). Positions/UVs come verbatim from the baked
+// asset (g_terrain_grid_vtx, pre-scaled int16 model coords; modelview is
+// identity, verts authored directly in pre-scaled world). demo_terrain_geometry
+// overrides ONLY the per-vertex color (debug palette) and expands the shared
+// per-tile index pattern; the rest of the build is geometry-agnostic.
+#define TERRAIN_BASE_Y 0 /* ground plane Y (tree quads stand on it) */
 
-// Distinct debug color per mesh cell. A simple hashed palette spreads adjacent
-// cells across hue so a one-blob / wrong-winding render is obvious. (NOT the
-// N64 flat gray — that would blind the orientation check, per the D.7 brief.)
-static void cell_debug_color(int cx, int cy, uint8_t* rgb) {
-  // 3-channel saw waves with coprime strides -> many distinct buckets.
-  int const h = ((cx * 5) + (cy * 3));
-  rgb[0] = (uint8_t)(64 + ((h * 37) & 0xBF));
-  rgb[1] = (uint8_t)(64 + (((cy * 53) + 17) & 0xBF));
-  rgb[2] = (uint8_t)(64 + (((cx * 61) + 31) & 0xBF));
-}
-
-// Procedural placeholder height (integer): a fixed deterministic bump so
-// adjacent cells differ in Y (visible relief) without crossing near/far. Pure
-// integer; one-time at geometry build.
-static int terrain_height(int cx, int cy) {
-  int const h = ((((cx * 7) + (cy * 11)) % 5) - 2);  // [-2,2]
-  return TERRAIN_BASE_Y + h;
+// Distinct debug color per mesh-cell (N64 texture-window tile). A hashed
+// palette spreads adjacent cells across hue so a one-blob / wrong-winding
+// render is obvious. (NOT the N64 flat gray — that would blind the orientation
+// check, per the D.7 brief.) All 9 verts of a tile share its color, so each
+// tile renders as one flat patch; tile boundaries + overall shape pin
+// transform/cull/winding.
+static void tile_debug_color(int tile, uint8_t* rgb) {
+  // 3-channel saw waves with coprime strides -> many distinct buckets over 128.
+  rgb[0] = (uint8_t)(64 + ((tile * 37) & 0xBF));
+  rgb[1] = (uint8_t)(64 + (((tile * 53) + 17) & 0xBF));
+  rgb[2] = (uint8_t)(64 + (((tile * 61) + 31) & 0xBF));
 }
 
 uint32_t demo_terrain_geometry(struct Vtx* verts, uint16_t* idx) {
-  int const cols = DEMO_TERRAIN_COLS;
-  int const rows = DEMO_TERRAIN_ROWS;
-  int const vx = cols + 1;
-  // Vertex grid in the XZ plane; gx -> X, gy -> Z. Y is the height field.
-  for (int gy = 0; gy <= rows; ++gy) {
-    for (int gx = 0; gx <= cols; ++gx) {
-      int const vi = (gy * vx) + gx;
-      int const wx = -TERRAIN_HALF + ((2 * TERRAIN_HALF * gx) / cols);
-      int const wz = -TERRAIN_HALF + ((2 * TERRAIN_HALF * gy) / rows);
-      struct Vtx* v = &verts[vi];
-      memset(v, 0, sizeof *v);
-      v->pos[0] = (int16_t)wx;
-      v->pos[1] = (int16_t)terrain_height(gx, gy);
-      v->pos[2] = (int16_t)wz;
-      uint8_t rgb[3];
-      cell_debug_color(gx, gy, rgb);
-      v->c.rgba[0] = rgb[0];
-      v->c.rgba[1] = rgb[1];
-      v->c.rgba[2] = rgb[2];
-      v->c.rgba[3] = 255;
-    }
+  // Asset stride is the packed 14-byte Vtx (pos[3]+uv[2]+rgba[4]); copy those
+  // field-bytes verbatim (alignment-safe; robust to any struct tail pad), then
+  // override the gray rgba with the per-mesh-cell debug color (tile-major:
+  // mesh-cell = vert/9).
+  size_t const stride =
+      (size_t)g_terrain_grid_vtx_len / (unsigned)DEMO_TERRAIN_VERTS;
+  for (int i = 0; i < DEMO_TERRAIN_VERTS; ++i) {
+    memcpy(&verts[i], g_terrain_grid_vtx + (size_t)i * stride, stride);
+    uint8_t rgb[3];
+    tile_debug_color(i / DEMO_TERRAIN_VERTS_PER_TILE, rgb);
+    verts[i].c.rgba[0] = rgb[0];
+    verts[i].c.rgba[1] = rgb[1];
+    verts[i].c.rgba[2] = rgb[2];
+    verts[i].c.rgba[3] = 255;
   }
-  // Two tris per quad, wound CCW as seen from ABOVE (+Y, the camera side) so
-  // CULL_BACK keeps the upward faces. The provoking vertex (v0) is the cell
-  // color. In screen space a top-down view of a CCW-from-above ground quad is
-  // CW; the cull contract folds winding sense via the modelview det sign, so
-  // this is the natural up-facing order.
+  // Expand the shared per-tile index pattern over all tiles. Tile t's 9 verts
+  // occupy [t*9, t*9+9), so its triangle indices are pattern[k] + t*9. The
+  // pattern is already wound up-facing for our CULL_BACK (the converter's
+  // bake_terrain_tile_indices adapts the N64 winding — T0 finding), so expand
+  // verbatim.
   int o = 0;
-  for (int gy = 0; gy < rows; ++gy) {
-    for (int gx = 0; gx < cols; ++gx) {
-      uint16_t const a = (uint16_t)((gy * vx) + gx);
-      uint16_t const b = (uint16_t)((gy * vx) + gx + 1);
-      uint16_t const c2 = (uint16_t)(((gy + 1) * vx) + gx);
-      uint16_t const d = (uint16_t)(((gy + 1) * vx) + gx + 1);
-      // Tri 1: a, b, c  | Tri 2: b, d, c  (CCW from +Y; provoking v0 = a / b).
-      idx[o++] = a;
-      idx[o++] = b;
-      idx[o++] = c2;
-      idx[o++] = b;
-      idx[o++] = d;
-      idx[o++] = c2;
+  for (int t = 0; t < DEMO_TERRAIN_TILES; ++t) {
+    int const vbase = t * DEMO_TERRAIN_VERTS_PER_TILE;
+    for (unsigned k = 0; k < g_terrain_tile_indices_len; ++k) {
+      idx[o++] = (uint16_t)(g_terrain_tile_indices[k] + vbase);
     }
   }
-  return (uint32_t)(vx * (rows + 1));
+  return (uint32_t)DEMO_TERRAIN_VERTS;
 }
 
 uint32_t demo_tree_geometry(struct Vtx* verts, uint16_t* idx) {
@@ -535,6 +511,12 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
       (uint32_t)(sizeof g_debug_terrain_vtx / sizeof g_debug_terrain_vtx[0]);
   uint32_t const tree_vcount =
       (uint32_t)(sizeof g_debug_tree_vtx / sizeof g_debug_tree_vtx[0]);
+  // tri_count likewise derives from the committed index-array size (idx/3), so
+  // a T0/D.1 mesh swap of a different length can't silently mismatch DRAW_TRIS.
+  uint32_t const terrain_tcount = (uint32_t)(sizeof g_debug_terrain_idx /
+                                             sizeof g_debug_terrain_idx[0] / 3);
+  uint32_t const tree_tcount =
+      (uint32_t)(sizeof g_debug_tree_idx / sizeof g_debug_tree_idx[0] / 3);
   s_cb.buf = buf;
   s_cb.cap = cap;
   cb_reset(&s_cb);
@@ -604,10 +586,10 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   telem->cmdgen_verts += terrain_vcount;
   memset(&c, 0, sizeof c);
   c.u.draw_tris.idx = g_debug_terrain_idx;
-  c.u.draw_tris.tri_count = (uint16_t)DEMO_TERRAIN_TRIS;
+  c.u.draw_tris.tri_count = (uint16_t)terrain_tcount;
   push(CMD_DRAW_TRIS, &c);
   telem->cmdgen_draws += 1;
-  telem->cmdgen_tris += DEMO_TERRAIN_TRIS;
+  telem->cmdgen_tris += terrain_tcount;
 
   // ---- tree billboards: second batch (same model transform) ----
   memset(&c, 0, sizeof c);
@@ -617,10 +599,10 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   telem->cmdgen_verts += tree_vcount;
   memset(&c, 0, sizeof c);
   c.u.draw_tris.idx = g_debug_tree_idx;
-  c.u.draw_tris.tri_count = (uint16_t)DEMO_TREE_TRIS;
+  c.u.draw_tris.tri_count = (uint16_t)tree_tcount;
   push(CMD_DRAW_TRIS, &c);
   telem->cmdgen_draws += 1;
-  telem->cmdgen_tris += DEMO_TREE_TRIS;
+  telem->cmdgen_tris += tree_tcount;
 
   push(CMD_POP_MATRIX, &c);
 
