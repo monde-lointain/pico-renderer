@@ -484,13 +484,15 @@ static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
   }
 
   // Resolve pooled tverts for this window (g->vbase was recorded at
-  // LOAD_VERTS).
+  // LOAD_VERTS). Index f->geom.tverts — the SAME buffer geom_emit_tvert writes
+  // to — not f->pool directly, so the read can't drift from the emit side if
+  // the pool is ever wired through a different backing.
   uint32_t const pi0 = g->vbase + vi0;
   uint32_t const pi1 = g->vbase + vi1;
   uint32_t const pi2 = g->vbase + vi2;
-  const struct TVtx* a = &f->pool[pi0];
-  const struct TVtx* b = &f->pool[pi1];
-  const struct TVtx* c = &f->pool[pi2];
+  const struct TVtx* a = &f->geom.tverts[pi0];
+  const struct TVtx* b = &f->geom.tverts[pi1];
+  const struct TVtx* c = &f->geom.tverts[pi2];
 
   // Near-sentinel check: inv_w < 0 means this vert was behind the near plane
   // at LOAD_VERTS time. Drop the whole tri (thin-slice whole-tri near policy).
