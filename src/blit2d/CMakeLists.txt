@@ -1,0 +1,7 @@
+add_library(Renderer_blit2d)
+add_library(Renderer::Blit2d ALIAS Renderer_blit2d)
+target_sources(Renderer_blit2d PRIVATE blit2d.cc)
+target_include_directories(Renderer_blit2d PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(Renderer_blit2d PUBLIC renderer::sanitizers)
+orthodoxy_enforce(Renderer_blit2d)
+pico_tidy_enable(Renderer_blit2d)
