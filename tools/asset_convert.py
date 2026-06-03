@@ -156,3 +156,48 @@ def encode_texture(pixels, fmt):
             raise ValueError('unsupported TexFormat %r' % fmt)
         out += struct.pack('<H', v)
     return bytes(out)
+
+
+# ---- matrix bake (TW-05: lock the column-major convention with a guard) -----
+# The renderer's mat_transform (src/fixed/fixed.cc) computes
+#     out[row] = sum_k m[k*4 + row] * v[k]      (column-major flat array)
+# and the N64 produces clip via the row-vector form
+#     clip[j]  = sum_i v[i] * vp[i][j].
+# Equating out[j] == clip[j] gives the bake convention  m[i*4 + j] = vp[i][j].
+# The S0 spike hit the SILENT wrong-w bug from baking the transpose
+# (m[i*4+j] = vp[j][i]); D.1/D.7 must bake scripted camera + asset MVPs through
+# THIS helper so asset_tool_test pins the convention.
+FX16_16_ONE = 1 << 16
+INT32_MIN = -(1 << 31)
+INT32_MAX = (1 << 31) - 1
+
+
+def to_q16_16(x):
+    """Float -> Q16.16 int (round half away from zero), clamped to int32."""
+    v = round_half_away(x * FX16_16_ONE)
+    if v < INT32_MIN:
+        return INT32_MIN
+    if v > INT32_MAX:
+        return INT32_MAX
+    return v
+
+
+def bake_mvp_q16_16(vp):
+    """Bake a 4x4 V*P (N64 row-vector convention vp[i][j]) into the flat Q16.16
+    array the renderer consumes: flat[i*4 + j] = q16(vp[i][j]). NOT the transpose.
+    vp: 4x4 nested sequence of floats. Returns a flat list of 16 Q16.16 ints."""
+    if len(vp) != 4 or any(len(row) != 4 for row in vp):
+        raise ValueError('vp must be 4x4')
+    return [to_q16_16(vp[i][j]) for i in range(4) for j in range(4)]
+
+
+def transform_rowvec_ref(vp, v):
+    """N64 reference (float): clip[j] = sum_i v[i]*vp[i][j]. v is length-4."""
+    return [sum(v[i] * vp[i][j] for i in range(4)) for j in range(4)]
+
+
+def transform_renderer_model(m_flat, v):
+    """Float model of the renderer's mat_transform: out[row] = sum_k
+    m_flat[k*4+row]*v[k]. m_flat is the Q16.16 flat array; v is length-4."""
+    return [sum((m_flat[k * 4 + row] / FX16_16_ONE) * v[k] for k in range(4))
+            for row in range(4)]

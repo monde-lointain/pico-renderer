@@ -131,6 +131,32 @@ class TestParseCheckSpec(unittest.TestCase):
             rot.parse_check_spec("x~=5")
 
 
+class TestNewestTty(unittest.TestCase):
+    """TW-03: pick the newest re-enumerated node, not lexicographically-first."""
+
+    def test_picks_newest_by_mtime_not_first(self):
+        # ACM1 created AFTER ACM0 (the reset re-enumerated to ACM1; ACM0 stale).
+        mtimes = {"/dev/ttyACM0": 100.0, "/dev/ttyACM1": 200.0}
+        chosen = rot.newest_tty(
+            "/dev/ttyACM*",
+            _glob=lambda _p: ["/dev/ttyACM0", "/dev/ttyACM1"],
+            _mtime=mtimes.__getitem__,
+        )
+        self.assertEqual(chosen, "/dev/ttyACM1")
+
+    def test_picks_newest_regardless_of_glob_order(self):
+        mtimes = {"/dev/ttyACM0": 300.0, "/dev/ttyACM1": 200.0}
+        chosen = rot.newest_tty(
+            "/dev/ttyACM*",
+            _glob=lambda _p: ["/dev/ttyACM1", "/dev/ttyACM0"],
+            _mtime=mtimes.__getitem__,
+        )
+        self.assertEqual(chosen, "/dev/ttyACM0")
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(rot.newest_tty("/dev/ttyACM*", _glob=lambda _p: []))
+
+
 class TestEndToEndCore(unittest.TestCase):
     def test_canned_stream_passes_realistic_gate(self):
         parsed = rot.parse_stream(CANNED_STREAM.splitlines())

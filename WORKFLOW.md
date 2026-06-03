@@ -233,3 +233,24 @@ Plan: `~/.claude/plans/design-a-modern-command-buffer-fizzy-candy.md` (approved;
 - **Q2/Q26 CLOSED (negative):** `terrain.bs1` = BST1 v145 asset bundle (not a cmd/frame capture); `test/` goldens = RDP cmd-words (self-validation), NOT console pixels. **No rendered-frame ground truth exists** → acceptance bar stays inspection + own float-oracle (I1), capped by dropped VI-gamma (P4-4). angrylion = CODE reference only (combiner/AA math), not frame-diff.
 - **N1:** front terrain row projects to NDC y≈1.09 → scripted path stays off the near plane for T0; **near-clip stays deferred.**
 - Host gotcha: device re-enumerates ttyACM0↔1 across resets → reader must glob newest `/dev/ttyACM*` + reopen-on-error. FREE_RAM (spike, no FB/pools) 251,240 B.
+
+## Terrain-wave friction backlog (2026-06-02)
+
+Format: ID · symptom · root-cause · sev · → artifact · owner · status. Closed-loop rule: no item `verified` until something executable catches its regression.
+
+| ID | Symptom | Root cause | Sev | → Artifact | Owner | Status |
+|----|---------|-----------|-----|-----------|-------|--------|
+| **TW-03** | On-target serial reader latched a stale/dead `ttyACM0`; truncated captures when the device re-enumerated mid-stream | `wait_for_tty` returned `sorted()[0]` (oldest); `read_lines_from_tty` opened once, no reopen | Med | `tools/run_on_target.py`: `newest_tty()` (mtime) + reopen-on-error loop; **guard:** 3 `newest_tty` unit tests inject `_glob`/`_mtime` | Lead | **verified** — `run_on_target_test.py` 20/20 |
+| **TW-05** | Silent wrong-w MVP bug (the spike hit it): camera/asset MVP baked transposed | renderer reads column-major `m[k*4+row]`; the row-vector→flat bake convention `m[i*4+j]=vp[i][j]` was unwritten | High | `tools/asset_convert.py`: `bake_mvp_q16_16` + ref transforms; **guard:** `asset_tool_test` asserts bake→renderer-model == row-vec ref, transpose diverges (teeth) | Lead | **verified** — `asset_tool_test.py` 18/18; D.1/D.7 MUST bake via this helper |
+| **TW-01** | Every `TaskCreate` rejected — can't use the Task tool for session tracking | `task_schema.sh` reads `.task.{files_owned,branch,verification}`; tool only exposes `metadata`, which nests at `.task.metadata.*` | Low | `.claude/hooks/task_schema.sh` read `.task.metadata.*`, OR reject-msg says "track in WORKFLOW.md" | Lead | open |
+| **TW-02** | Throwaway spike branches (`spike/terrain-s0`, `spike/hw-probe`) accumulate — `-d` refuses unmerged, guard blocks `-D` (2nd occurrence) | `destructive_guard` greps `-D`; no sanctioned spike-discard path | Low | `tools/discard_spike.sh` (or `spike/*` allowlist in the guard) | Lead | open |
+| **TW-04** | Perf-probe validity is tribal (S0 got it right unprompted; prompt's `CTR_ACC=0x08` was wrong, real 0x10) | No codified probe-validity checklist | Med | fold checklist into `on-target-probe` skill / `perf-profiler` agent: Release/`-O3`/`NDEBUG`, hot code in SRAM, `volatile` sink vs DCE, confirm `SYSCLK`, SDK struct for HW regs (not hardcoded offsets) | infra | open |
+| **TW-06** | Spike findings die with the discarded branch unless they reach the consuming stream | No spike→consumer handoff rule | Med | dispatch-template rule: consuming stream's prompt cites the gating spike's locked outputs + carries them as a guard (S0→D.1/D.2 carry pre-scale 0.005, transpose, 5551, pow2) | Lead | open |
+| **TW-07** | `frame.h`/`types.h` wanted by multiple streams (D.4/D.5/R.3-AA) → contention | Shared layout headers have no ownership rule | Med | `worktree-pr` skill: layout headers are Lead-owned micro-barriers (Δ/Φ), never stream-owned; land at quiesced points | Lead | shipped (Φ done this wave) |
+| **TW-08** | "0 contract-deltas" KPI no longer fits (wave spends Δ3/D1/D2/D4) | KPI was a foundation-phase invariant | Low | KPI evolves → "deltas budgeted + barrier-scheduled + each justified" (see below) | Lead | shipped (KPI note) |
+| **TW-09** | Two "tile" meanings (N64 mesh-cell vs 60×60 screen-tile) → subagent cross-talk | No glossary in dispatch prompts | Low | dispatch-template glossary line: "mesh-cell" vs "screen-tile" | Lead | open |
+| **TW-10** | Plan lives in `~/.claude/plans/` → not in repo history/CI | Plans authored outside the tree | Low | commit significant plans into `docs/` | Lead | open |
+
+### KPI evolution (foundation → feature waves)
+- **Contract-deltas: was "0"; now "budgeted + barrier-scheduled + justified."** Terrain wave budget = Δ3 (done), D1/D2/D4 (planned); each lands at a quiesced Lead barrier with a one-line justification. Drift (an un-budgeted delta) is the regression signal.
+- **Probe-before-execute ROI (log):** 4 `/probe-spec` rounds caught C1 (transform overflow), the C2 bandwidth→arithmetic reframe, the atlas/material-cap conflict, the present-tax — all pre-execution; S0-before-asset-pipeline reframed C2. "Measure the load-bearing unknown first" earns its keep again.

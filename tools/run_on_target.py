@@ -25,6 +25,7 @@ the runner prints a "press BOOTSEL" prompt and waits for the drive to appear
 
 import argparse
 import glob
+import os
 import re
 import subprocess
 import sys
@@ -170,49 +171,81 @@ def flash(firmware):
     return code == 0
 
 
+def newest_tty(pattern, _glob=glob.glob, _mtime=os.path.getmtime):
+    """Return the NEWEST tty matching glob `pattern` (by mtime), or None.
+
+    TW-03: the PicoSystem re-enumerates ACM0<->ACM1 across the reset that the
+    flash step just performed, and a stale node can linger — so pick the
+    most-recently-created node, NOT the lexicographically-first (which was the
+    old `sorted()[0]` bug that latched onto a dead ACM0). `_glob`/`_mtime` are
+    injectable so the selection is unit-tested without hardware.
+    """
+    matches = _glob(pattern)
+    if not matches:
+        return None
+    return max(matches, key=_mtime)
+
+
 def wait_for_tty(pattern, timeout):
-    """Poll for a USB-CDC tty matching glob `pattern`; return path or None."""
+    """Poll for a USB-CDC tty matching glob `pattern`; return the newest or None."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            return matches[0]
+        tty = newest_tty(pattern)
+        if tty is not None:
+            return tty
         time.sleep(0.25)
     return None
 
 
-def read_lines_from_tty(tty, sentinel, timeout):
+def read_lines_from_tty(tty, sentinel, timeout, pattern="/dev/ttyACM*"):
     """Read newline-delimited lines from the tty until the sentinel or timeout.
 
     Returns the collected lines (excluding the sentinel). Uses pyserial if
     available, else a plain file read (the device appears as a character
     device; line-buffered reads work for typical CDC firmware).
+
+    TW-03: reopen-on-error. If the node read-errors or hits EOF before the
+    sentinel while time remains (the device re-enumerated mid-stream), re-resolve
+    the newest matching node and reopen, accumulating across reopens — rather
+    than silently returning a truncated capture on a path that went stale.
     """
     deadline = time.time() + timeout
     lines = []
     try:
         import serial  # pyserial, optional
-
-        with serial.Serial(tty, timeout=1) as port:
-            while time.time() < deadline:
-                raw = port.readline()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", "replace").rstrip("\r\n")
-                if line.strip() == sentinel:
-                    return lines
-                lines.append(line)
-        return lines
     except ImportError:
-        with open(tty, "r", errors="replace") as port:
-            for line in port:
-                if time.time() >= deadline:
-                    break
-                line = line.rstrip("\r\n")
-                if line.strip() == sentinel:
-                    return lines
-                lines.append(line)
-        return lines
+        serial = None
+    current = tty
+    while time.time() < deadline:
+        try:
+            if serial is not None:
+                with serial.Serial(current, timeout=1) as port:
+                    while time.time() < deadline:
+                        raw = port.readline()
+                        if not raw:
+                            continue
+                        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                        if line.strip() == sentinel:
+                            return lines
+                        lines.append(line)
+                return lines
+            with open(current, "r", errors="replace") as port:
+                for line in port:
+                    if time.time() >= deadline:
+                        return lines
+                    line = line.rstrip("\r\n")
+                    if line.strip() == sentinel:
+                        return lines
+                    lines.append(line)
+            # EOF before sentinel with time left: device may have re-enumerated.
+        except OSError as err:  # serial.SerialException subclasses OSError
+            sys.stderr.write("tty %s read error (%s); re-resolving newest...\n"
+                             % (current, err))
+        nxt = newest_tty(pattern)
+        if nxt is not None:
+            current = nxt
+        time.sleep(0.25)
+    return lines
 
 
 # ---- orchestration ----------------------------------------------------------

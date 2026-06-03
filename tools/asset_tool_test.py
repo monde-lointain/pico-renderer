@@ -21,6 +21,46 @@ SRC_INCLUDE = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
 
 
+class MvpBakeConventionTests(unittest.TestCase):
+    """TW-05: lock the column-major MVP-bake convention; catch the transpose."""
+
+    # A deliberately ASYMMETRIC 4x4 (so transpose != original) + asymmetric vec.
+    VP = [
+        [1.0, 2.0, 3.0, 4.0],
+        [5.0, 6.0, 7.0, 8.0],
+        [9.0, 10.0, 11.0, 12.0],
+        [13.0, 14.0, 15.0, 16.0],
+    ]
+    V = [0.5, -1.5, 2.0, 1.0]
+
+    def test_bake_then_renderer_model_equals_rowvec_reference(self):
+        # The contract: feeding the baked array through the renderer's read
+        # pattern reproduces the N64 row-vector transform.
+        baked = ac.bake_mvp_q16_16(self.VP)
+        got = ac.transform_renderer_model(baked, self.V)
+        ref = ac.transform_rowvec_ref(self.VP, self.V)
+        for g, r in zip(got, ref):
+            self.assertAlmostEqual(g, r, places=3)
+
+    def test_transpose_bake_diverges(self):
+        # Teeth: the WRONG bake (transpose, flat[i*4+j]=vp[j][i]) must NOT
+        # reproduce the reference — otherwise the guard is vacuous.
+        transposed = [ac.to_q16_16(self.VP[j][i])
+                      for i in range(4) for j in range(4)]
+        got = ac.transform_renderer_model(transposed, self.V)
+        ref = ac.transform_rowvec_ref(self.VP, self.V)
+        self.assertNotAlmostEqual(got[0], ref[0], places=3)
+
+    def test_flatten_is_row_major_iijj(self):
+        baked = ac.bake_mvp_q16_16(self.VP)
+        self.assertEqual(baked[0 * 4 + 1], ac.to_q16_16(2.0))   # vp[0][1]
+        self.assertEqual(baked[2 * 4 + 3], ac.to_q16_16(12.0))  # vp[2][3]
+
+    def test_rejects_non_4x4(self):
+        with self.assertRaises(ValueError):
+            ac.bake_mvp_q16_16([[1.0, 2.0], [3.0, 4.0]])
+
+
 class TexturePackingTests(unittest.TestCase):
     def test_rgb565_matches_framebuffer_formula(self):
         # framebuffer.h rgb565: ((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3)
