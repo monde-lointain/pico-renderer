@@ -36,6 +36,16 @@
 // storage = GEOM_NUM_TILES * RDR_REFS_PER_TILE * sizeof(TriRef).
 #define RDR_REFS_PER_TILE 256
 
+// Φ (terrain wave): per-frame interned render-state table. TriRef.material
+// indexes it (resolves C2 latent #2 — C1/C2 wrote 0). The scene's distinct
+// RenderStates are FEW (terrain / 3 tree sprites / cloud / panorama ≈ 6); the
+// 128 terrain mesh-cells differ ONLY in their texture pointer, which is a
+// SEPARATE per-cell axis (flash-resident TexDescs keyed off the material/tri),
+// NOT 128 RenderStates — so 16 is comfortable. Interned single-core in geom
+// before the dual-core raster reads it (immutable during raster → bit-identical
+// invariant preserved).
+#define RDR_MAX_MATERIALS 16
+
 struct Frame {
   // Output target (caller-owned full-screen RGB565, row-major).
   uint16_t* fb;
@@ -56,6 +66,10 @@ struct Frame {
   struct MtxStack mtx;
   struct Viewport vp;
   struct RenderState rstate;
+
+  // Φ: interned per-frame render states; TriRef.material indexes [0,rstate_count).
+  struct RenderState rstate_table[RDR_MAX_MATERIALS];
+  uint16_t rstate_count;
 
   // Command stream submitted this frame (stashed by rdr_submit so the frozen
   // sched_geom(Frame*) driver — which takes no stream argument — can reach it).

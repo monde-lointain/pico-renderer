@@ -84,7 +84,12 @@ enum TexFormat {
   TEXFMT_I8,
   TEXFMT_I4,
   TEXFMT_CI4,
-  TEXFMT_CI8
+  TEXFMT_CI8,
+  // Δ3 (terrain wave): N64-native RGBA16 = 5-5-5-1. Appended (preserves prior
+  // values) — faithful tree sprites (1-bit TEX_EDGE cutout alpha) + panorama
+  // TLUT entries. The single contract delta the terrain port needs at this
+  // barrier; additive, no struct-layout change.
+  TEXFMT_RGBA5551
 };
 enum WrapMode { WRAP_REPEAT = 0, WRAP_MIRROR = 1, WRAP_CLAMP = 2 };
 enum TexFilter { FILTER_POINT = 0, FILTER_THREE_POINT = 1 };
