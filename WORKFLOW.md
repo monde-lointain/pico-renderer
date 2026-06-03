@@ -254,3 +254,12 @@ Format: ID · symptom · root-cause · sev · → artifact · owner · status. C
 ### KPI evolution (foundation → feature waves)
 - **Contract-deltas: was "0"; now "budgeted + barrier-scheduled + justified."** Terrain wave budget = Δ3 (done), D1/D2/D4 (planned); each lands at a quiesced Lead barrier with a one-line justification. Drift (an un-budgeted delta) is the regression signal.
 - **Probe-before-execute ROI (log):** 4 `/probe-spec` rounds caught C1 (transform overflow), the C2 bandwidth→arithmetic reframe, the atlas/material-cap conflict, the present-tax — all pre-execution; S0-before-asset-pipeline reframed C2. "Measure the load-bearing unknown first" earns its keep again.
+
+## Wave-D D.3 friction (blend + fog lerp) — 2026-06-03
+
+| ID | Symptom | Root cause | Sev | → Artifact | Owner | Status |
+|----|---------|-----------|-----|-----------|-------|--------|
+| **D3-1** | Spec's frozen `blend_pixel(mode, src, dst)` has NO source-alpha arg, but alpha-over needs one (XLU = texel alpha) | Foundation header was opaque-only; spec sketch never carried alpha | Low | added `blend_pixel_alpha(mode, src, src_alpha, dst)` in the stream-owned blend.h (no types.h delta needed — BlendMode lives in blend.h); kept `blend_pixel` for the opaque path | D.3 | resolved in-stream |
+| **D3-2** | `make tidy` flags the harness float oracle (`lrintf` long→float narrowing) even though harness is orthodoxy carve-out | tidy target's `-warnings-as-errors` covers all user TUs incl. harness; carve-out only skips orthodoxy_enforce, not clang-tidy | Med | keep oracle clamp value as `long` (clamp in int domain, cast once at store); **guard:** none codified — dispatch note: harness TUs still pass `make tidy`, write them tidy-clean | D.3 | open (note) |
+| **D3-3** | `make tidy` flags test-file `kSamples565` (wants `K_SAMPLES565`) — naming rule applies to tests too | GlobalConstantCase=UPPER_CASE enforced project-wide; tests aren't exempt | Low | follow `K_…` for file-scope `static const` in tests (matches K_ROW565/K_COPY_PIXELS); dispatch prompts could state this once | D.3 | open (note) |
+| **D3-4** | XLU sequencing: does the translucent pass blend on coverage or texel alpha? (R.2 vs R.3 ordering) | Ambiguity between coverage-AA and combiner alpha | Med | confirmed from N64 src: tree combiner alpha = TEXEL0 → XLU blends on **texel alpha, not coverage** → **R.2 does NOT depend on R.3**; blend_pixel_alpha takes a source-alpha arg, agnostic to its origin | D.3 | resolved (finding) |
