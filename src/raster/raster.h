@@ -1,9 +1,11 @@
 // raster.h — module interface (Stream B.1-gamma: raster — flat fill + per-tile
 // Z). Orthodox C++ (POD + free functions, C headers, no STL/auto/exceptions).
 //
-// Half-space edge-function rasterizer clipped to tile bounds. Flat color fill
-// (provoking-vertex rgba) with a per-tile 1/w (w-buffer) depth test + write.
-// No texture / Gouraud shading yet (that is sub-stream delta).
+// Half-space edge-function rasterizer clipped to tile bounds. Per-material
+// (R.1): a flat-color fast path (provoking-vertex rgba, untextured materials) or
+// a textured + Gouraud + combiner path (textured materials) with a per-tile 1/w
+// (w-buffer) depth test + write. The flat fast path is BIT-IDENTICAL to the
+// pre-R.1 rasterizer (the hard regression gate). R.1 = OPAQUE pass only.
 //
 // Conventions (source of truth: docs/superpowers/specs design + tests/harness
 // oracle_fill_tri):
@@ -42,8 +44,20 @@
 // the RDR_SCREEN_W/RDR_TILE_W by RDR_SCREEN_H/RDR_TILE_H tile grid). `zbuf` is
 // cleared to RASTER_Z_CLEAR on entry. Triangles whose refs fall outside the
 // tile's pixel rect contribute nothing (edge functions clip to tile bounds).
+//
+// `rstate_table` is the per-frame interned render-state table (Frame.
+// rstate_table); each triangle's TriRef.material indexes it. The selected
+// RenderState routes the per-pixel path (see R.1 in raster.cc):
+//   - NO valid texture (tex.data==0 || tex.w==0 || tex.h==0) -> flat-fill fast
+//     path (provoking-vertex color), BIT-IDENTICAL to the pre-R.1 rasterizer.
+//   - valid texture -> textured + Gouraud + (A-B)*C+D combiner path
+//     (perspective-correct UV, affine SHADE, optional alpha-cutout discard).
+// R.1 is the OPAQUE pass only (no XLU/blend; that is R.2). `rstate_table` is
+// read-only here (immutable during raster -> the dual-core bit-identical
+// invariant holds).
 void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
-                 uint16_t* fb, uint16_t* zbuf);
+                 uint16_t* fb, uint16_t* zbuf,
+                 const struct RenderState* rstate_table);
 
 // Same as raster_tile but DOES NOT clear `zbuf` on entry — it rasterizes
 // directly against whatever depths are already present. raster_tile is exactly
@@ -52,6 +66,7 @@ void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
 // un-recleared scratch to prove per-worker zbuf isolation is load-bearing.
 // Production callers want raster_tile (the per-tile clear is part of the spec).
 void raster_tile_noclear(int tile, const struct TileBin* bin,
-                         const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf);
+                         const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf,
+                         const struct RenderState* rstate_table);
 
 #endif  // RDR_RASTER_H

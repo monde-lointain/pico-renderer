@@ -18,7 +18,7 @@
 
 static inline void sched_drain_tile(struct Frame* f, int worker, int tile) {
   raster_tile(tile, &f->geom.tiles[tile], f->geom.tverts, f->fb,
-              f->zbuf[worker]);
+              f->zbuf[worker], &f->rstate_table[0]);
 }
 
 #endif  // RDR_SCHED_DRAIN_H

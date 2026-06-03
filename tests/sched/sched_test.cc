@@ -81,7 +81,8 @@ void raster_serial(uint16_t* fb) {
     fb[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, g_z0);
+    raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, g_z0,
+                &g_frame.rstate_table[0]);
   }
 }
 
@@ -96,7 +97,8 @@ void raster_two_workers_interleaved(uint16_t* fb, uint16_t* z0, uint16_t* z1) {
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     uint16_t* const z = (tile & 1) ? z1 : z0;
-    raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, z);
+    raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, z,
+                &g_frame.rstate_table[0]);
   }
 }
 
@@ -121,7 +123,7 @@ void raster_shared_zbuf_race(uint16_t* fb, uint16_t* zshared) {
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     raster_tile_noclear(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts,
-                        fb, zshared);
+                        fb, zshared, &g_frame.rstate_table[0]);
   }
 }
 

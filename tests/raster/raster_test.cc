@@ -30,6 +30,20 @@ uint16_t rgb565_pack(uint8_t r, uint8_t g, uint8_t b) {
                     (((uint16_t)(g & 0xFC)) << 3) | (uint16_t)(b >> 3));
 }
 
+// A 1-entry render-state table whose material 0 has NO texture (tex zeroed) so
+// every flat-fill test takes raster's BIT-IDENTICAL fast path. raster_tile reads
+// this read-only; one shared instance suffices for all flat tests. (The textured
+// tests below build their own tables.)
+const struct RenderState* no_texture_table() {
+  static struct RenderState rstate;  // zero-init: tex.data/w/h = 0 -> fast path
+  static int init = 0;
+  if (!init) {
+    memset(&rstate, 0, sizeof(rstate));
+    init = 1;
+  }
+  return &rstate;
+}
+
 // Build a TVtx at pixel (px,py) with subpixel offsets (in 1/16 px), depth, and
 // the flat color. Q12.4: screen value = px*16 + sub.
 TVtx mk_vtx(int px, int py, int sub_x, int sub_y, int32_t inv_w_q16) {
@@ -80,7 +94,7 @@ void render_tile0_to_rgb(const TileBin* bin, const TVtx* pool, uint8_t* rgb_out,
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, bin, pool, fb, zbuf);
+  raster_tile(0, bin, pool, fb, zbuf, no_texture_table());
   for (int y = 0; y < RDR_TILE_H; ++y) {
     for (int x = 0; x < RDR_TILE_W; ++x) {
       uint16_t const px = fb[(y * RDR_SCREEN_W) + x];
@@ -319,7 +333,7 @@ TEST(Raster, ClipsToTileBounds) {
   OneTri o;
   one_tri(&o, mk_vtx(40, 5, 0, 0, 0x10000), mk_vtx(100, 30, 0, 0, 0x10000),
           mk_vtx(40, 55, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf);
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table());
   // No pixel with screen x >= RDR_TILE_W should be written by tile 0.
   int leaked = 0;
   for (int y = 0; y < RDR_SCREEN_H; ++y) {
@@ -386,7 +400,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   bin.count = 2;
   bin.cap = 2;
   bin.dropped = 0;
-  raster_tile(0, &bin, pool, fb, zbuf);
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table());
 
   // A pixel inside the triangle must be the NEAR color (red), not far (blue).
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
@@ -402,7 +416,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   refs[1].v0 = 0;
   refs[1].v1 = 1;
   refs[1].v2 = 2;  // far second
-  raster_tile(0, &bin, pool, fb, zbuf);
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table());
   uint16_t const px2 = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px2, c_near);
 }
@@ -427,7 +441,7 @@ TEST(Raster, NonZeroTileMapsToScreenRect) {
   one_tri(&o, mk_vtx(x0 + 10, y0 + 8, 0, 0, 0x10000),
           mk_vtx(x0 + 45, y0 + 12, 0, 0, 0x10000),
           mk_vtx(x0 + 20, y0 + 48, 0, 0, 0x10000));
-  raster_tile(tile, &o.bin, o.pool, fb, zbuf);
+  raster_tile(tile, &o.bin, o.pool, fb, zbuf, no_texture_table());
 
   // Oracle reference at the same absolute screen coords (full-screen image).
   uint8_t fr;
@@ -477,7 +491,7 @@ TEST(Raster, ClearsZScratchOnEntry) {
   OneTri o;
   one_tri(&o, mk_vtx(10, 8, 0, 0, 0x10000), mk_vtx(45, 12, 0, 0, 0x10000),
           mk_vtx(20, 48, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf);
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table());
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px, K_FLAT565) << "Z scratch not cleared: stale depth blocked fill";
 }
