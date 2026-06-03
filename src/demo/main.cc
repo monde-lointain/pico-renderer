@@ -1,8 +1,14 @@
-// demo/main.cc — renderer demo entry (C1). Drives the testable scene builder
-// (demo_scene.cc) through the rdr façade each frame, presents, and advances the
-// animation. On device it logs KEY=VALUE telemetry over USB-CDC (frame_ms=,
-// tris=, dropped=) and a final RESULT=PASS. The scene math/geometry lives in
-// demo_scene.cc so the actual demo scene is host-testable (see tests/demo).
+// demo/main.cc — renderer demo entry (Wave-D.7). Drives the testable terrain
+// scene builder (demo_scene.cc) through the rdr façade each frame, presents,
+// and advances the DETERMINISTIC scripted camera + panorama scroll by fixed
+// integer deltas (so fb_crc reproduces and host==device). BTN_A toggles an
+// interactive free-fly camera. On device it logs KEY=VALUE telemetry over
+// USB-CDC, including a dedicated scene-build/cmdgen stage counter distinct from
+// the geom transform/bin and back-end raster work, then a final RESULT=PASS.
+//
+// The scene math/geometry lives in demo_scene.cc so the actual demo scene is
+// host-testable (see tests/demo) — the C1 black-screen regression escaped
+// because the demo's own build path was never exercised on host.
 //
 // NOT orthodoxy_enforced (app-level carve-out, like src/app). Still C-like.
 
@@ -30,7 +36,8 @@
 
 // CRC32 (IEEE, reflected) over the presented framebuffer — the on-target
 // determinism assertion compares this against the host serial CRC for the same
-// scene/angle (dual-core output must be bit-identical to single-core).
+// frame (dual-core output must be bit-identical to single-core, and the
+// integer-only camera/scroll path must reproduce the same sequence).
 static uint32_t fb_crc32(const uint16_t* fb, int n) {
   const uint8_t* p = (const uint8_t*)fb;
   size_t const len = (size_t)n * sizeof(uint16_t);
@@ -45,23 +52,12 @@ static uint32_t fb_crc32(const uint16_t* fb, int n) {
   return crc ^ 0xFFFFFFFFU;
 }
 
-// ---- animation state -------------------------------------------------------
-static float s_pyr_angle = 0.0F;
-static float s_cube_angle = 0.0F;
-
-static void update_animation(void) {
-  s_pyr_angle += 12.0F / 60.0F;
-  if (s_pyr_angle >= 360.0F) {
-    s_pyr_angle -= 360.0F;
-  }
-  s_cube_angle -= 9.0F / 60.0F;
-  if (s_cube_angle <= -360.0F) {
-    s_cube_angle += 360.0F;
-  }
-}
+// ---- scene/camera state (deterministic; advanced by INTEGER deltas) --------
+static struct DemoCamera s_cam;
+static struct DemoScroll s_scroll;
 
 // ---- storage (large; BSS, not stack) ---------------------------------------
-static struct Command s_cmd[DEMO_CMD_CAP];
+static struct Command s_cmd[DEMO_TERRAIN_CMD_CAP];
 static struct Frame s_frame;
 static struct Framebuffer s_present_fb;
 
@@ -72,10 +68,19 @@ int main(void) {
   s_frame.width = SCREEN_W;
   s_frame.height = SCREEN_H;
 
+  demo_camera_init(&s_cam);
+  demo_scroll_init(&s_scroll);
+
   uint32_t frame = 0;
   for (;;) {
+    // Poll input first so the free-fly toggle/nudge applies this frame. A
+    // shutdown request (host window closed) ends the loop cleanly.
+    struct Input in;
+    bool const alive = plat_poll_input(&in);
+
     uint32_t const t0 = plat_millis();
-    demo_scene_build(s_cmd, DEMO_CMD_CAP, s_pyr_angle, s_cube_angle);
+    struct DemoTelemetry telem;
+    demo_terrain_build(s_cmd, DEMO_TERRAIN_CMD_CAP, &s_cam, &s_scroll, &telem);
     rdr_begin_frame(&s_frame);
     rdr_submit(&s_frame, s_cmd);
     rdr_end_frame(&s_frame);
@@ -83,13 +88,26 @@ int main(void) {
     uint32_t const t1 = plat_millis();
 
     uint32_t const fb_crc = fb_crc32(s_present_fb.px, SCREEN_W * SCREEN_H);
-    plat_log("frame_ms=%u tris=%u dropped=%u workers=%u fb_crc=%08x\n",
-             (unsigned)(t1 - t0), (unsigned)s_frame.geom.tris_total,
-             (unsigned)s_frame.geom.tris_dropped, (unsigned)DEMO_RASTER_WORKERS,
-             (unsigned)fb_crc);
+    // Per-STAGE telemetry: cmdgen (single-core front-end scene build) is called
+    // out separately from geom transform/bin (tris=/dropped=) and back-end
+    // raster (workers=). cam_mode surfaces the scripted/free-fly toggle.
+    plat_log(
+        "frame_ms=%u cmdgen_cmds=%u cmdgen_draws=%u cmdgen_tris=%u tris=%u "
+        "dropped=%u scroll=%u cam_mode=%u workers=%u fb_crc=%08x\n",
+        (unsigned)(t1 - t0), (unsigned)telem.cmdgen_commands,
+        (unsigned)telem.cmdgen_draws, (unsigned)telem.cmdgen_tris,
+        (unsigned)s_frame.geom.tris_total, (unsigned)s_frame.geom.tris_dropped,
+        (unsigned)telem.scroll_phase, (unsigned)s_cam.mode,
+        (unsigned)DEMO_RASTER_WORKERS, (unsigned)fb_crc);
 
-    update_animation();
+    // Advance the DETERMINISTIC per-frame path by integer deltas (no float).
+    demo_camera_advance(&s_cam, in.held, in.pressed);
+    demo_scroll_advance(&s_scroll);
+
     ++frame;
+    if (!alive) {
+      break;
+    }
     if (DEMO_FRAMES != 0 && frame >= (uint32_t)DEMO_FRAMES) {
       break;
     }
