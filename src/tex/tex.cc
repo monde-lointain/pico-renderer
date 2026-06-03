@@ -87,3 +87,18 @@ uint16_t tex_sample(const struct TexDesc* t, fx16_16 u, fx16_16 v, int lod) {
   int const idx = (tv * (int)t->w) + su;
   return decode_texel(t, idx);
 }
+
+// --- D.2 stubs (contract-first; bodies land via TDD) ------------------------
+void tex_sample_rgba(const struct TexDesc* t, fx16_16 u, fx16_16 v, int lod,
+                     uint8_t out_rgba[4]) {
+  (void)t;
+  (void)u;
+  (void)v;
+  (void)lod;
+  out_rgba[0] = out_rgba[1] = out_rgba[2] = out_rgba[3] = 0;
+}
+
+int tex_validate(const struct TexDesc* t) {
+  (void)t;
+  return RDR_OK;
+}
