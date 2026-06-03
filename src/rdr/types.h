@@ -49,6 +49,11 @@ struct TVtx {
   int16_t u_iw;   // u * inv_w
   int16_t v_iw;   // v * inv_w
   uint16_t rgba;  // packed shade color (565/4444 per config)
+  uint8_t fog;    // D1 (terrain wave): per-vertex fog factor [0,255], 0=none.
+                  // geom births it 0; R.3-fog populates (geom_fog_factor); clip
+                  // lerps it; raster interps+applies. Fills the former implicit
+                  // tail pad -> TVtx size unchanged (20 B). Read-only until
+                  // R.3-fog, but always defined where born (no stray bytes).
 };
 
 // ---- tile bin: per-tile triangle refs (indices into the TVtx pool) ---------

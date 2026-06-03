@@ -135,6 +135,7 @@ RdrErr geom_project(struct TVtx* out, const struct Vec4fx* clip,
   out->u_iw = (int16_t)fx_to_int(fx_mul(fx_from_int(u), inv_w));
   out->v_iw = (int16_t)fx_to_int(fx_mul(fx_from_int(v), inv_w));
   out->rgba = rgba;
+  out->fog = 0;  // D1: birth defined; R.3-fog populates from geom_fog_factor.
   return RDR_OK;
 }
 

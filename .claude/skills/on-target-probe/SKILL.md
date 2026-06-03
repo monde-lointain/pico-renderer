@@ -25,6 +25,16 @@ Before flashing ANY firmware (spikes included):
 - **Benchmarks must defeat dead-code elimination** (volatile sinks / asm barriers) and **set the
   250 MHz target clock** before timing — else numbers are bogus/unrepresentative.
 
+## Probe-validity checklist (TW-04 — a wrong probe gives a confidently-wrong number)
+A measurement is only trustworthy if the probe itself is valid. Confirm ALL before believing a number:
+- **Build:** Release / `-O3` / `NDEBUG` (a Debug build measures the wrong code).
+- **Hot code in SRAM:** the timed path is `__not_in_flash_func` (or otherwise SRAM-resident) when
+  the question is compute, not XIP — otherwise you measure flash-fetch stalls by accident.
+- **Anti-DCE:** the result feeds a `volatile` sink / asm barrier so the compiler can't elide the work.
+- **Clock confirmed:** read back `SYSCLK` (don't assume the overclock took).
+- **HW registers via the SDK struct, never hardcoded offsets** — the S0 spike's prompt had
+  `CTR_ACC=0x08`; the real field is `0x10` (use the SDK's register struct so the layout is correct).
+
 ## Prerequisite: CDC serial access (set up once at S0)
 `/dev/ttyACM*` is `root:dialout`; `usermod -aG dialout` does NOT bind mid-session. Install a tty
 udev rule so it is group `plugdev` (no re-login):

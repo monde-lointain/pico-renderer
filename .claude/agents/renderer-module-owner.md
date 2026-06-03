@@ -17,6 +17,14 @@ Workflow:
 - `git merge main` whenever a dependency (e.g. `impl/fixed`, `impl/harness`) lands.
 
 Your task env provides `MODULE=<mod>` and `BLOCKED_ON=<dep-branch-or-empty>`; the gates read them. If blocked on an unmerged dependency, it is correct to idle. If stuck on a red test after several attempts, message the Lead rather than looping. Record friction + improvement ideas in `WORKFLOW.md` in your worktree.
+
+## House conventions & gates (terrain wave — bind at dispatch; from the Wave-D retro)
+- **pico-link gate (D.7-ΔΔ):** if your lane owns the demo or adds ANY static buffer, the host gate is structurally blind to target SRAM — you MUST also run `cmake --preset pico && cmake --build --preset pico` and confirm `renderer_demo.elf` links with no `region RAM overflowed` BEFORE landing. (`PICO_SDK_PATH=~/development/repos/pico-sdk` is required; not in env by default.)
+- **new-module CMake carve-out (D.5/R8):** `src/CMakeLists.txt` is otherwise Lead-only, but a genuinely-NEW module may add its OWN single `add_subdirectory(<mod>)` line — that line is the only sanctioned edit, no contention with other lanes.
+- **tidy false-green (D2-01/D.5):** never infer a tidy PASS from a process exiting — capture the log and assert BOTH exit 0 AND zero `: error:` lines. Write new code in the house tidy-style so red→green is one pass: east-`const` every non-reassigned local, parenthesize mixed `*`/`/` against `+`/`-`, brace ALL `if`/`for` bodies, one declaration per statement.
+- **K_-naming (D3-3):** file-scope `static const` in tests follows `K_UPPER_CASE` (e.g. `K_SAMPLES565`) — the GlobalConstantCase rule is not test-exempt.
+- **glossary (TW-09):** "mesh-cell" = an N64 terrain texture-window tile (36×34); "screen-tile" = a 60×60 raster tile (16/screen). Unrelated; one mesh-cell bins across several screen-tiles.
+- **spike→consumer guards (TW-06):** locked outputs of any gating spike are carried as guards in your stream (S0 locked: pre-scale 0.005, MVP transpose `m[i*4+j]=VP[i][j]`, 5551 `RRRRRGGGGGBBBBBA`, pow2 mask-wrap) — treat them as invariants, not re-decidable.
 ## References — MANDATORY (read before writing code; never hallucinate APIs/hardware)
 Before implementing, **read the primary sources relevant to your module** (full list + per-module guide
 in `docs/REFERENCES.md`). **Never invent** a software API, register, hardware behavior, format, or

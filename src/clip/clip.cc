@@ -38,6 +38,8 @@ static void lerp_vtx(struct TVtx* out, const struct TVtx* a,
   // rgba: interpolate per channel? At guard-band scale color seams are far
   // off-screen; a packed lerp is adequate and cheap. Treat as scalar.
   out->rgba = (uint16_t)lerp_i((int32_t)a->rgba, (int32_t)b->rgba, num, den);
+  // D1: fog factor [0,255] lerps like any scalar attribute (R.3-fog reads it).
+  out->fog = (uint8_t)lerp_i((int32_t)a->fog, (int32_t)b->fog, num, den);
 }
 
 // Signed distance of a vertex to a single rectangle edge. Positive = inside.

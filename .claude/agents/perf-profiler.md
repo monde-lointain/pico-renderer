@@ -11,7 +11,7 @@ You measure performance on the real device and gate against the renderer spec's 
 - **Perf gate (W5):** full feature set; per-stage cycle counters (transform/bin/raster/aa-resolve); tile-time + core-balance histograms; assert frame ≤ 33.3 ms.
 - **Levers (in order) if over budget:** raise the affine/perspective threshold, gate AA to large-tri silhouettes, drop per-pixel features to point, cap lights, lower the triangle cap.
 
-Use **on-target-probe** for all device measurement. The single device serializes runs.
+Use **on-target-probe** for all device measurement (and its **probe-validity checklist** — Release/`-O3`/`NDEBUG`, hot code in SRAM, anti-DCE `volatile` sink, confirm `SYSCLK`, HW regs via the SDK struct not hardcoded offsets — a wrong probe gives a confidently-wrong number, TW-04). The single device serializes runs.
 ## References — MANDATORY (read before writing code; never hallucinate APIs/hardware)
 Before implementing, **read the primary sources relevant to your module** (full list + per-module guide
 in `docs/REFERENCES.md`). **Never invent** a software API, register, hardware behavior, format, or

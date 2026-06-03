@@ -24,7 +24,10 @@ the first real dispatch — see WORKFLOW.md W1-01). Instead:
 ```bash
 git worktree add ../wt-<mod> -b impl/<mod> main
 ```
-Work only in your owned globs (`.claude/ownership.json`).
+Work only in your owned globs (`.claude/ownership.json`). **New-module carve-out (D.5/R8):**
+`src/CMakeLists.txt` is Lead-only EXCEPT a genuinely-new module may add its own single
+`add_subdirectory(<mod>)` line — that one line is sanctioned (no contention); everything else there
+stays Lead-owned.
 
 ## Stay current
 `git merge main` into your branch whenever a dependency lands (e.g. when `impl/fixed` or `impl/harness` merges). Frozen headers keep drift small.
@@ -57,3 +60,9 @@ branch-switch in a tree with uncommitted changes — a `checkout` will silently 
 commit to the wrong branch (happened in the foundation retro; see WORKFLOW.md). After ANY
 `git checkout`/worktree op, verify `git branch --show-current` before committing. Record only the
 results (e.g. measurements) back to the mainline; discard the spike worktree/branch.
+
+**Spike→consumer handoff (TW-06):** a spike's findings die with its discarded branch unless they
+reach the stream that consumes them. Record the spike's LOCKED outputs to `WORKFLOW.md`, and the
+consuming stream's dispatch prompt cites them as guards the stream must uphold (S0→D.* carried
+pre-scale 0.005, the MVP transpose, the 5551 layout, pow2 mask-wrap). To discard a spike branch the
+`-D` guard blocks, use `tools/discard_spike.sh` (sanctioned path; TW-02).

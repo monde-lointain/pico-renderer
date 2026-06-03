@@ -17,6 +17,7 @@ static struct TVtx mk(int x, int y) {
   v.u_iw = 0;
   v.v_iw = 0;
   v.rgba = 0;
+  v.fog = 0;
   return v;
 }
 
@@ -86,6 +87,35 @@ TEST(Clip, InterpolatesAttributesLinearly) {
     if (out[i].x == r.maxx) {
       found = 1;
       EXPECT_NEAR(out[i].inv_w, 100, 1);  // 1 ulp for fixed rounding
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+// D1: clip carries the fog attribute through the per-edge lerp (R.3-fog reads
+// it post-clip). Same setup as the inv_w lerp: an edge fog 0->200 clipped at
+// the x=100 midpoint must yield fog~=100 on the inserted vertex.
+TEST(Clip, CarriesFogThroughLerp) {
+  struct ClipRect r;
+  r.minx = q4(0);
+  r.miny = q4(-1000);
+  r.maxx = q4(100);
+  r.maxy = q4(1000);
+  struct TVtx a = mk(0, 0);
+  a.fog = 0;
+  struct TVtx b = mk(200, 0);
+  b.fog = 200;
+  struct TVtx c = mk(0, 50);
+  c.fog = 0;
+  struct TVtx in[3] = {a, b, c};
+  struct TVtx out[CLIP_MAX_OUT];
+  int const n = clip_poly_rect(in, 3, &r, out);
+  ASSERT_GT(n, 0);
+  int found = 0;
+  for (int i = 0; i < n; ++i) {
+    if (out[i].x == r.maxx) {
+      found = 1;
+      EXPECT_NEAR((int)out[i].fog, 100, 1);  // midpoint lerp, 1 ulp
     }
   }
   EXPECT_TRUE(found);
