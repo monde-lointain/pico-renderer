@@ -104,9 +104,9 @@ enum DemoCamMode { DEMO_CAM_SCRIPTED = 0, DEMO_CAM_FREEFLY = 1 };
 // Camera state. ALL per-frame mutation is integer: `frame` advances by 1, and
 // the free-fly eye/yaw move by fixed integer deltas. No float members.
 struct DemoCamera {
-  uint8_t mode;    // enum DemoCamMode
-  uint32_t frame;  // scripted-path frame counter (advances by 1)
-  fx16_16 eye[3];  // current eye (Q16.16, pre-scaled world)
+  uint8_t mode;     // enum DemoCamMode
+  uint32_t frame;   // scripted-path frame counter (advances by 1)
+  fx16_16 eye[3];   // current eye (Q16.16, pre-scaled world)
   fx16_16 look[3];  // current look-at target (Q16.16)
   int32_t yaw_q16;  // free-fly heading (Q16.16; index into the sin table)
 };
@@ -124,8 +124,8 @@ void demo_camera_advance(struct DemoCamera* cam, uint32_t held,
                          uint32_t pressed);
 
 // ---- panorama / cloud scroll (deterministic integer phase) ------------------
-// A background scroll phase advanced by a fixed integer delta per frame. Used as
-// a UV/offset later; here it is a determinism-anchored counter surfaced in
+// A background scroll phase advanced by a fixed integer delta per frame. Used
+// as a UV/offset later; here it is a determinism-anchored counter surfaced in
 // telemetry. Wraps at DEMO_SCROLL_PERIOD (power-of-two so the wrap is exact).
 enum { DEMO_SCROLL_PERIOD = 1024, DEMO_SCROLL_DELTA = 3 };
 struct DemoScroll {

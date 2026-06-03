@@ -295,16 +295,17 @@ uint32_t demo_scene_build(struct Command* buf, uint32_t cap, float pyr_angle,
 // host==device.
 
 // ---- terrain layout (pre-scaled world INTEGER model coords) ----------------
-// The placeholder grid is a GROUND height-field in the XZ plane (Y up), like the
-// N64 terrain demo: the camera flies above and looks down/forward, so the field
-// fills the frame (the "near-terrain fill" worst case). Y carries a small per-
-// cell height; X,Z span [-HALF,+HALF]. World half-extent matches the pre-scaled
-// N64 patch scale (~18 units); the camera (N64 eye ~36 units up/back) keeps the
-// whole field in front of the near plane for the entire path. Model coords are
-// int16 (Vtx.pos); modelview is identity (verts authored directly in pre-scaled
-// world units). The REAL baked mesh from D.1 replaces demo_terrain_geometry at
-// T0 — the rest of the build is geometry-agnostic, so KEEP THIS SEAM CLEAN.
-#define TERRAIN_HALF 18 /* world half-extent in X and Z (pre-scaled units) */
+// The placeholder grid is a GROUND height-field in the XZ plane (Y up), like
+// the N64 terrain demo: the camera flies above and looks down/forward, so the
+// field fills the frame (the "near-terrain fill" worst case). Y carries a small
+// per- cell height; X,Z span [-HALF,+HALF]. World half-extent matches the
+// pre-scaled N64 patch scale (~18 units); the camera (N64 eye ~36 units
+// up/back) keeps the whole field in front of the near plane for the entire
+// path. Model coords are int16 (Vtx.pos); modelview is identity (verts authored
+// directly in pre-scaled world units). The REAL baked mesh from D.1 replaces
+// demo_terrain_geometry at T0 — the rest of the build is geometry-agnostic, so
+// KEEP THIS SEAM CLEAN.
+#define TERRAIN_HALF 18  /* world half-extent in X and Z (pre-scaled units) */
 #define TERRAIN_BASE_Y 0 /* ground plane Y */
 
 // Distinct debug color per mesh cell. A simple hashed palette spreads adjacent
@@ -312,17 +313,17 @@ uint32_t demo_scene_build(struct Command* buf, uint32_t cap, float pyr_angle,
 // N64 flat gray — that would blind the orientation check, per the D.7 brief.)
 static void cell_debug_color(int cx, int cy, uint8_t* rgb) {
   // 3-channel saw waves with coprime strides -> many distinct buckets.
-  int const h = (cx * 5 + cy * 3);
+  int const h = ((cx * 5) + (cy * 3));
   rgb[0] = (uint8_t)(64 + ((h * 37) & 0xBF));
-  rgb[1] = (uint8_t)(64 + ((cy * 53 + 17) & 0xBF));
-  rgb[2] = (uint8_t)(64 + ((cx * 61 + 31) & 0xBF));
+  rgb[1] = (uint8_t)(64 + (((cy * 53) + 17) & 0xBF));
+  rgb[2] = (uint8_t)(64 + (((cx * 61) + 31) & 0xBF));
 }
 
 // Procedural placeholder height (integer): a fixed deterministic bump so
 // adjacent cells differ in Y (visible relief) without crossing near/far. Pure
 // integer; one-time at geometry build.
 static int terrain_height(int cx, int cy) {
-  int const h = ((cx * 7 + cy * 11) % 5) - 2;  // [-2,2]
+  int const h = ((((cx * 7) + (cy * 11)) % 5) - 2);  // [-2,2]
   return TERRAIN_BASE_Y + h;
 }
 
@@ -377,10 +378,10 @@ uint32_t demo_tree_geometry(struct Vtx* verts, uint16_t* idx) {
   // Tree billboard quads: upright planes STANDING on the ground (extending in
   // +Y), scattered over the field at distinct positions, each a DISTINCT bright
   // debug sprite color (so a sprite-id transform/winding bug is catchable). The
-  // quad spans X (width) x Y (height); both faces drawn (CULL_BACK keeps the one
-  // toward the camera). Two tris per quad. NOT view-aligned (true billboarding
-  // needs per-frame float; a static upright quad keeps the per-frame path
-  // float-free) — fine for the placeholder.
+  // quad spans X (width) x Y (height); both faces drawn (CULL_BACK keeps the
+  // one toward the camera). Two tris per quad. NOT view-aligned (true
+  // billboarding needs per-frame float; a static upright quad keeps the
+  // per-frame path float-free) — fine for the placeholder.
   int o = 0;
   for (int t = 0; t < DEMO_TREE_COUNT; ++t) {
     // Deterministic scatter inside the field (XZ ground positions).
@@ -432,7 +433,7 @@ static uint16_t s_tree_idx[DEMO_TREE_IDX];
 static int s_terrain_geom_built;  // built once (geometry is static)
 static struct Mat4fx s_terrain_proj;
 static struct Mat4fx s_terrain_view;
-static struct Mat4fx s_terrain_vp;  // projection * view
+static struct Mat4fx s_terrain_vp;     // projection * view
 static struct Mat4fx s_terrain_model;  // identity (verts authored in world)
 static struct RenderState s_terrain_state;
 
@@ -466,15 +467,15 @@ static void keys_build_once(void) {
   // placeholder uses Y-UP (ground in XZ, camera above), so the camera height is
   // |N64_EYE_Y| (the magnitude is the locked fact; the handedness mapping is
   // ours for the placeholder). All keyframes look at the field center (origin).
-  double const ex0 = N64_EYE_X * DEMO_SCENE_SCALE;       // ~16.05
-  double const ey0 = -(N64_EYE_Y * DEMO_SCENE_SCALE);    // ~16.65 (up)
-  double const ez0 = N64_EYE_Z * DEMO_SCENE_SCALE;       // ~36.65
+  double const ex0 = N64_EYE_X * DEMO_SCENE_SCALE;     // ~16.05
+  double const ey0 = -(N64_EYE_Y * DEMO_SCENE_SCALE);  // ~16.65 (up)
+  double const ez0 = N64_EYE_Z * DEMO_SCENE_SCALE;     // ~36.65
   // Orbit radius/height in the XZ plane derived from the N64 pose so the path
   // is self-similar; the camera stays well above the ground (positive view-z
   // for the whole field -> off the near plane for the entire loop).
   double const radius = sqrt((ex0 * ex0) + (ez0 * ez0));  // ~40 units (XZ)
   double const height = ey0;                              // ~16.65 (camera up)
-  double const PI = 3.14159265358979323846;
+  double const pi = 3.14159265358979323846;
   for (int k = 0; k < DEMO_CAM_KEYFRAMES; ++k) {
     double ang;
     double rad;
@@ -494,7 +495,7 @@ static void keys_build_once(void) {
     // up-facing ground, so the field never goes behind it. Pull the radius in
     // (and lower the camera) on the mid keyframe for the near-terrain-fill
     // worst case while staying off the near plane.
-    ang = atan2(ex0, ez0) + ((double)k * (PI / 6.0));  // <=90deg orbit sweep
+    ang = atan2(ex0, ez0) + ((double)k * (pi / 6.0));  // <=90deg orbit sweep
     rad = (k == 2) ? (radius * 0.7) : radius;          // worst-case fill at k2
     hgt = (k == 2) ? (height * 0.7) : height;
     s_keys[k].eye[0] = fxd(rad * sin(ang));
@@ -585,8 +586,8 @@ void demo_camera_advance(struct DemoCamera* cam, uint32_t held,
 void demo_scroll_init(struct DemoScroll* s) { s->phase = 0; }
 
 void demo_scroll_advance(struct DemoScroll* s) {
-  s->phase = (s->phase + (uint32_t)DEMO_SCROLL_DELTA) %
-             (uint32_t)DEMO_SCROLL_PERIOD;
+  s->phase =
+      (s->phase + (uint32_t)DEMO_SCROLL_DELTA) % (uint32_t)DEMO_SCROLL_PERIOD;
 }
 
 // ---- terrain scene build ---------------------------------------------------

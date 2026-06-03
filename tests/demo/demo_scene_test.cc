@@ -188,8 +188,7 @@ TEST(TerrainSceneGuard, RealDensityRendersDistinctDebugCells) {
 
   // The cmdgen telemetry must report the real source-tri budget (front-end
   // scene-build work), distinct from the geom-accepted count above.
-  EXPECT_EQ(telem.cmdgen_tris,
-            (uint32_t)(DEMO_TERRAIN_TRIS + DEMO_TREE_TRIS));
+  EXPECT_EQ(telem.cmdgen_tris, (uint32_t)(DEMO_TERRAIN_TRIS + DEMO_TREE_TRIS));
   EXPECT_GT(telem.cmdgen_draws, 0U);
   EXPECT_EQ(telem.cmdgen_verts,
             (uint32_t)(DEMO_TERRAIN_VERTS + DEMO_TREE_VERTS));
@@ -218,7 +217,8 @@ TEST(TerrainSceneGuard, RealDensityRendersDistinctDebugCells) {
     }
   }
   EXPECT_GE(distinct, 8)
-      << "too few distinct debug colors — one-blob render? distinct=" << distinct;
+      << "too few distinct debug colors — one-blob render? distinct="
+      << distinct;
 }
 
 // FIXED-DELTA SCROLL DETERMINISM: phase advances by exactly DEMO_SCROLL_DELTA
@@ -229,8 +229,7 @@ TEST(TerrainSceneGuard, ScrollAdvancesByFixedIntegerDelta) {
   EXPECT_EQ(s.phase, 0U);
   for (int k = 1; k <= 4000; ++k) {
     demo_scroll_advance(&s);
-    EXPECT_EQ(s.phase,
-              (uint32_t)((k * DEMO_SCROLL_DELTA) % DEMO_SCROLL_PERIOD))
+    EXPECT_EQ(s.phase, (uint32_t)((k * DEMO_SCROLL_DELTA) % DEMO_SCROLL_PERIOD))
         << "scroll diverged at frame " << k;
   }
 }
@@ -272,11 +271,18 @@ TEST(TerrainSceneGuard, PerFramePathIsBitReproducible) {
       demo_scroll_advance(sc);
     }
   }
-  // Bit-identical reproduction (memcmp over the POD state).
-  EXPECT_EQ(memcmp(&a, &b, sizeof a), 0)
-      << "camera per-frame path is not bit-reproducible (float crept in?)";
-  EXPECT_EQ(memcmp(&sa, &sb, sizeof sa), 0)
-      << "scroll per-frame path is not bit-reproducible";
+  // Bit-identical reproduction, compared member-wise (the POD carries padding
+  // bytes, so a raw memcmp is undefined — compare the meaningful state).
+  EXPECT_EQ(a.mode, b.mode);
+  EXPECT_EQ(a.frame, b.frame);
+  EXPECT_EQ(a.yaw_q16, b.yaw_q16);
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(a.eye[i], b.eye[i])
+        << "camera eye[" << i << "] not bit-reproducible (float crept in?)";
+    EXPECT_EQ(a.look[i], b.look[i])
+        << "camera look[" << i << "] not bit-reproducible";
+  }
+  EXPECT_EQ(sa.phase, sb.phase) << "scroll per-frame path is not reproducible";
 }
 
 // SCRIPTED-PATH NEAR-PLANE MARGIN: every keyframe-loop pose must keep the whole
