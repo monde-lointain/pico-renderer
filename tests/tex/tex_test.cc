@@ -466,3 +466,43 @@ TEST(TexOracle, ThreePointLowerTriangleMatchesFloat) {
     }
   }
 }
+
+// 3-point at the upper-triangle (sfrac+tfrac has bit 0x20 set) blends t3/t2/t1
+// using the INVERTED fractions invsf=0x20-sfrac, invtf=0x20-tfrac. This path is
+// distinct from the lower triangle (different base tap + inverted weights +
+// swapped tap pairing); a sign/operand swap there would pass every lower-frac
+// test, so cross-check it against the independent float computation of the same
+// N64 triangular weights. taps: t1=(s+1,t), t2=(s,t+1), t3=(s+1,t+1).
+TEST(TexOracle, ThreePointUpperTriangleMatchesFloat) {
+  const void* data = (const void*)0;
+  const void* tlut = (const void*)0;
+  make_src(TEXFMT_RGBA5551, &data, &tlut);
+  struct TexDesc t;
+  fill_desc(&t, data, 4, 4, TEXFMT_RGBA5551, WRAP_REPEAT, FILTER_THREE_POINT,
+            tlut);
+  int const sfrac = 24;
+  int const tfrac = 20;  // sum=44 -> bit 0x20 set -> upper triangle
+  ASSERT_NE((sfrac + tfrac) & 0x20, 0) << "test fracs must select upper tri";
+  int const invsf = 0x20 - sfrac;
+  int const invtf = 0x20 - tfrac;
+  for (int sv = 0; sv < 4; ++sv) {
+    for (int su = 0; su < 4; ++su) {
+      uint8_t fixed_rgba[4];
+      uint8_t t1[4];
+      uint8_t t2[4];
+      uint8_t t3[4];
+      ASSERT_EQ(oracle_sample_texel(&t, su + 1, sv, t1), 0);
+      ASSERT_EQ(oracle_sample_texel(&t, su, sv + 1, t2), 0);
+      ASSERT_EQ(oracle_sample_texel(&t, su + 1, sv + 1, t3), 0);
+      tex_sample_rgba(&t, q16_frac5(su, sfrac), q16_frac5(sv, tfrac), 0,
+                      fixed_rgba);
+      for (int k = 0; k < 4; ++k) {
+        // Reference of the exact N64 integer 3-tap formula (upper triangle).
+        int const ds = (invsf * ((int)t2[k] - (int)t3[k]));
+        int const dt = (invtf * ((int)t1[k] - (int)t3[k]));
+        int const want = (int)t3[k] + ((ds + dt + 0x10) >> 5);
+        EXPECT_EQ((int)fixed_rgba[k], want);
+      }
+    }
+  }
+}

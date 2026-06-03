@@ -19,8 +19,10 @@
 // not interpolate); tex_validate() rejects THREE_POINT on CI.
 //
 // Fixed-point discipline: all sampler/coord math is integer. The only multiply
-// is sfrac/tfrac (0..31) by a channel diff (-255..255): the product fits in
-// signed 32-bit, so a single 32x32->32 MULS suffices (no UMULL; ARMv6-M-safe).
+// is a frac weight by a channel diff (-255..255). The weight is sfrac/tfrac
+// (0..31) in the lower triangle, or invsf/invtf = 0x20-frac (1..32) in the
+// upper triangle: worst case 32 * 255 = 8160, so the product fits comfortably
+// in signed 32-bit and a single 32x32->32 MULS suffices (no UMULL; ARMv6-M).
 #include "tex/tex.h"
 
 #include "gfx/framebuffer.h"  // rgb565()
