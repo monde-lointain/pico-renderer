@@ -365,6 +365,58 @@ RdrErr geom_bin_tri(struct GeomOut* o, uint16_t v0, uint16_t v1, uint16_t v2,
   return RDR_OK;
 }
 
+// ---- material interning (Wave-D D.4) ---------------------------------------
+// Encapsulated module state (single-instance front end): count of intern
+// requests dropped on a full table this frame. File-scope static is the
+// Orthodox idiom for single-instance state (see CLAUDE.md "Encapsulate state");
+// reached only through the geom_material_* functions and reset per frame.
+static uint32_t s_material_overflow = 0;
+
+void geom_material_reset(struct Frame* f) {
+  f->rstate_count = 0;
+  s_material_overflow = 0;
+}
+
+uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs) {
+  if (f == 0) {
+    return 0;  // defensive: no frame, no table (analyzer-visible guard)
+  }
+  if (rs == 0) {
+    rs = &f->rstate;  // null => intern the current render state
+  }
+  // Dedup: deterministic linear VALUE compare over the RenderState POD. The
+  // table is tiny (<=RDR_MAX_MATERIALS, ≈6 distinct states per scene), so a
+  // scan is ample; pointer identity is unusable because every intern sees the
+  // same &f->rstate buffer.
+  //
+  // memcmp is sound here: every RenderState in this renderer is born from a
+  // memset-zero (rdr.cc rstate_defaults) and then field-assigned, and
+  // SET_MATERIAL copies the whole struct from such a zeroed origin — so padding
+  // bytes are uniformly zero on both sides and never diverge for value-equal
+  // states. (clang-tidy flags the generic padding hazard; the invariant rules
+  // it out — see WORKFLOW.md.)
+  for (uint16_t i = 0; i < f->rstate_count; ++i) {
+    // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+    if (memcmp(&f->rstate_table[i], rs, sizeof *rs) == 0) {
+      return i;  // existing value-equal entry
+    }
+  }
+  if (f->rstate_count >= RDR_MAX_MATERIALS) {
+    // Full table, no match: drop-with-count, clamp to a valid in-range id so
+    // emitted TriRefs never carry a corrupt index (mirrors the bin/cmd
+    // drop-with-count convention). Last slot, or 0 if somehow empty.
+    ++s_material_overflow;
+    return (f->rstate_count > 0) ? (uint16_t)(f->rstate_count - 1)
+                                 : (uint16_t)0;
+  }
+  uint16_t const id = f->rstate_count;
+  f->rstate_table[id] = *rs;  // append a new distinct entry
+  ++f->rstate_count;
+  return id;
+}
+
+uint32_t geom_material_overflow_count(void) { return s_material_overflow; }
+
 // ---- front-end command interpreter (C1) ------------------------------------
 // Module-local interpreter state threaded through cb_walk as the visitor ctx.
 // Frame owns the durable sinks (pool/bins/mtx/vp/rstate); GeomCtx adds the
@@ -379,6 +431,12 @@ struct GeomCtx {
   struct Frame* f;
   const struct Vtx* vptr;  // current LOAD_VERTS window base (absolute idx 0)
   uint16_t vcount;         // loaded vertex count (bounds the index fetch)
+  // Current interned material id, resolved LAZILY at draw time and cached:
+  // material_dirty is set whenever a command mutates f->rstate so the next
+  // DRAW_TRIS re-interns once (avoids a value-compare scan per triangle, and
+  // interns only render states that actually emit geometry).
+  uint16_t cur_material_id;
+  int material_dirty;
 };
 
 // Emit one screen-space triangle (already projected TVtx a,b,c) through cull +
@@ -418,6 +476,14 @@ static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
     return;
   }
 
+  // Resolve the interned material id for the current render state (lazily, once
+  // per state change). Emitted TriRefs carry it so the raster back end can look
+  // up f->rstate_table[material]; resolves C2 latent #2 (was always 0).
+  if (g->material_dirty) {
+    g->cur_material_id = geom_material_intern(f, &f->rstate);
+    g->material_dirty = 0;
+  }
+
   const struct Mat4fx* mvp = mtx_mvp(&f->mtx);
   int const det_sign =
       geom_modelview_det_sign(&f->mtx.modelview[f->mtx.mv_top]);
@@ -451,11 +517,11 @@ static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
     return;
   }
   for (int i = 1; i + 1 < n; ++i) {
-    // TODO(C2): real render-state version/intern id; combiner.mode was wrong
-    // (it is a combiner enum, not a state id; the blend/tex streams read this
-    // frozen TriRef.material field). 0 until render-state interning lands.
+    // Wave-D D.4: each fan triangle carries the interned material id (an index
+    // into f->rstate_table) — the blend/tex streams read this frozen
+    // TriRef.material field. (Was 0 until render-state interning landed.)
     geom_emit_tri(f, &ring[0], &ring[i], &ring[i + 1], det_sign,
-                  (int)f->rstate.cull, 0);
+                  (int)f->rstate.cull, g->cur_material_id);
   }
 }
 
@@ -481,21 +547,25 @@ static int geom_visit(void* ctx, const struct Command* c) {
     case CMD_SET_MATERIAL:
       if (c->u.set_material.state != 0) {
         f->rstate = *c->u.set_material.state;
+        g->material_dirty = 1;  // re-intern on the next draw
       }
       return 0;
     case CMD_SET_COMBINER:
       return 0;  // thin slice: combiner id carried via material, not used yet
     case CMD_SET_PRIM_COLOR:
       f->rstate.prim_color = c->u.set_color.color;
+      g->material_dirty = 1;
       return 0;
     case CMD_SET_ENV_COLOR:
       f->rstate.env_color = c->u.set_color.color;
+      g->material_dirty = 1;
       return 0;
     case CMD_SET_FOG:
       f->rstate.fog.near_z = c->u.set_fog.near_z;
       f->rstate.fog.far_z = c->u.set_fog.far_z;
       f->rstate.fog.color = c->u.set_fog.color;
       f->rstate.fog.enabled = 1;
+      g->material_dirty = 1;
       return 0;
     case CMD_SET_RENDERMODE:
     case CMD_SET_LIGHTS:
@@ -558,9 +628,14 @@ RdrErr geom_run(const struct Command* cmds, struct Frame* f) {
   if (cmds == 0 || f == 0) {
     return RDR_EINVAL;
   }
+  // Start the frame's interned material table empty; the first draw interns the
+  // current render state (default or the first SET_MATERIAL) on demand.
+  geom_material_reset(f);
   struct GeomCtx g;
   g.f = f;
   g.vptr = 0;
   g.vcount = 0;
+  g.cur_material_id = 0;
+  g.material_dirty = 1;  // force the first draw to intern the current rstate
   return cb_walk(cmds, geom_visit, &g);
 }
