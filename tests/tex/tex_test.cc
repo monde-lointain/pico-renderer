@@ -192,7 +192,8 @@ TEST(TexRgba, IA4Intensity3BitAlpha1Bit) {
   EXPECT_EQ(out[3], 0xFF);
   // Even-pixel intensity 0xE = 1110: alpha bit 0 -> 0x00; i3 = 0xe.
   static const uint8_t px2[1] = {0xE0};
-  fill_desc(&t, px2, 2, 1, TEXFMT_IA4, WRAP_CLAMP, FILTER_POINT, (const void*)0);
+  fill_desc(&t, px2, 2, 1, TEXFMT_IA4, WRAP_CLAMP, FILTER_POINT,
+            (const void*)0);
   tex_sample_rgba(&t, q16(0), q16(0), 0, out);
   EXPECT_EQ(out[3], 0x00);  // bit0 of 0xE is 0
 }
@@ -347,11 +348,9 @@ TEST(TexRgba, ThreePointInterpolatesS) {
 
 // ---- oracle cross-check: every format x wrap, POINT, over a coord sweep ----
 
-static const uint8_t K_FMTS[] = {TEXFMT_RGBA565, TEXFMT_RGBA4444,
-                                 TEXFMT_RGBA5551, TEXFMT_IA8,
-                                 TEXFMT_IA4,      TEXFMT_I8,
-                                 TEXFMT_I4,       TEXFMT_CI4,
-                                 TEXFMT_CI8};
+static const uint8_t K_FMTS[] = {
+    TEXFMT_RGBA565, TEXFMT_RGBA4444, TEXFMT_RGBA5551, TEXFMT_IA8, TEXFMT_IA4,
+    TEXFMT_I8,      TEXFMT_I4,       TEXFMT_CI4,      TEXFMT_CI8};
 static const uint8_t K_WRAPS[] = {WRAP_REPEAT, WRAP_MIRROR, WRAP_CLAMP};
 
 // Build a 4x4 source for a given format from a deterministic byte/word pattern.
@@ -361,20 +360,20 @@ static void make_src(uint8_t fmt, const void** data, const void** tlut) {
   static uint8_t buf8[16];
   static uint16_t pal[256];
   for (int i = 0; i < 256; ++i) {
-    pal[i] = (uint16_t)((i * 0x0101u) ^ 0x1357u);  // arbitrary 5551 entries
+    pal[i] = (uint16_t)((i * 0x0101U) ^ 0x1357U);  // arbitrary 5551 entries
   }
   *tlut = (const void*)0;
   if (fmt == TEXFMT_RGBA565 || fmt == TEXFMT_RGBA4444 ||
       fmt == TEXFMT_RGBA5551) {
     for (int i = 0; i < 16; ++i) {
-      buf16[i] = (uint16_t)(0x1234u + (uint16_t)(i * 0x0911u));
+      buf16[i] = (uint16_t)(0x1234U + (uint16_t)(i * 0x0911U));
     }
     *data = buf16;
     return;
   }
   // 8b / packed-4b / CI: byte buffer. 4-bit packs 2 px/byte (8 bytes used).
   for (int i = 0; i < 16; ++i) {
-    buf8[i] = (uint8_t)(0x10u + (uint8_t)(i * 0x1Du));
+    buf8[i] = (uint8_t)(0x10U + (uint8_t)(i * 0x1DU));
   }
   *data = buf8;
   if (fmt == TEXFMT_CI4 || fmt == TEXFMT_CI8) {
@@ -458,11 +457,10 @@ TEST(TexOracle, ThreePointLowerTriangleMatchesFloat) {
       tex_sample_rgba(&t, q16_frac5(su, sfrac), q16_frac5(sv, tfrac), 0,
                       fixed_rgba);
       for (int k = 0; k < 4; ++k) {
-        // Float reference of the exact integer formula.
-        int const want = (int)t0[k] +
-                         ((sfrac * ((int)t1[k] - (int)t0[k]) +
-                           tfrac * ((int)t2[k] - (int)t0[k]) + 0x10) >>
-                          5);
+        // Reference of the exact N64 integer 3-tap formula (lower triangle).
+        int const ds = (sfrac * ((int)t1[k] - (int)t0[k]));
+        int const dt = (tfrac * ((int)t2[k] - (int)t0[k]));
+        int const want = (int)t0[k] + ((ds + dt + 0x10) >> 5);
         EXPECT_EQ((int)fixed_rgba[k], want);
       }
     }

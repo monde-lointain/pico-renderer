@@ -204,19 +204,15 @@ static void three_point_rgba(const struct TexDesc* t, int s, int tt, int sfrac,
     int const invsf = 0x20 - sfrac;
     int const invtf = 0x20 - tfrac;
     for (int k = 0; k < 4; ++k) {
-      int const v = (int)t3[k] +
-                    ((invsf * ((int)t2[k] - (int)t3[k]) +
-                      invtf * ((int)t1[k] - (int)t3[k]) + 0x10) >>
-                     5);
-      out_rgba[k] = (uint8_t)v;
+      int const ds = (invsf * ((int)t2[k] - (int)t3[k]));
+      int const dt = (invtf * ((int)t1[k] - (int)t3[k]));
+      out_rgba[k] = (uint8_t)((int)t3[k] + ((ds + dt + 0x10) >> 5));
     }
   } else {
     for (int k = 0; k < 4; ++k) {
-      int const v = (int)t0[k] +
-                    ((sfrac * ((int)t1[k] - (int)t0[k]) +
-                      tfrac * ((int)t2[k] - (int)t0[k]) + 0x10) >>
-                     5);
-      out_rgba[k] = (uint8_t)v;
+      int const ds = (sfrac * ((int)t1[k] - (int)t0[k]));
+      int const dt = (tfrac * ((int)t2[k] - (int)t0[k]));
+      out_rgba[k] = (uint8_t)((int)t0[k] + ((ds + dt + 0x10) >> 5));
     }
   }
 }
@@ -255,8 +251,8 @@ uint16_t tex_sample(const struct TexDesc* t, fx16_16 u, fx16_16 v, int lod) {
 }
 
 int tex_validate(const struct TexDesc* t) {
-  if (t == (const struct TexDesc*)0 || t->data == (const void*)0 ||
-      t->w == 0 || t->h == 0) {
+  if (t == (const struct TexDesc*)0 || t->data == (const void*)0 || t->w == 0 ||
+      t->h == 0) {
     return RDR_OK;  // "no texture" is a legal render state; fetch gates on it.
   }
   switch (t->format) {
