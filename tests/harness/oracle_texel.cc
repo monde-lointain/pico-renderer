@@ -7,10 +7,11 @@
 #include "oracle.h"
 
 int oracle_sample_texel(const struct TexDesc* tex, int s, int t,
-                        const uint8_t out_rgba[4]) {
+                        uint8_t out_rgba[4]) {
   (void)tex;
   (void)s;
   (void)t;
-  (void)out_rgba;
+  // Stub: write a defined default (real body = per-format decode + filter).
+  out_rgba[0] = out_rgba[1] = out_rgba[2] = out_rgba[3] = 0;
   return 1;  // ORACLE_TODO(D.2/tex): per-format decode + wrap + filter
 }

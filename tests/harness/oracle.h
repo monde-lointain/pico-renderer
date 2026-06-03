@@ -99,15 +99,19 @@ void oracle_unpack565(uint16_t c, uint8_t* r, uint8_t* g, uint8_t* b);
 // owning stream replaces the body in its own .cc and flips the return to 0.
 //
 // tex (oracle_texel.cc): decode one texel to RGBA8 for format/coords (point).
+// out_rgba is an OUTPUT (written by the impl) — non-const so the body needs no
+// oracle.h edit.
 int oracle_sample_texel(const struct TexDesc* tex, int s, int t,
-                        const uint8_t out_rgba[4]);
-// shade (oracle_shade.cc): evaluate (A-B)*C+D combiner on 8-bit inputs.
+                        uint8_t out_rgba[4]);
+// shade (oracle_shade.cc): evaluate (A-B)*C+D combiner on 8-bit inputs; result
+// in out[4] (OUTPUT, non-const).
 int oracle_shade_combiner(const struct CombinerState* cs, const uint8_t* a,
                           const uint8_t* b, const uint8_t* c, const uint8_t* d,
-                          const uint8_t out[4]);
-// blend (oracle_blend.cc): coverage/alpha blend of src over dst.
+                          uint8_t out[4]);
+// blend (oracle_blend.cc): coverage/alpha blend of src over dst; blended color
+// written to out_rgb[3] (OUTPUT, non-const).
 int oracle_blend(uint8_t zmode, const uint8_t* src_rgba, float coverage,
-                 const uint8_t* dst_rgb);
+                 const uint8_t* dst_rgb, uint8_t out_rgb[3]);
 // fog (oracle_fog.cc): lerp in_rgb toward fog_rgb by factor in [0,1], writing
 // out_rgb. (color = lerp(color, fog_color, factor); D1/Q9 z-space lives in the
 // caller that derives `factor` from depth.)

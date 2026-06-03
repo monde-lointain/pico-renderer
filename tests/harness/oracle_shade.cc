@@ -8,12 +8,13 @@
 
 int oracle_shade_combiner(const struct CombinerState* cs, const uint8_t* a,
                           const uint8_t* b, const uint8_t* c, const uint8_t* d,
-                          const uint8_t out[4]) {
+                          uint8_t out[4]) {
   (void)cs;
   (void)a;
   (void)b;
   (void)c;
   (void)d;
-  (void)out;
+  // Stub: write a defined default (real body = Gouraud interp + (A-B)*C+D).
+  out[0] = out[1] = out[2] = out[3] = 0;
   return 1;  // ORACLE_TODO(R.4/shade): Gouraud interp + (A-B)*C+D
 }
