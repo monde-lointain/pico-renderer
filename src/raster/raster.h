@@ -2,9 +2,9 @@
 // Z). Orthodox C++ (POD + free functions, C headers, no STL/auto/exceptions).
 //
 // Half-space edge-function rasterizer clipped to tile bounds. Per-material
-// (R.1): a flat-color fast path (provoking-vertex rgba, untextured materials) or
-// a textured + Gouraud + combiner path (textured materials) with a per-tile 1/w
-// (w-buffer) depth test + write. The flat fast path is BIT-IDENTICAL to the
+// (R.1): a flat-color fast path (provoking-vertex rgba, untextured materials)
+// or a textured + Gouraud + combiner path (textured materials) with a per-tile
+// 1/w (w-buffer) depth test + write. The flat fast path is BIT-IDENTICAL to the
 // pre-R.1 rasterizer (the hard regression gate). R.1 = OPAQUE pass only.
 //
 // Conventions (source of truth: docs/superpowers/specs design + tests/harness

@@ -1,7 +1,8 @@
 // raster.cc — half-space edge-function rasterizer. Per-material: flat-fill fast
-// path (BIT-IDENTICAL to B.1-gamma) OR textured + Gouraud + combiner path (R.1).
-// Stream B.1-gamma + R.1. Orthodox C++: POD + free functions, C headers, C-style
-// casts, no STL/auto/lambda/templates/exceptions. See raster.h for contract.
+// path (BIT-IDENTICAL to B.1-gamma) OR textured + Gouraud + combiner path
+// (R.1). Stream B.1-gamma + R.1. Orthodox C++: POD + free functions, C headers,
+// C-style casts, no STL/auto/lambda/templates/exceptions. See raster.h for
+// contract.
 #include "raster/raster.h"
 
 #include <stdint.h>
@@ -65,16 +66,16 @@ struct TriSetup {
   fx12_4 x0, y0, x1, y1, x2, y2;
   int32_t iw0, iw1, iw2;  // 1/w (Q16.16) per vertex, post winding-normalize
   // Per-vertex texcoord*inv_w (S10.5 * inv_w_real, truncated as geom_project
-  // births TVtx.u_iw/v_iw). int32 (widened from the int16 contract field) so the
-  // affine interp numerator does not overflow before the divide.
+  // births TVtx.u_iw/v_iw). int32 (widened from the int16 contract field) so
+  // the affine interp numerator does not overflow before the divide.
   int32_t u_iw0, u_iw1, u_iw2;
   int32_t v_iw0, v_iw1, v_iw2;
   // Per-vertex packed shade color (RGB565), post winding-normalize. Affine
   // (screen-linear) Gouraud interpolation unpacks these in-loop.
   uint16_t rgba0, rgba1, rgba2;
-  int32_t area2;   // 2*signed area (Q24.8), > 0 after normalize
+  int32_t area2;      // 2*signed area (Q24.8), > 0 after normalize
   int tl0, tl1, tl2;  // top-left flags for edges v0->v1, v1->v2, v2->v0
-  uint16_t color;  // flat fill (provoking vertex v0)
+  uint16_t color;     // flat fill (provoking vertex v0)
 };
 
 // Unpack an RGB565 color to 8-bit RGB (matches gfx/framebuffer.h rgb565 layout:
@@ -195,13 +196,14 @@ static int clampi(int v, int lo, int hi) {
 // pixel's interpolated inv_w (Q16.16). DERIVATION (verified against
 // oracle_sample_texel; see tests/raster + the R.1 report):
 //   geom births  u_iw = trunc(u_s105 * inv_w_real).  At a pixel, affine interp
-//   of u_iw recovers  num_uiw = sum(w_i*u_iw_i)/area2 = u_s105_p * inv_w_p_real.
-//   Perspective recover S10.5:  u_s105_p = num_uiw / inv_w_p_real
+//   of u_iw recovers  num_uiw = sum(w_i*u_iw_i)/area2 = u_s105_p *
+//   inv_w_p_real. Perspective recover S10.5:  u_s105_p = num_uiw / inv_w_p_real
 //                                        = num_uiw * 65536 / inv_w_p.
 //   Map S10.5 -> texel (32 S10.5 units = 1 texel, 5 frac bits) in Q16.16:
 //     u_q16 = (u_s105_p / 32) << 16 = u_s105_p << 11
 //           = (num_uiw << 27) / inv_w_p   [fused: keeps fractional texel bits
-//                                          for THREE_POINT; POINT idx = q16>>16].
+//                                          for THREE_POINT; POINT idx =
+//                                          q16>>16].
 //   PARITY (P3-5): the int64-num / int64-(inv_w_p) signed divide truncates
 //   toward zero exactly like the existing inv_w divide (raster_one) and
 //   fx_div -> host<->device bit-identical. Guards inv_w_p>0 (depth_pack rejects
@@ -329,7 +331,8 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
 
       if (!textured) {
         // FAST PATH (BIT-IDENTICAL to the pre-R.1 rasterizer): flat fill.
-        // w-buffer: larger inv_w is closer. Pass if at least as close as stored.
+        // w-buffer: larger inv_w is closer. Pass if at least as close as
+        // stored.
         if (znew < zbuf[zi]) {
           continue;
         }
@@ -341,10 +344,10 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       // TEXTURED + GOURAUD + COMBINER PATH (R.1, opaque pass).
       // Perspective-correct UV: affine-interp u_iw/v_iw (same num/area2 form as
       // inv_w), then recover the Q16.16 texel coord.
-      int64_t const num_u = ((int64_t)w0 * t->u_iw0) + ((int64_t)w1 * t->u_iw1) +
-                            ((int64_t)w2 * t->u_iw2);
-      int64_t const num_v = ((int64_t)w0 * t->v_iw0) + ((int64_t)w1 * t->v_iw1) +
-                            ((int64_t)w2 * t->v_iw2);
+      int64_t const num_u = ((int64_t)w0 * t->u_iw0) +
+                            ((int64_t)w1 * t->u_iw1) + ((int64_t)w2 * t->u_iw2);
+      int64_t const num_v = ((int64_t)w0 * t->v_iw0) +
+                            ((int64_t)w1 * t->v_iw1) + ((int64_t)w2 * t->v_iw2);
       int32_t const u_iw_p = (int32_t)(num_u / (int64_t)t->area2);
       int32_t const v_iw_p = (int32_t)(num_v / (int64_t)t->area2);
       fx16_16 const u_q16 = perspective_texcoord_q16(u_iw_p, inv_w);
@@ -378,7 +381,8 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       uint8_t keep = 1;
       uint16_t const out = shade_pixel(rs, texel565, shade565, &keep);
       if (!keep) {
-        continue;  // forward-compat: honor a future alpha-compare in the combiner.
+        continue;  // forward-compat: honor a future alpha-compare in the
+                   // combiner.
       }
       // z-test AFTER cutout/keep so a discarded fragment never seeds depth.
       if (znew < zbuf[zi]) {

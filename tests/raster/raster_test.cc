@@ -34,9 +34,9 @@ uint16_t rgb565_pack(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 // A 1-entry render-state table whose material 0 has NO texture (tex zeroed) so
-// every flat-fill test takes raster's BIT-IDENTICAL fast path. raster_tile reads
-// this read-only; one shared instance suffices for all flat tests. (The textured
-// tests below build their own tables.)
+// every flat-fill test takes raster's BIT-IDENTICAL fast path. raster_tile
+// reads this read-only; one shared instance suffices for all flat tests. (The
+// textured tests below build their own tables.)
 const struct RenderState* no_texture_table() {
   static struct RenderState rstate;  // zero-init: tex.data/w/h = 0 -> fast path
   static int init = 0;
@@ -568,8 +568,9 @@ namespace {
 // 8x8 texture dimension (pow2) for the textured-path tests.
 enum { K_TEXW = 8, K_TEXH = 8 };
 
-// An 8x8 RGBA565 texture with a distinct per-texel color so the sampled coord is
-// observable. texel(u,v) = R = u*30, G = v*30, B = (u^v)*30 (mod 256, packed).
+// An 8x8 RGBA565 texture with a distinct per-texel color so the sampled coord
+// is observable. texel(u,v) = R = u*30, G = v*30, B = (u^v)*30 (mod 256,
+// packed).
 struct Tex565 {
   uint16_t px[K_TEXW * K_TEXH];
 };
@@ -589,7 +590,8 @@ void make_tex565(struct Tex565* t) {
 
 // Low spatial frequency gradient: adjacent texels differ by <=2 per channel, so
 // a 1-texel fixed-vs-float disagreement (from geom's u_iw truncation near a
-// boundary) stays within the float-oracle tolerance. Used by the tolerance test.
+// boundary) stays within the float-oracle tolerance. Used by the tolerance
+// test.
 void make_tex565_smooth(struct Tex565* t) {
   for (int v = 0; v < K_TEXH; ++v) {
     for (int u = 0; u < K_TEXW; ++u) {
@@ -601,8 +603,9 @@ void make_tex565_smooth(struct Tex565* t) {
   }
 }
 
-// An 8x8 RGBA5551 cutout texture: half the texels opaque (A=1), half transparent
-// (A=0). Opaque = solid magenta; transparent texels carry a sentinel RGB.
+// An 8x8 RGBA5551 cutout texture: half the texels opaque (A=1), half
+// transparent (A=0). Opaque = solid magenta; transparent texels carry a
+// sentinel RGB.
 struct Tex5551 {
   uint16_t px[K_TEXW * K_TEXH];
 };
@@ -640,8 +643,9 @@ void tex_desc_565(struct TexDesc* td, const struct Tex565* t) {
 int32_t geom_uiw(int s105, int32_t inv_w_q16) {
   int64_t const prod = ((int64_t)s105 << 16) * (int64_t)inv_w_q16;
   int64_t const bias = (prod < 0) ? -(1LL << 15) : (1LL << 15);
-  int64_t const q16 = (prod + bias) >> 16;        // fx_mul -> Q16.16
-  int64_t const i = (q16 < 0) ? -((-q16) >> 16) : (q16 >> 16);  // fx_to_int trunc
+  int64_t const q16 = (prod + bias) >> 16;  // fx_mul -> Q16.16
+  int64_t const i =
+      (q16 < 0) ? -((-q16) >> 16) : (q16 >> 16);  // fx_to_int trunc
   return (int32_t)i;
 }
 
@@ -656,7 +660,8 @@ TVtx mk_tvtx_uv(int px, int py, int32_t inv_w_q16, int u_s105, int v_s105,
   v.y = (fx12_4)(py * 16);
   v.inv_w = (fx_invw)inv_w_q16;
   // geom_project: u_iw = fx_to_int(fx_mul(fx_from_int(u_s105), inv_w)). fx_mul
-  // rounds half away from zero -> Q16.16; fx_to_int truncates toward zero -> int.
+  // rounds half away from zero -> Q16.16; fx_to_int truncates toward zero ->
+  // int.
   v.u_iw = (int16_t)geom_uiw(u_s105, inv_w_q16);
   v.v_iw = (int16_t)geom_uiw(v_s105, inv_w_q16);
   v.rgba = shade;
@@ -708,14 +713,35 @@ void ref_setup(struct RefTri* t, const TVtx* a, const TVtx* b, const TVtx* c) {
     fx12_4 tx = x1, ty = y1;
     int32_t tiw = iw1, tu = u1, tv = v1;
     uint16_t tr = r1;
-    x1 = x2; y1 = y2; iw1 = iw2; u1 = u2; v1 = v2; r1 = r2;
-    x2 = tx; y2 = ty; iw2 = tiw; u2 = tu; v2 = tv; r2 = tr;
+    x1 = x2;
+    y1 = y2;
+    iw1 = iw2;
+    u1 = u2;
+    v1 = v2;
+    r1 = r2;
+    x2 = tx;
+    y2 = ty;
+    iw2 = tiw;
+    u2 = tu;
+    v2 = tv;
+    r2 = tr;
     area2 = -area2;
   }
-  t->x0 = x0; t->y0 = y0; t->x1 = x1; t->y1 = y1; t->x2 = x2; t->y2 = y2;
-  t->iw0 = iw0; t->iw1 = iw1; t->iw2 = iw2;
-  t->u_iw0 = u0; t->u_iw1 = u1; t->u_iw2 = u2;
-  t->v_iw0 = v0; t->v_iw1 = v1; t->v_iw2 = v2;
+  t->x0 = x0;
+  t->y0 = y0;
+  t->x1 = x1;
+  t->y1 = y1;
+  t->x2 = x2;
+  t->y2 = y2;
+  t->iw0 = iw0;
+  t->iw1 = iw1;
+  t->iw2 = iw2;
+  t->u_iw0 = u0;
+  t->u_iw1 = u1;
+  t->u_iw2 = u2;
+  t->v_iw0 = v0;
+  t->v_iw1 = v1;
+  t->v_iw2 = v2;
   unpack565_t(r0, &t->s0[0], &t->s0[1], &t->s0[2]);
   unpack565_t(r1, &t->s1[0], &t->s1[1], &t->s1[2]);
   unpack565_t(r2, &t->s2[0], &t->s2[1], &t->s2[2]);
@@ -726,10 +752,15 @@ void ref_setup(struct RefTri* t, const TVtx* a, const TVtx* b, const TVtx* c) {
 }
 uint8_t gouraud_ref(int32_t w0, int32_t w1, int32_t w2, int c0, int c1, int c2,
                     int32_t area2) {
-  int64_t const num = ((int64_t)w0 * c0) + ((int64_t)w1 * c1) + ((int64_t)w2 * c2);
+  int64_t const num =
+      ((int64_t)w0 * c0) + ((int64_t)w1 * c1) + ((int64_t)w2 * c2);
   int32_t v = (int32_t)(num / (int64_t)area2);
-  if (v < 0) { v = 0; }
-  if (v > 255) { v = 255; }
+  if (v < 0) {
+    v = 0;
+  }
+  if (v > 255) {
+    v = 255;
+  }
   return (uint8_t)v;
 }
 // Returns 1 + writes *out if pixel (sx,sy) is covered; else 0.
@@ -746,8 +777,8 @@ int ref_textured_pixel(const struct RefTri* t, const struct RenderState* rs,
   if (!(in0 && in1 && in2)) {
     return 0;
   }
-  int64_t const numiw = ((int64_t)w0 * t->iw0) + ((int64_t)w1 * t->iw1) +
-                        ((int64_t)w2 * t->iw2);
+  int64_t const numiw =
+      ((int64_t)w0 * t->iw0) + ((int64_t)w1 * t->iw1) + ((int64_t)w2 * t->iw2);
   int32_t const inv_w = (int32_t)(numiw / (int64_t)t->area2);
   int64_t const numu = ((int64_t)w0 * t->u_iw0) + ((int64_t)w1 * t->u_iw1) +
                        ((int64_t)w2 * t->u_iw2);
@@ -773,8 +804,9 @@ int ref_textured_pixel(const struct RefTri* t, const struct RenderState* rs,
 }  // namespace
 
 // Textured + Gouraud OPAQUE path: render via raster_tile, then for a set of
-// interior pixels assert the rendered value EXACTLY equals tex_sample+shade_pixel
-// evaluated at the analytically-interpolated coord (bit-exact wiring check).
+// interior pixels assert the rendered value EXACTLY equals
+// tex_sample+shade_pixel evaluated at the analytically-interpolated coord
+// (bit-exact wiring check).
 TEST(RasterTextured, MatchesTexSampleAndShadeExact) {
   struct Tex565 tex;
   make_tex565(&tex);
@@ -785,17 +817,24 @@ TEST(RasterTextured, MatchesTexSampleAndShadeExact) {
   rs.alpha_cmp = 0;
   const struct RenderState* table = &rs;
 
-  // A perspective triangle (distinct inv_w) spanning several texels, white shade
-  // so MODULATE = texel (255*c/255). Texcoords span [0,7]*32 S10.5 = whole tex.
+  // A perspective triangle (distinct inv_w) spanning several texels, white
+  // shade so MODULATE = texel (255*c/255). Texcoords span [0,7]*32 S10.5 =
+  // whole tex.
   uint16_t const white = rgb565_pack(255, 255, 255);
   TVtx pool[3];
   pool[0] = mk_tvtx_uv(8, 8, 0x20000, 0, 0, white);
   pool[1] = mk_tvtx_uv(52, 12, 0x08000, 7 * 32, 0, white);
   pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
   TriRef ref;
-  ref.v0 = 0; ref.v1 = 1; ref.v2 = 2; ref.material = 0;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
   TileBin bin;
-  bin.refs = &ref; bin.count = 1; bin.cap = 1; bin.dropped = 0;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
 
   static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
   static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
@@ -847,9 +886,15 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
   pool[1] = mk_tvtx_uv(52, 12, 0x08000, 7 * 32, 0, shade);
   pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, shade);
   TriRef ref;
-  ref.v0 = 0; ref.v1 = 1; ref.v2 = 2; ref.material = 0;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
   TileBin bin;
-  bin.refs = &ref; bin.count = 1; bin.cap = 1; bin.dropped = 0;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
 
   static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
   static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
@@ -868,18 +913,25 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
   float iwf2 = (float)pool[2].inv_w / 65536.0F;
   // Raw S10.5 per vertex (reconstruct from u_iw/inv_w for the float oracle's
   // perspective recovery — the oracle does NOT need geom's truncation).
-  int us0 = 0, us1 = 7 * 32, us2 = 0;       // matches mk_tvtx_uv inputs
+  int us0 = 0, us1 = 7 * 32, us2 = 0;  // matches mk_tvtx_uv inputs
   int vs0 = 0, vs1 = 0, vs2 = 7 * 32;
   uint8_t shr, shg, shb;
   oracle_unpack565(shade, &shr, &shg, &shb);
-  float const area =
-      ((fx1 - fx0) * (fy2 - fy0)) - ((fy1 - fy0) * (fx2 - fx0));
+  float const area = ((fx1 - fx0) * (fy2 - fy0)) - ((fy1 - fy0) * (fx2 - fx0));
   // Normalize winding so the barycentric ratios are positive (swap 1<->2).
   if (area < 0.0F) {
     float tx = fx1, ty = fy1, tiw = iwf1;
     int tu = us1, tv = vs1;
-    fx1 = fx2; fy1 = fy2; iwf1 = iwf2; us1 = us2; vs1 = vs2;
-    fx2 = tx; fy2 = ty; iwf2 = tiw; us2 = tu; vs2 = tv;
+    fx1 = fx2;
+    fy1 = fy2;
+    iwf1 = iwf2;
+    us1 = us2;
+    vs1 = vs2;
+    fx2 = tx;
+    fy2 = ty;
+    iwf2 = tiw;
+    us2 = tu;
+    vs2 = tv;
   }
   // Fixed-point recovery mirror (for the per-pixel texel index the impl uses).
   struct RefTri rt;
@@ -933,23 +985,34 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
 
       // (1) PERSPECTIVE cross-check: float and fixed texel indices within 1.
       int dtu = itu - ftu, dtv = itv - ftv;
-      if (dtu < 0) { dtu = -dtu; }
-      if (dtv < 0) { dtv = -dtv; }
+      if (dtu < 0) {
+        dtu = -dtu;
+      }
+      if (dtv < 0) {
+        dtv = -dtv;
+      }
       ASSERT_LE(dtu, 1) << "U texel slip > 1 @ (" << sx << "," << sy << ")";
       ASSERT_LE(dtv, 1) << "V texel slip > 1 @ (" << sx << "," << sy << ")";
 
-      // (2) COMBINER: float MODULATE of the texel the IMPL sampled, then through
-      // the SAME final 565 pack/unpack the impl applies (so we compare at the
-      // 565 grid, leaving only the N64 integer-combiner rounding as residual).
+      // (2) COMBINER: float MODULATE of the texel the IMPL sampled, then
+      // through the SAME final 565 pack/unpack the impl applies (so we compare
+      // at the 565 grid, leaving only the N64 integer-combiner rounding as
+      // residual).
       uint8_t texel[4];
       ASSERT_EQ(oracle_sample_texel(&rs.tex, itu, itv, texel), 0);
       // flat shade across this tri -> affine SHADE == the vertex shade.
       int er = (int)lrintf((float)texel[0] * shr / 255.0F);
       int eg = (int)lrintf((float)texel[1] * shg / 255.0F);
       int eb = (int)lrintf((float)texel[2] * shb / 255.0F);
-      if (er > 255) { er = 255; }
-      if (eg > 255) { eg = 255; }
-      if (eb > 255) { eb = 255; }
+      if (er > 255) {
+        er = 255;
+      }
+      if (eg > 255) {
+        eg = 255;
+      }
+      if (eb > 255) {
+        eb = 255;
+      }
       uint8_t exr, exg, exb;
       oracle_unpack565(rgb565_pack((uint8_t)er, (uint8_t)eg, (uint8_t)eb), &exr,
                        &exg, &exb);
@@ -959,15 +1022,24 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
       int dr = (int)gr8 - (int)exr;
       int dg = (int)gg8 - (int)exg;
       int db = (int)gb8 - (int)exb;
-      if (dr < 0) { dr = -dr; }
-      if (dg < 0) { dg = -dg; }
-      if (db < 0) { db = -db; }
+      if (dr < 0) {
+        dr = -dr;
+      }
+      if (dg < 0) {
+        dg = -dg;
+      }
+      if (db < 0) {
+        db = -db;
+      }
       // Residual: the N64 integer combiner ((t*s+0x80)>>8) vs float t*s/255 can
-      // tip a channel into the adjacent RGB565 bin at a boundary. One 565 quantum
-      // expands (with bit-replication) to <=9 in 8-bit for R/B (5-bit) and <=5
-      // for G (6-bit). A transposition / wrong shift blows FAR past this bound.
+      // tip a channel into the adjacent RGB565 bin at a boundary. One 565
+      // quantum expands (with bit-replication) to <=9 in 8-bit for R/B (5-bit)
+      // and <=5 for G (6-bit). A transposition / wrong shift blows FAR past
+      // this bound.
       int const tol_rb = 9, tol_g = 5;
-      if (dr > worst) { worst = dr; }
+      if (dr > worst) {
+        worst = dr;
+      }
       EXPECT_LE(dr, tol_rb) << "R @ (" << sx << "," << sy << ")";
       EXPECT_LE(dg, tol_g) << "G @ (" << sx << "," << sy << ")";
       EXPECT_LE(db, tol_rb) << "B @ (" << sx << "," << sy << ")";
@@ -977,9 +1049,10 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
   EXPECT_GT(checked, 50) << "too few interior pixels — test is vacuous";
 }
 
-// Alpha-cutout (N11): a 1-bit-alpha RGBA5551 cutout tri over a known background.
-// Discarded texels (A=0) keep the background, AND a farther tri drawn AFTER at a
-// discarded pixel STILL draws (proves zbuf was NOT written at the discard).
+// Alpha-cutout (N11): a 1-bit-alpha RGBA5551 cutout tri over a known
+// background. Discarded texels (A=0) keep the background, AND a farther tri
+// drawn AFTER at a discarded pixel STILL draws (proves zbuf was NOT written at
+// the discard).
 TEST(RasterTextured, AlphaCutoutDiscardsAndSkipsZbuf) {
   struct Tex5551 tex;
   make_tex5551_cutout(&tex);
@@ -1022,10 +1095,19 @@ TEST(RasterTextured, AlphaCutoutDiscardsAndSkipsZbuf) {
   pool[4].rgba = far_green;
   pool[5].rgba = far_green;
   TriRef refs[2];
-  refs[0].v0 = 0; refs[0].v1 = 1; refs[0].v2 = 2; refs[0].material = 0;  // near cutout
-  refs[1].v0 = 3; refs[1].v1 = 4; refs[1].v2 = 5; refs[1].material = 1;  // far flat
+  refs[0].v0 = 0;
+  refs[0].v1 = 1;
+  refs[0].v2 = 2;
+  refs[0].material = 0;  // near cutout
+  refs[1].v0 = 3;
+  refs[1].v1 = 4;
+  refs[1].v2 = 5;
+  refs[1].material = 1;  // far flat
   TileBin bin;
-  bin.refs = refs; bin.count = 2; bin.cap = 2; bin.dropped = 0;
+  bin.refs = refs;
+  bin.count = 2;
+  bin.cap = 2;
+  bin.dropped = 0;
 
   static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
   static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
@@ -1038,7 +1120,7 @@ TEST(RasterTextured, AlphaCutoutDiscardsAndSkipsZbuf) {
   // (transparent) interior pixel — both well inside the triangle (x+y << 56 so
   // they clear the hypotenuse top-left tie-break). Left: opaque magenta texel.
   // Right (x>=~31): transparent texel -> discarded.
-  uint16_t const px_left = fb[(8 * RDR_SCREEN_W) + 8];   // u~0 -> opaque
+  uint16_t const px_left = fb[(8 * RDR_SCREEN_W) + 8];    // u~0 -> opaque
   uint16_t const px_right = fb[(8 * RDR_SCREEN_W) + 38];  // u~4 -> transparent
 
   // Opaque region: NOT background (textured pixel drawn).
@@ -1057,7 +1139,7 @@ TEST(RasterTextured, UiwInt16RangeProbe) {
   // texels. S10.5 max useful coord ~ a few hundred (e.g. 256 = 8 texels * 32).
   // inv_w is largest for the NEAREST geometry. Probe a worst-ish case: a near
   // vertex at inv_w = 2.0 (Q16.16 0x20000) with a large texcoord.
-  int const worst_u_s105 = 512;      // 16 texels of S10.5 (generous)
+  int const worst_u_s105 = 512;        // 16 texels of S10.5 (generous)
   int32_t const near_inv_w = 0x40000;  // 4.0 (very near; aggressive)
   int64_t const prod = ((int64_t)worst_u_s105 << 16) * (int64_t)near_inv_w;
   int64_t const bias = (1LL << 15);
@@ -1071,10 +1153,10 @@ TEST(RasterTextured, UiwInt16RangeProbe) {
 
 // dual==serial for a TEXTURED scene: raster_one reads only the immutable pool +
 // rstate_table and writes a private zbuf, so a multi-tile textured scene drawn
-// (a) serially with one zbuf and (b) with two interleaved per-tile zbufs MUST be
-// bit-identical — the same C2 invariant the sched test proves for flat fill, now
-// exercised across the textured + cutout path. Crosses tile boundaries so the
-// per-tile depth-clear + private-scratch isolation are load-bearing.
+// (a) serially with one zbuf and (b) with two interleaved per-tile zbufs MUST
+// be bit-identical — the same C2 invariant the sched test proves for flat fill,
+// now exercised across the textured + cutout path. Crosses tile boundaries so
+// the per-tile depth-clear + private-scratch isolation are load-bearing.
 TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
   struct Tex565 tex;
   make_tex565(&tex);
@@ -1115,14 +1197,28 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
   pool[6] = mk_vtx(70, 70, 0, 0, 0x10000);
   pool[7] = mk_vtx(110, 80, 0, 0, 0x10000);
   pool[8] = mk_vtx(76, 110, 0, 0, 0x10000);
-  pool[6].rgba = flat; pool[7].rgba = flat; pool[8].rgba = flat;
+  pool[6].rgba = flat;
+  pool[7].rgba = flat;
+  pool[8].rgba = flat;
   pool[9] = mk_tvtx_uv(140, 140, 0x1C000, 0, 0, white);
   pool[10] = mk_tvtx_uv(190, 150, 0x10000, 7 * 32, 0, white);
   pool[11] = mk_tvtx_uv(150, 190, 0x14000, 0, 7 * 32, white);
-  refs[0].v0 = 0; refs[0].v1 = 1; refs[0].v2 = 2; refs[0].material = 0;
-  refs[1].v0 = 3; refs[1].v1 = 4; refs[1].v2 = 5; refs[1].material = 1;
-  refs[2].v0 = 6; refs[2].v1 = 7; refs[2].v2 = 8; refs[2].material = 2;
-  refs[3].v0 = 9; refs[3].v1 = 10; refs[3].v2 = 11; refs[3].material = 0;
+  refs[0].v0 = 0;
+  refs[0].v1 = 1;
+  refs[0].v2 = 2;
+  refs[0].material = 0;
+  refs[1].v0 = 3;
+  refs[1].v1 = 4;
+  refs[1].v2 = 5;
+  refs[1].material = 1;
+  refs[2].v0 = 6;
+  refs[2].v1 = 7;
+  refs[2].v2 = 8;
+  refs[2].material = 2;
+  refs[3].v0 = 9;
+  refs[3].v1 = 10;
+  refs[3].v2 = 11;
+  refs[3].material = 0;
 
   // Bin per tile: a tri goes into every tile its bounding box touches. For the
   // determinism test it is enough to bin all tris into all tiles and let the
@@ -1140,7 +1236,10 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
     fb_par[i] = 0;
   }
   TileBin bin;
-  bin.refs = refs; bin.count = K_NTRI; bin.cap = K_NTRI; bin.dropped = 0;
+  bin.refs = refs;
+  bin.count = K_NTRI;
+  bin.cap = K_NTRI;
+  bin.dropped = 0;
   (void)tiles_per_row;
 
   for (int tile = 0; tile < num_tiles; ++tile) {
