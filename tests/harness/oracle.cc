@@ -215,35 +215,9 @@ void oracle_unpack565(uint16_t c, uint8_t* r, uint8_t* g, uint8_t* b) {
   *b = (uint8_t)((b5 << 3) | (b5 >> 2));
 }
 
-// ---- ORACLE_TODO extension stubs ------------------------------------------
-// These return nonzero ("unsupported") until the corresponding stream lands its
-// float reference. Declared in oracle.h so callers compile against the seam.
-int oracle_sample_texel(const struct TexDesc* tex, int s, int t,
-                        const uint8_t out_rgba[4]) {
-  (void)tex;
-  (void)s;
-  (void)t;
-  (void)out_rgba;
-  return 1;  // ORACLE_TODO(tex): per-format decode + wrap + filter
-}
-
-int oracle_shade_combiner(const struct CombinerState* cs, const uint8_t* a,
-                          const uint8_t* b, const uint8_t* c, const uint8_t* d,
-                          const uint8_t out[4]) {
-  (void)cs;
-  (void)a;
-  (void)b;
-  (void)c;
-  (void)d;
-  (void)out;
-  return 1;  // ORACLE_TODO(shade): Gouraud interp + (A-B)*C+D
-}
-
-int oracle_blend(uint8_t zmode, const uint8_t* src_rgba, float coverage,
-                 const uint8_t* dst_rgb) {
-  (void)zmode;
-  (void)src_rgba;
-  (void)coverage;
-  (void)dst_rgb;
-  return 1;  // ORACLE_TODO(blend): coverage/alpha blend + z compare
-}
+// NOTE: the per-feature extension references
+// (oracle_sample_texel/_shade_combiner
+// /_blend/_fog_lerp/_coverage) live in their own TUs —
+// oracle_{texel,shade,blend, fog,coverage}.cc — so parallel Wave-D streams
+// extend them without contending on this file. This TU stays the
+// transform/raster CORE only.

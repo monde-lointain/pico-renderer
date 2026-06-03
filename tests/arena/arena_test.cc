@@ -5,7 +5,8 @@
 #include "gtest/gtest.h"
 
 // Backing buffer aligned for any POD the renderer allocates.
-// alignas (C++11, portable) — not GCC __attribute__((aligned)) which MSVC rejects.
+// alignas (C++11, portable) — not GCC __attribute__((aligned)) which MSVC
+// rejects.
 alignas(8) static uint8_t g_buf[1024];
 
 TEST(Arena, InitZeroesUsedAndStoresCap) {

@@ -13,8 +13,17 @@
 # libs in src/*/ remain enforced.
 
 # ---- harness support library (oracle + golden + png; no ImGui) -------------
+# oracle.cc holds the transform/raster CORE; each per-feature float reference
+# lives in its own TU (D.0 partition) so parallel Wave-D streams extend them
+# without contending on a shared file. Ownership: oracle_texel=D.2,
+# oracle_blend/oracle_fog=D.3, oracle_shade=R.4, oracle_coverage=R.3-AA.
 add_library(harness_core STATIC
     oracle.cc
+    oracle_texel.cc
+    oracle_shade.cc
+    oracle_blend.cc
+    oracle_fog.cc
+    oracle_coverage.cc
     golden.cc
     png_io.cc
 )

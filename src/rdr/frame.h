@@ -67,7 +67,8 @@ struct Frame {
   struct Viewport vp;
   struct RenderState rstate;
 
-  // Φ: interned per-frame render states; TriRef.material indexes [0,rstate_count).
+  // Φ: interned per-frame render states; TriRef.material indexes
+  // [0,rstate_count).
   struct RenderState rstate_table[RDR_MAX_MATERIALS];
   uint16_t rstate_count;
 

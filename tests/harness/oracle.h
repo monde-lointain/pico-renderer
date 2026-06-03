@@ -15,11 +15,18 @@
 // Currently covered: transform (modelview*projection composed by caller into
 // one Mat4fx, or two passed separately) + flat-color triangle fill.
 //
-// EXTENSION POINTS (filled as modules land — see ORACLE_TODO markers in .cc):
-//   - tex: oracle_sample_texel() — per-format decode + wrap + point/3pt filter.
-//   - shade: oracle_shade_combiner() — Gouraud interp + (A-B)*C+D combiner.
-//   - blend: oracle_blend() — coverage/alpha blend + z compare.
-// Each is declared here as a stub the corresponding stream wires up.
+// EXTENSION POINTS — each lives in its OWN TU so parallel streams add their
+// float reference without contending on a shared oracle.cc (D.0 partition):
+//   - tex   (oracle_texel.cc):    oracle_sample_texel() — decode + wrap +
+//   filter.
+//   - shade (oracle_shade.cc):    oracle_shade_combiner() — Gouraud +
+//   (A-B)*C+D.
+//   - blend (oracle_blend.cc):    oracle_blend() — coverage/alpha blend + z
+//   cmp.
+//   - fog   (oracle_fog.cc):      oracle_fog_lerp() — lerp color toward fog.
+//   - cov   (oracle_coverage.cc): oracle_coverage() — analytic edge coverage.
+// Declarations stay HERE (the stable seam, Lead-owned); each stream fills only
+// its TU body. A signature change is a Lead re-surface, not a stream edit.
 //
 // Harness carve-out: NOT orthodoxy_enforced; stays C-like regardless.
 #ifndef HARNESS_ORACLE_H
@@ -87,17 +94,28 @@ void oracle_fill_tri(struct OImage* img, float x0, float y0, float x1, float y1,
 // Unpack an RGB565 color_t into 8-bit RGB (matches gfx/framebuffer.h rgb565()).
 void oracle_unpack565(uint16_t c, uint8_t* r, uint8_t* g, uint8_t* b);
 
-// ---- ORACLE_TODO extension stubs (later streams) --------------------------
-// tex: decode one texel to RGBA8 for the given format/coords (point sample).
-// Returns 0 ok, nonzero if format/coords unsupported (stub today).
+// ---- ORACLE_TODO extension stubs (per-feature TUs; see D.0 partition) ------
+// Each returns 0 on success, nonzero ("unsupported") while still a stub. The
+// owning stream replaces the body in its own .cc and flips the return to 0.
+//
+// tex (oracle_texel.cc): decode one texel to RGBA8 for format/coords (point).
 int oracle_sample_texel(const struct TexDesc* tex, int s, int t,
                         const uint8_t out_rgba[4]);
-// shade: evaluate (A-B)*C+D combiner on 8-bit inputs (stub today).
+// shade (oracle_shade.cc): evaluate (A-B)*C+D combiner on 8-bit inputs.
 int oracle_shade_combiner(const struct CombinerState* cs, const uint8_t* a,
                           const uint8_t* b, const uint8_t* c, const uint8_t* d,
                           const uint8_t out[4]);
-// blend: coverage/alpha blend of src over dst (stub today).
+// blend (oracle_blend.cc): coverage/alpha blend of src over dst.
 int oracle_blend(uint8_t zmode, const uint8_t* src_rgba, float coverage,
                  const uint8_t* dst_rgb);
+// fog (oracle_fog.cc): lerp in_rgb toward fog_rgb by factor in [0,1], writing
+// out_rgb. (color = lerp(color, fog_color, factor); D1/Q9 z-space lives in the
+// caller that derives `factor` from depth.)
+int oracle_fog_lerp(const uint8_t in_rgb[3], const uint8_t fog_rgb[3],
+                    float factor, uint8_t out_rgb[3]);
+// cov (oracle_coverage.cc): analytic per-pixel coverage from the three SIGNED,
+// gradient-normalized edge distances (pixel units); writes *out_cov in [0,1]
+// = clamp(0.5 + min(d0,d1,d2)). Interior pixels saturate to 1.
+int oracle_coverage(float d0, float d1, float d2, float* out_cov);
 
 #endif  // HARNESS_ORACLE_H
