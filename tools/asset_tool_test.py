@@ -464,6 +464,205 @@ Vtx g_terrain_grid[594] = {
                                      'UV t=%g out of upper bound at cx=%d cy=%d' % (t, cx, cy))
 
 
+class TerrainAtlasTests(unittest.TestCase):
+    """Single gutter'd atlas: pow2 dims, placement, and ALL-128 gutter-seam."""
+
+    def test_atlas_dims_pow2(self):
+        # 512-wide atlas: cell 36x35 -> 14 tiles/row, 10 rows, content H=350 ->
+        # pow2 H=512.
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        self.assertEqual(tpr, 512 // ac.ATLAS_CELL_W)  # 14
+        self.assertEqual(rows, (128 + tpr - 1) // tpr)  # 10
+        # Atlas H must be pow2 and >= rows*ATLAS_CELL_H
+        self.assertGreaterEqual(ah, rows * ac.ATLAS_CELL_H)
+        self.assertEqual(ah & (ah - 1), 0, 'atlas H must be pow2, got %d' % ah)
+        # 512 width is pow2
+        self.assertEqual(512 & 511, 0)
+
+    def test_atlas_cell_has_vertical_spacer(self):
+        # The atlas cell is 1 row taller than the tile block (the replicated
+        # bottom spacer that prevents vertical seam bleed).
+        self.assertEqual(ac.ATLAS_CELL_W, ac.TILE_W)
+        self.assertEqual(ac.ATLAS_CELL_H, ac.TILE_H + 1)
+
+    def test_atlas_dims_rejects_non_pow2_width(self):
+        with self.assertRaises(ValueError):
+            ac.terrain_atlas_dims(128, 500)
+
+    def test_atlas_tile_origin(self):
+        # tile 0 -> (0,0); tile 13 (last in row 0) -> (13*36, 0); tile 14 ->
+        # (0, ATLAS_CELL_H) since cell stride is 35 tall.
+        self.assertEqual(ac.atlas_tile_origin(0, 14), (0, 0))
+        self.assertEqual(ac.atlas_tile_origin(13, 14), (13 * ac.ATLAS_CELL_W, 0))
+        self.assertEqual(ac.atlas_tile_origin(14, 14), (0, ac.ATLAS_CELL_H))
+        # tile 127: col=127%14=1, row=127//14=9
+        self.assertEqual(ac.atlas_tile_origin(127, 14),
+                         (1 * ac.ATLAS_CELL_W, 9 * ac.ATLAS_CELL_H))
+
+    def test_build_atlas_size_and_tile0_origin(self):
+        # Synthetic: tile 0 first texel = 0x538b, rest zero.
+        tex_values = [0x538b] + [0x0000] * (128 * 36 * 34 - 1)
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas = ac.build_terrain_atlas_rgba5551_le(tex_values, 128, 512, ah, tpr)
+        self.assertEqual(len(atlas), 512 * ah * 2)
+        # Tile 0 origin (0,0): first texel LE = lo=0x8b, hi=0x53
+        self.assertEqual(atlas[0], 0x8b)
+        self.assertEqual(atlas[1], 0x53)
+
+    def test_build_atlas_spacer_replicates_bottom_row(self):
+        # Tile 0 bottom block row (33) replicated to spacer row (34). Set tile 0
+        # row 33 col 0 to a marker; verify atlas rows 33 AND 34 both carry it.
+        texels_per_tile = 36 * 34
+        tex_values = [0x0000] * (128 * texels_per_tile)
+        tex_values[33 * 36 + 0] = 0x7E7E  # tile 0, row 33, col 0
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas = ac.build_terrain_atlas_rgba5551_le(tex_values, 128, 512, ah, tpr)
+        off33 = (33 * 512 + 0) * 2
+        off34 = (34 * 512 + 0) * 2
+        self.assertEqual(atlas[off33], 0x7E)      # row 33 (block bottom)
+        self.assertEqual(atlas[off33 + 1], 0x7E)
+        self.assertEqual(atlas[off34], 0x7E)      # row 34 (spacer = copy of 33)
+        self.assertEqual(atlas[off34 + 1], 0x7E)
+
+    def test_build_atlas_tile1_placed_at_origin(self):
+        # Tile 1 first texel = 0xABCD; it should land at atlas origin (36,0).
+        texels_per_tile = 36 * 34
+        tex_values = [0x0000] * (128 * texels_per_tile)
+        tex_values[texels_per_tile] = 0xABCD  # tile 1 texel 0
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas = ac.build_terrain_atlas_rgba5551_le(tex_values, 128, 512, ah, tpr)
+        ox, oy = ac.atlas_tile_origin(1, tpr)  # (36, 0)
+        off = (oy * 512 + ox) * 2
+        self.assertEqual(atlas[off], 0xCD)      # LE lo
+        self.assertEqual(atlas[off + 1], 0xAB)  # LE hi
+
+    def test_build_atlas_tile14_second_row(self):
+        # Tile 14 first texel -> atlas origin (0, ATLAS_CELL_H) = (0, 35)
+        texels_per_tile = 36 * 34
+        tex_values = [0x0000] * (128 * texels_per_tile)
+        tex_values[14 * texels_per_tile] = 0x1234
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas = ac.build_terrain_atlas_rgba5551_le(tex_values, 128, 512, ah, tpr)
+        ox, oy = ac.atlas_tile_origin(14, tpr)  # (0, 35)
+        self.assertEqual((ox, oy), (0, ac.ATLAS_CELL_H))
+        off = (oy * 512 + ox) * 2
+        self.assertEqual(atlas[off], 0x34)
+        self.assertEqual(atlas[off + 1], 0x12)
+
+    def _make_full_grid(self):
+        # Real grid from N64 source if present, else synthetic minimal.
+        if os.path.isdir(N64_TERRAIN_DIR):
+            path = os.path.join(N64_TERRAIN_DIR, 'src', 'assets', 'terrain_grid.c')
+            with open(path) as f:
+                return ac.parse_n64_terrain_grid_c(f.read())
+        return None
+
+    def test_atlas_uv_all_128_subregions_seam_coverage(self):
+        # COVERAGE GAP CLOSED: assert EVERY tile's 9 baked UVs land inside the
+        # correct atlas sub-region [origin+gutter, origin+TILE-gutter], so a
+        # bilinear tap at a content edge reads THIS tile's replicated gutter,
+        # never a neighbor. Prior test covered only tile (0,0).
+        grid_verts = self._make_full_grid()
+        if grid_verts is None:
+            self.skipTest('N64 terrain dir not found')
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas_verts = ac.bake_terrain_atlas_vertices(
+            grid_verts, 512, ah, tpr, ac.TERRAIN_PRE_SCALE)
+        self.assertEqual(len(atlas_verts), 128 * 9)
+        for ty in range(ac.TERRAIN_TILES_Y):
+            for tx in range(ac.TERRAIN_TILES_X):
+                t = ty * ac.TERRAIN_TILES_X + tx
+                ox, oy = ac.atlas_tile_origin(t, tpr)
+                # Allowed content+edge window for this tile within the atlas:
+                # in-tile UVs are [2,34] x [1,33]; add origin.
+                s_lo = ox + ac.TILE_GUTTER_S
+                s_hi = ox + (ac.TILE_W - ac.TILE_GUTTER_S)  # 34
+                t_lo = oy + ac.TILE_GUTTER_T
+                t_hi = oy + (ac.TILE_H - ac.TILE_GUTTER_T)  # 33
+                for v in range(9):
+                    pos, uv, rgba = atlas_verts[t * 9 + v]
+                    s, tt = uv
+                    self.assertGreaterEqual(
+                        s, s_lo, 'tile %d v%d: s=%g < sub-region lo %g' % (t, v, s, s_lo))
+                    self.assertLessEqual(
+                        s, s_hi, 'tile %d v%d: s=%g > sub-region hi %g' % (t, v, s, s_hi))
+                    self.assertGreaterEqual(
+                        tt, t_lo, 'tile %d v%d: t=%g < sub-region lo %g' % (t, v, tt, t_lo))
+                    self.assertLessEqual(
+                        tt, t_hi, 'tile %d v%d: t=%g > sub-region hi %g' % (t, v, tt, t_hi))
+
+    def test_atlas_bilinear_footprint_stays_in_cell_all_128(self):
+        # THE seam check with teeth: a bilinear tap samples floor(uv) and
+        # floor(uv)+1. For every tile's every vertex, that 2x2 footprint at the
+        # MAX edge must stay within THIS tile's atlas cell (origin .. origin+
+        # ATLAS_CELL_W/H), so it can never read a neighbor's content. The
+        # horizontal 2-col gutter + vertical 1-row replicated spacer guarantee
+        # this. Prior bake (no spacer) bled at the bottom edge (t=33 -> tap row
+        # 34 = next stacked tile); this test would have caught it.
+        grid_verts = self._make_full_grid()
+        if grid_verts is None:
+            self.skipTest('N64 terrain dir not found')
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas_verts = ac.bake_terrain_atlas_vertices(
+            grid_verts, 512, ah, tpr, ac.TERRAIN_PRE_SCALE)
+        for ty in range(ac.TERRAIN_TILES_Y):
+            for tx in range(ac.TERRAIN_TILES_X):
+                t = ty * ac.TERRAIN_TILES_X + tx
+                ox, oy = ac.atlas_tile_origin(t, tpr)
+                cell_s_max = ox + ac.ATLAS_CELL_W  # exclusive next-cell boundary
+                cell_t_max = oy + ac.ATLAS_CELL_H
+                for v in range(9):
+                    pos, uv, rgba = atlas_verts[t * 9 + v]
+                    s, tt = uv
+                    # bilinear footprint upper texel = floor(uv)+1; for the seam
+                    # to be safe it must be strictly inside the cell.
+                    import math as _m
+                    s_hi_tap = _m.floor(s) + 1
+                    t_hi_tap = _m.floor(tt) + 1
+                    self.assertLess(
+                        s_hi_tap, cell_s_max,
+                        'tile %d v%d: bilinear s-tap %d >= next cell %d (seam bleed)'
+                        % (t, v, s_hi_tap, cell_s_max))
+                    self.assertLess(
+                        t_hi_tap, cell_t_max,
+                        'tile %d v%d: bilinear t-tap %d >= next cell %d (seam bleed)'
+                        % (t, v, t_hi_tap, cell_t_max))
+
+    def test_atlas_uv_all_128_within_atlas_bounds(self):
+        # Every baked UV must be strictly inside the pow2 atlas (CLAMP-safe).
+        grid_verts = self._make_full_grid()
+        if grid_verts is None:
+            self.skipTest('N64 terrain dir not found')
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas_verts = ac.bake_terrain_atlas_vertices(
+            grid_verts, 512, ah, tpr, ac.TERRAIN_PRE_SCALE)
+        for i, (pos, uv, rgba) in enumerate(atlas_verts):
+            s, t = uv
+            self.assertGreaterEqual(s, 0.0, 'vert %d s=%g' % (i, s))
+            self.assertLess(s, 512.0, 'vert %d s=%g >= atlas W' % (i, s))
+            self.assertGreaterEqual(t, 0.0, 'vert %d t=%g' % (i, t))
+            self.assertLess(t, float(ah), 'vert %d t=%g >= atlas H' % (i, t))
+
+    def test_atlas_uv_no_subregion_overlap_between_tiles(self):
+        # Two adjacent tiles must occupy disjoint atlas sub-regions; the gutter'd
+        # block ensures their content windows never overlap. Verify tile 0's max
+        # s (34) < tile 1's min s origin (36) -> a 2-texel gutter gap (cols 34,35
+        # of tile 0 and cols 0,1 of tile 1 are the replicated borders).
+        grid_verts = self._make_full_grid()
+        if grid_verts is None:
+            self.skipTest('N64 terrain dir not found')
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas_verts = ac.bake_terrain_atlas_vertices(
+            grid_verts, 512, ah, tpr, ac.TERRAIN_PRE_SCALE)
+        # tile 0 verts 0..8, tile 1 verts 9..17 (same row)
+        t0_max_s = max(atlas_verts[v][1][0] for v in range(0, 9))
+        t1_min_s = min(atlas_verts[v][1][0] for v in range(9, 18))
+        # tile 0 content ends at <=34, tile 1 content starts at origin(36)+2=38
+        self.assertLessEqual(t0_max_s, 34.0)
+        self.assertGreaterEqual(t1_min_s, 38.0)
+        self.assertLess(t0_max_s, t1_min_s)
+
+
 class TerrainTexEncodeTests(unittest.TestCase):
     """Terrain texture encoding tests with known values."""
 
@@ -587,6 +786,35 @@ class N64TerrainIntegrationTests(unittest.TestCase):
         self.assertEqual(len(blob), 36 * 34 * 2)
         # First byte must be 0x8b (LE lo byte of 0x538b)
         self.assertEqual(blob[0], 0x8b)
+
+    def test_real_atlas_512x512_pow2_and_s0_origin(self):
+        # Bake the real atlas: dims pow2, tile 0 first texel at atlas (0,0) = 0x538b LE.
+        src = self._read_src('terrain_tex.c')
+        vals = ac.parse_n64_hex_array_c(src, dtype='u16')
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        self.assertEqual((512 & 511), 0)            # W pow2
+        self.assertEqual(ah & (ah - 1), 0)          # H pow2
+        atlas = ac.build_terrain_atlas_rgba5551_le(vals, 128, 512, ah, tpr)
+        self.assertEqual(len(atlas), 512 * ah * 2)
+        # Tile 0 origin (0,0): LE bytes of 0x538b
+        self.assertEqual(atlas[0], 0x8b)
+        self.assertEqual(atlas[1], 0x53)
+        # Decode the atlas (0,0) texel; verify S0-spike RGB565 = 0x5385
+        r8, g8, b8, a8 = ac.unpack_rgba5551_be(atlas[1], atlas[0])
+        self.assertEqual(ac.pack_rgb565(r8, g8, b8), 0x5385)
+
+    def test_real_atlas_tile_content_matches_source(self):
+        # Sample tile 5's first texel: must equal source tile 5 first value, at
+        # atlas origin (5*36, 0).
+        src = self._read_src('terrain_tex.c')
+        vals = ac.parse_n64_hex_array_c(src, dtype='u16')
+        tpr, rows, ah = ac.terrain_atlas_dims(128, 512)
+        atlas = ac.build_terrain_atlas_rgba5551_le(vals, 128, 512, ah, tpr)
+        src_v = vals[5 * 36 * 34]  # tile 5 texel 0
+        ox, oy = ac.atlas_tile_origin(5, tpr)
+        off = (oy * 512 + ox) * 2
+        self.assertEqual(atlas[off], src_v & 0xFF)
+        self.assertEqual(atlas[off + 1], (src_v >> 8) & 0xFF)
 
     def test_terrain_detail_parse_count(self):
         src = self._read_src('terrain_detail.c')

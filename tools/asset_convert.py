@@ -438,40 +438,57 @@ def tile_vert_indices_terrain(tx, ty):
     return out
 
 
+# In-tile gutter offset: content starts at col 2 (2-col left gutter) and row 1
+# (1-row top gutter) within the 36x34 block.
+TILE_GUTTER_S = 2
+TILE_GUTTER_T = 1
+TILE_W = 36
+TILE_H = 34
+TERRAIN_TILES_X = 8   # N64 tile grid columns
+TERRAIN_TILES_Y = 16  # N64 tile grid rows
+
+
+def terrain_tile_in_tile_uv(grid_vert, tx, ty):
+    """Compute one vertex's in-tile texel UV within the 36x34 gutter'd block.
+
+    grid_vert: a single dict {'pos','uv','rgba'} from parse_n64_terrain_grid_c().
+    Returns (s_texel, t_texel) in [TILE_GUTTER_S, TILE_W-TILE_GUTTER_S] x
+    [TILE_GUTTER_T, TILE_H-TILE_GUTTER_T] = [2,34] x [1,33].
+
+    UV math (per terrain.c gDPSetTileSize windowing):
+      gSPTexture scale 0.5 -> final_s = global_S * 0.5 (S10.5 units).
+      uls_s10_5 = (tx*0x80 + 2) * 8 (the tile's TMEM window origin, S10.5).
+      s_tile_s10_5 = final_s - uls_s10_5; in texels = /32; add the gutter offset
+      so the content edge lands at col 2 (left gutter replicated to cols 0-1).
+    """
+    sx, sy = grid_vert['uv']
+    uls_s10_5 = (tx * 0x80 + 2) * 8
+    ult_s10_5 = (ty * 0x80 + 2) * 8
+    final_s = sx / 2.0
+    final_t = sy / 2.0
+    s_tile = final_s - uls_s10_5
+    t_tile = final_t - ult_s10_5
+    s_texel = s_tile / 32.0 + TILE_GUTTER_S
+    t_texel = t_tile / 32.0 + TILE_GUTTER_T
+    return s_texel, t_texel
+
+
 def bake_terrain_tile_vertices(grid_verts, tx, ty, pre_scale):
-    """Bake 9 per-tile vertices for tile (tx,ty) with absolute UV within 36x34 block.
+    """Bake 9 per-tile vertices for tile (tx,ty) with in-tile UV within 36x34 block.
 
     grid_verts: list of 594 dicts from parse_n64_terrain_grid_c().
     pre_scale:  float, applied to all positional coords (e.g. 0.005).
     Returns list of 9 (pos, uv, rgba) tuples ready for encode_vertex_prelit().
 
-    UV computation (per terrain.c comment):
-      global_S and global_T are the raw S10.5 integers from the grid.
-      gSPTexture scale = 1.0 (0x8000 in Q1.15 = 1.0). Wait:
-      Actually: uls_s10_5 = (tx*0x80+2)*8, final_s = global_S * 0.5 (scale=0x8000/2).
-
-    N64 gSPTexture: sc=0x8000 means scale_factor = 0x8000 / 0x8000 = 1.0 in S1.15
-    (the range is 0..1 with 0x8000 = 1.0). So final_s = global_S * 1.0 = global_S.
-    But terrain.c comment says 'gSPTexture scale 0.5 index the loaded 36x34 block'.
-    Let me use what the comment says: scale=0.5, final_s = global_S * 0.5.
-    uls_s10_5 = (tx*0x80 + 2) * 8.
-    s_tile_s10_5 = final_s - uls_s10_5.
-    s_tile_texels = s_tile_s10_5 / 32.0.
-    Then we add the gutter offset (2 cols left gutter) to align content:
-      s_abs = s_tile_texels + 2.0  (gutter_s = 2, gutter_t = 1).
-
-    This gives per-tile UVs: left-edge vertex at texel 2.0 (content start),
-    right-edge at texel 34.0 (right of content). Within 36-wide tile with CLAMP,
-    texels 0-1 = left gutter (replicated), 2-33 = content, 34-35 = right gutter.
+    UVs are LOCAL to the 36x34 block ([2,34]x[1,33]); for the single-atlas bake,
+    add the tile's atlas origin (see bake_terrain_atlas_vertices). This per-tile
+    form is retained for the fallback per-tile-texture path and the unit tests.
     """
     indices = tile_vert_indices_terrain(tx, ty)
     out = []
-    uls_s10_5 = (tx * 0x80 + 2) * 8
-    ult_s10_5 = (ty * 0x80 + 2) * 8
     for idx in indices:
         g = grid_verts[idx]
         x, y, z = g['pos']
-        sx, sy = g['uv']
         r, gb, b, a = g['rgba']
 
         # Apply pre-scale to positional coordinates
@@ -479,20 +496,111 @@ def bake_terrain_tile_vertices(grid_verts, tx, ty, pre_scale):
         py = round_half_away(y * pre_scale)
         pz = round_half_away(z * pre_scale)
 
-        # Compute absolute UV within the 36x34 per-tile texture block.
-        # Scale=0.5 per terrain.c comment; uls/ult in S10.5 units.
-        final_s = sx / 2.0
-        final_t = sy / 2.0
-        s_tile = final_s - uls_s10_5
-        t_tile = final_t - ult_s10_5
-        # Convert S10.5 -> texels then add gutter offset
-        s_texel = s_tile / 32.0 + 2.0
-        t_texel = t_tile / 32.0 + 1.0
+        s_texel, t_texel = terrain_tile_in_tile_uv(g, tx, ty)
+        out.append(((px, py, pz), (s_texel, t_texel), (r, gb, b, a)))
+    return out
 
-        pos = (px, py, pz)
-        uv = (s_texel, t_texel)
-        rgba = (r, gb, b, a)
-        out.append((pos, uv, rgba))
+
+# ---- Single gutter'd atlas (PRIMARY terrain texture path) ----------------------
+#
+# Atlas cell = the 36x34 source block PLUS a 1-row replicated bottom spacer, so
+# the cell stride is 36 wide x 35 tall. WHY the spacer: the N64 source block has a
+# 2-col horizontal gutter (cols 0,1 and 34,35) but only a 1-row vertical gutter
+# (rows 0 and 33). The far-edge vertices land at the gutter texels (col 34, row
+# 33). A bilinear tap there reads {col 34, col 35} horizontally (both inside the
+# 36-wide block -> safe) and {row 33, row 34} vertically. Row 34 would be the TOP
+# row of the next tile stacked below in the atlas -> seam bleed. The spacer row 34
+# is a replicated copy of row 33, so the bilinear tap reads only this tile's data.
+# (N64 avoided this with cmt=CLAMP; our flat atlas needs the physical spacer.)
+ATLAS_CELL_W = TILE_W       # 36 (the 2-col gutter already makes col 34/35 safe)
+ATLAS_CELL_H = TILE_H + 1   # 35 (34 block + 1 replicated bottom spacer row)
+
+
+def atlas_tile_origin(tile_idx, tiles_per_row):
+    """Return the (col_texel, row_texel) atlas origin of tile tile_idx.
+
+    Tiles pack left-to-right, top-to-bottom: tile t at grid (t % tiles_per_row,
+    t // tiles_per_row), origin = (col*ATLAS_CELL_W, row*ATLAS_CELL_H) texels.
+    """
+    col = tile_idx % tiles_per_row
+    row = tile_idx // tiles_per_row
+    return col * ATLAS_CELL_W, row * ATLAS_CELL_H
+
+
+def terrain_atlas_dims(num_tiles, atlas_w):
+    """Compute (tiles_per_row, rows, atlas_h_pow2) for a pow2-wide atlas.
+
+    atlas_w must be pow2 and >= ATLAS_CELL_W. Packs num_tiles into rows of
+    tiles_per_row = atlas_w // ATLAS_CELL_W; atlas_h is the next pow2 >=
+    rows*ATLAS_CELL_H. Raises ValueError if atlas_w is not pow2 or too small.
+    """
+    import math
+    if atlas_w < ATLAS_CELL_W or (atlas_w & (atlas_w - 1)) != 0:
+        raise ValueError('atlas_w must be pow2 and >= %d, got %d'
+                         % (ATLAS_CELL_W, atlas_w))
+    tiles_per_row = atlas_w // ATLAS_CELL_W
+    rows = (num_tiles + tiles_per_row - 1) // tiles_per_row
+    content_h = rows * ATLAS_CELL_H
+    atlas_h = 1 << math.ceil(math.log2(content_h))
+    return tiles_per_row, rows, atlas_h
+
+
+def build_terrain_atlas_rgba5551_le(tex_values, num_tiles, atlas_w, atlas_h,
+                                    tiles_per_row):
+    """Build a single gutter'd atlas image as little-endian RGBA5551 bytes.
+
+    tex_values: flat list of uint16 (big-endian N64 RGBA5551), 128*36*34 long.
+    Each tile's 36x34 block is copied to its atlas origin; row 34 of the cell is a
+    replicated copy of the block's bottom row (33) -> bilinear at the bottom edge
+    never reads the next stacked tile. Uncovered atlas areas are zero. Returns
+    bytes of length atlas_w * atlas_h * 2.
+    """
+    out = bytearray(atlas_w * atlas_h * 2)  # zero-initialized
+    texels_per_tile = TILE_W * TILE_H
+    for t in range(num_tiles):
+        base = t * texels_per_tile
+        ox, oy = atlas_tile_origin(t, tiles_per_row)
+        for ty_in in range(ATLAS_CELL_H):
+            # Spacer row (ty_in == TILE_H) replicates the block's last row.
+            src_row = ty_in if ty_in < TILE_H else TILE_H - 1
+            for tx_in in range(TILE_W):
+                v = tex_values[base + src_row * TILE_W + tx_in]
+                hi = (v >> 8) & 0xFF
+                lo = v & 0xFF
+                ax = ox + tx_in
+                ay = oy + ty_in
+                off = (ay * atlas_w + ax) * 2
+                out[off] = lo       # LE: lo first
+                out[off + 1] = hi   # hi second
+    return bytes(out)
+
+
+def bake_terrain_atlas_vertices(grid_verts, atlas_w, atlas_h, tiles_per_row,
+                                pre_scale):
+    """Bake all 128*9 terrain vertices with ABSOLUTE atlas UV coordinates.
+
+    For each tile (tx,ty) -> linear tile index t = ty*TERRAIN_TILES_X + tx,
+    each of its 9 vertices gets UV = (atlas_origin) + (in-tile [2,34]x[1,33]).
+    Positions are pre-scaled. Returns a flat list of 128*9 (pos, uv, rgba) tuples
+    in tile-major, then vertex-row-major order (matches the index pattern).
+    """
+    out = []
+    for ty in range(TERRAIN_TILES_Y):
+        for tx in range(TERRAIN_TILES_X):
+            t = ty * TERRAIN_TILES_X + tx
+            ox, oy = atlas_tile_origin(t, tiles_per_row)
+            indices = tile_vert_indices_terrain(tx, ty)
+            for idx in indices:
+                g = grid_verts[idx]
+                x, y, z = g['pos']
+                r, gb, b, a = g['rgba']
+                px = round_half_away(x * pre_scale)
+                py = round_half_away(y * pre_scale)
+                pz = round_half_away(z * pre_scale)
+                s_local, t_local = terrain_tile_in_tile_uv(g, tx, ty)
+                s_atlas = ox + s_local
+                t_atlas = oy + t_local
+                out.append(((px, py, pz), (s_atlas, t_atlas), (r, gb, b, a)))
     return out
 
 
