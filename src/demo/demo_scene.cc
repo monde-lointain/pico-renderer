@@ -16,7 +16,8 @@
 #include <string.h>
 
 #include "cmd/cmd.h"
-#include "demo/camera_path_gen.h"  // committed Q16.16 scripted V*P table
+#include "demo/camera_path_gen.h"    // committed Q16.16 scripted V*P table
+#include "demo/debug_terrain_gen.h"  // committed FLASH-CONST placeholder geometry
 #include "fixed/fixed.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"  // enum Button (free-fly toggle/nudge)
@@ -426,31 +427,20 @@ uint32_t demo_tree_geometry(struct Vtx* verts, uint16_t* idx) {
   return (uint32_t)(DEMO_TREE_COUNT * 4);
 }
 
-// ---- module-local terrain storage (referenced by the built stream) ---------
-static struct Vtx s_terrain_vtx[DEMO_TERRAIN_VERTS];
-static uint16_t s_terrain_idx[DEMO_TERRAIN_IDX];
-static struct Vtx s_tree_vtx[DEMO_TREE_VERTS];
-static uint16_t s_tree_idx[DEMO_TREE_IDX];
-static int s_terrain_geom_built;   // built once (geometry is static)
-static uint32_t s_terrain_vcount;  // verts emitted by demo_terrain_geometry
-static uint32_t s_tree_vcount;     // verts emitted by demo_tree_geometry
+// ---- module-local matrix / state storage (referenced by the built stream) --
+// The INPUT geometry (terrain + tree verts/indices) is NOT here: it lives in
+// FLASH as committed const arrays (debug_terrain_gen.h, g_debug_*), so it stays
+// out of .bss (RAM). The integration gate hit an RP2040 RAM overflow because
+// the placeholder geometry was computed into ~13 KB of static buffers at init;
+// baking it to flash-const frees that RAM. The demo submits LOAD_VERTS/
+// DRAW_TRIS pointers straight at the const arrays. The runtime
+// demo_terrain_geometry/demo_tree_geometry FILL functions remain (host tests +
+// the T0 D.1 swap seam use the fill API), but the device demo never fills RAM.
 static struct Mat4fx s_terrain_proj;
 static struct Mat4fx s_terrain_view;
 static struct Mat4fx s_freefly_vp;     // free-fly only: projection * view
 static struct Mat4fx s_terrain_model;  // identity (verts authored in world)
 static struct RenderState s_terrain_state;
-
-static void terrain_geom_build_once(void) {
-  if (s_terrain_geom_built) {
-    return;
-  }
-  // Capture the RETURNED vert counts (not the macro) so a T0 swap to D.1's
-  // real mesh whose vert count differs from DEMO_TERRAIN_VERTS can't silently
-  // mismatch the LOAD_VERTS window.
-  s_terrain_vcount = demo_terrain_geometry(s_terrain_vtx, s_terrain_idx);
-  s_tree_vcount = demo_tree_geometry(s_tree_vtx, s_tree_idx);
-  s_terrain_geom_built = 1;
-}
 
 // ---- scripted camera (deterministic; FLOAT-FREE per-frame path) ------------
 // Q5/TW-05 (Lead decision): the scripted path's V*P matrices are baked OFFLINE
@@ -538,7 +528,13 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
                             const struct DemoCamera* cam,
                             const struct DemoScroll* scroll,
                             struct DemoTelemetry* telem) {
-  terrain_geom_build_once();
+  // Vert counts driven by the committed const-array sizes (not a separate
+  // macro) so a T0 swap to D.1's baked arrays of a different length can't
+  // silently mismatch the LOAD_VERTS window.
+  uint32_t const terrain_vcount =
+      (uint32_t)(sizeof g_debug_terrain_vtx / sizeof g_debug_terrain_vtx[0]);
+  uint32_t const tree_vcount =
+      (uint32_t)(sizeof g_debug_tree_vtx / sizeof g_debug_tree_vtx[0]);
   s_cb.buf = buf;
   s_cb.cap = cap;
   cb_reset(&s_cb);
@@ -599,16 +595,15 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   push(CMD_SET_MATRIX, &c);
 
   // ---- terrain mesh: single LOAD_VERTS + DRAW_TRIS batch ----
-  // LOAD_VERTS.count is driven by the count RETURNED from demo_terrain_geometry
-  // (s_terrain_vcount), not the DEMO_TERRAIN_VERTS macro, so the T0 swap to
-  // D.1's real mesh can't silently mismatch the loaded window.
+  // Submitted straight from the FLASH-CONST arrays (g_debug_*), so no RAM input
+  // buffer. count comes from the const-array size (T0-swap-safe; see above).
   memset(&c, 0, sizeof c);
-  c.u.load_verts.ptr = s_terrain_vtx;
-  c.u.load_verts.count = (uint16_t)s_terrain_vcount;
+  c.u.load_verts.ptr = g_debug_terrain_vtx;
+  c.u.load_verts.count = (uint16_t)terrain_vcount;
   push(CMD_LOAD_VERTS, &c);
-  telem->cmdgen_verts += s_terrain_vcount;
+  telem->cmdgen_verts += terrain_vcount;
   memset(&c, 0, sizeof c);
-  c.u.draw_tris.idx = s_terrain_idx;
+  c.u.draw_tris.idx = g_debug_terrain_idx;
   c.u.draw_tris.tri_count = (uint16_t)DEMO_TERRAIN_TRIS;
   push(CMD_DRAW_TRIS, &c);
   telem->cmdgen_draws += 1;
@@ -616,12 +611,12 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
 
   // ---- tree billboards: second batch (same model transform) ----
   memset(&c, 0, sizeof c);
-  c.u.load_verts.ptr = s_tree_vtx;
-  c.u.load_verts.count = (uint16_t)s_tree_vcount;
+  c.u.load_verts.ptr = g_debug_tree_vtx;
+  c.u.load_verts.count = (uint16_t)tree_vcount;
   push(CMD_LOAD_VERTS, &c);
-  telem->cmdgen_verts += s_tree_vcount;
+  telem->cmdgen_verts += tree_vcount;
   memset(&c, 0, sizeof c);
-  c.u.draw_tris.idx = s_tree_idx;
+  c.u.draw_tris.idx = g_debug_tree_idx;
   c.u.draw_tris.tri_count = (uint16_t)DEMO_TREE_TRIS;
   push(CMD_DRAW_TRIS, &c);
   telem->cmdgen_draws += 1;
