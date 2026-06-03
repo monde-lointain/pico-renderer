@@ -28,7 +28,7 @@ Checks: >
 HeaderFilterRegex: '(src|tests)/'
 # Never lint: vendored third-party deps (FetchContent cache), generated headers
 # (pioasm output, asset tables), and the ImGui inspector header (Modern-C++ carve-out).
-ExcludeHeaderFilterRegex: '(\.deps-cache/|\.pio\.h$|/tests/harness/inspector\.h$)'
+ExcludeHeaderFilterRegex: '(\.deps-cache/|\.pio\.h$|/src/demo/assets/|/tests/harness/inspector\.h$)'
 WarningsAsErrors: ''
 CheckOptions:
   - key: readability-identifier-naming.StructCase

@@ -329,7 +329,7 @@ uint32_t demo_terrain_geometry(struct Vtx* verts, uint16_t* idx) {
   size_t const stride =
       (size_t)g_terrain_grid_vtx_len / (unsigned)DEMO_TERRAIN_VERTS;
   for (int i = 0; i < DEMO_TERRAIN_VERTS; ++i) {
-    memcpy(&verts[i], g_terrain_grid_vtx + (size_t)i * stride, stride);
+    memcpy(&verts[i], g_terrain_grid_vtx + ((size_t)i * stride), stride);
     uint8_t rgb[3];
     tile_debug_color(i / DEMO_TERRAIN_VERTS_PER_TILE, rgb);
     verts[i].c.rgba[0] = rgb[0];
