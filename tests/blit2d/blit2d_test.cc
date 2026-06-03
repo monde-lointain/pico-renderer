@@ -23,7 +23,8 @@ static uint16_t pack5551(int r5, int g5, int b5, int a1) {
                     ((b5 & 0x1F) << 1) | (a1 & 1));
 }
 
-// Oracle: convert an RGBA5551 word to RGB565 (5->6 green expand, alpha dropped).
+// Oracle: convert an RGBA5551 word to RGB565 (5->6 green expand, alpha
+// dropped).
 static uint16_t ref_5551_to_565(uint16_t px) {
   int r5 = (px >> 11) & 0x1F;
   int g5 = (px >> 6) & 0x1F;
@@ -49,10 +50,10 @@ TEST(Blit2dDecodeCi8, IndexFetchPointSampledMatchesOracle) {
   uint8_t ci8[8] = {0, 1, 2, 3, 4, 5, 6, 7};
   uint16_t tlut[256];
   memset(tlut, 0, sizeof tlut);
-  tlut[0] = pack5551(31, 0, 0, 1);   // red
-  tlut[1] = pack5551(0, 31, 0, 0);   // green
-  tlut[2] = pack5551(0, 0, 31, 1);   // blue
-  tlut[3] = pack5551(31, 31, 31, 0); // white
+  tlut[0] = pack5551(31, 0, 0, 1);    // red
+  tlut[1] = pack5551(0, 31, 0, 0);    // green
+  tlut[2] = pack5551(0, 0, 31, 1);    // blue
+  tlut[3] = pack5551(31, 31, 31, 0);  // white
   tlut[4] = pack5551(15, 7, 3, 1);
   tlut[5] = pack5551(1, 2, 4, 0);
   tlut[6] = pack5551(10, 20, 30, 1);
@@ -126,13 +127,35 @@ TEST(Blit2dHorizon, DegenerateSrcHeightClampsZero) {
   EXPECT_EQ(blit2d_horizon_row_1to1(100, 0, 240), 0);
 }
 
+// Seam-free 1:1 re-aspect: authored 4:3 source (320x240) with the horizon at
+// source row H. The helper must place the sky's horizon row at the SAME dst row
+// the 3D pass will use, so the 2D sky meets the terrain WITHOUT a seam. Here
+// the vertical axis is kept 1:1 (240 src rows -> 240 panel rows) so the source
+// row maps straight through; the helper is the single source of truth both
+// passes query. A mismatch here = a visible seam on the panel.
+TEST(Blit2dHorizon, SeamFreeAt1to1Panel) {
+  enum { SRC_H = 240, PANEL_H = 240 };
+  // Several plausible authored horizon rows.
+  int rows[] = {96, 108, 120, 132};
+  for (size_t i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+    int dst = blit2d_horizon_row_1to1(rows[i], SRC_H, PANEL_H);
+    // 240->240 is identity; the 3D pass queries the same helper -> same row ->
+    // no seam.
+    EXPECT_EQ(dst, rows[i]) << "row=" << rows[i];
+    // And it stays on-panel.
+    EXPECT_GE(dst, 0);
+    EXPECT_LT(dst, PANEL_H);
+  }
+}
+
 // ============================================================================
 // blit2d_panorama — scrolling cylinder assembly (CI8 + TLUT).
 // ============================================================================
 
 // Build a small panorama descriptor over a synthetic CI8 source.
 static void make_pano(struct Blit2dRect* r, const uint8_t* src,
-                      const uint16_t* tlut, int src_w, int src_h, int scroll_x) {
+                      const uint16_t* tlut, int src_w, int src_h,
+                      int scroll_x) {
   memset(r, 0, sizeof *r);
   r->mode = BLIT2D_PANORAMA;
   r->src = src;
@@ -260,7 +283,10 @@ static void grad_565(uint16_t top, uint16_t hor, int row, int dst_y,
   int span = horizon_row - dst_y;
   int t = row - dst_y;
   if (span <= 0) {
-    *r = hr; *g = hg; *b = hb; return;
+    *r = hr;
+    *g = hg;
+    *b = hb;
+    return;
   }
   if (t < 0) t = 0;
   if (t > span) t = span;

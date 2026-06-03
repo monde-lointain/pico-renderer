@@ -134,7 +134,8 @@ RdrErr blit2d_clouds(const struct Blit2dRect* r, uint16_t* fb) {
   int cr = b2d_r5(r->cloud_color), cg = b2d_g6(r->cloud_color),
       cb = b2d_b5(r->cloud_color);
 
-  // Gradient spans [dst_y, horizon_row]; below the horizon clamps to sky_horizon.
+  // Gradient spans [dst_y, horizon_row]; below the horizon clamps to
+  // sky_horizon.
   int span = (int)r->horizon_row - y0;
 
   for (int dy = 0; dy < dsth; ++dy) {

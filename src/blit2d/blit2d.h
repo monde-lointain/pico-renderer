@@ -19,7 +19,8 @@
 // 1:1 re-aspect: the panel is 240x240 (square), but N64 source art is authored
 // for the 4:3 320x240 framebuffer. The vertical horizon mapping is recomputed
 // for 1:1 (see blit2d_horizon_row_1to1) so the 2D sky meets the 3D terrain
-// horizon WITHOUT a seam — the 3D pass and this blit share the same horizon row.
+// horizon WITHOUT a seam — the 3D pass and this blit share the same horizon
+// row.
 //
 // Sampling note (T3): this module ships a SELF-CONTAINED minimal CI8/I8 decode
 // (approach (b), for independence from the concurrently-landing tex module).
@@ -43,8 +44,9 @@ struct Blit2dRect {
   uint8_t mode;  // enum Blit2dMode
 
   // --- source window (PANORAMA: CI8 indices; CLOUDS: I8 intensity) ---------
-  const void* src;   // CI8 (uint8_t indices) or I8 (uint8_t intensity), null-ok
-  const void* tlut;  // PANORAMA: RGBA5551 uint16_t[256] palette; CLOUDS: ignored
+  const void* src;  // CI8 (uint8_t indices) or I8 (uint8_t intensity), null-ok
+  const void*
+      tlut;  // PANORAMA: RGBA5551 uint16_t[256] palette; CLOUDS: ignored
   uint16_t src_w, src_h;  // source dims in texels (PANORAMA src_w == cylinder
                           // circumference, e.g. 512). pow2 not required.
 
@@ -58,8 +60,9 @@ struct Blit2dRect {
                       // selects which source rows map to the dst band.
 
   // --- horizon (both modes) ------------------------------------------------
-  int16_t horizon_row;  // dst row (screen Y) where the sky meets the 3D horizon;
-                        // shared with the 3D pass so the seam disappears.
+  int16_t
+      horizon_row;  // dst row (screen Y) where the sky meets the 3D horizon;
+                    // shared with the 3D pass so the seam disappears.
 
   // --- CLOUDS gradient + cloud color ---------------------------------------
   uint16_t sky_top;      // RGB565 sky color at dst_y (top of the gradient)
