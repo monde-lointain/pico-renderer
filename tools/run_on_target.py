@@ -265,6 +265,13 @@ def parse_args(argv):
         help="threshold check, e.g. 'frame_us<=16667' (repeatable)",
     )
     parser.add_argument("--no-flash", action="store_true", help="skip flash; just read")
+    parser.add_argument(
+        "--raw-out",
+        default=None,
+        metavar="PATH",
+        help="write every captured raw device line to PATH (for per-frame "
+        "sequence cross-checks, e.g. the T0 host↔device fb_crc diff)",
+    )
     return parser.parse_args(argv)
 
 
@@ -292,6 +299,12 @@ def main(argv):
         return 4
 
     raw_lines = read_lines_from_tty(tty, args.sentinel, args.timeout)
+
+    if args.raw_out is not None:
+        with open(args.raw_out, "w") as out:
+            for line in raw_lines:
+                out.write(line + "\n")
+
     parsed = parse_stream(raw_lines)
 
     sys.stdout.write("--- device output ---\n")

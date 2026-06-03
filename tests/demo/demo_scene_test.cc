@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "demo/camera_path_gen.h"  // committed scripted V*P table (float-free)
@@ -355,6 +356,73 @@ TEST(TerrainSceneGuard, PeakTvertUnderCapAcrossScriptedLoop) {
       << "peak tverts far above the loaded vert count — vertex sharing "
          "regressed?";
   EXPECT_LT(peak, (uint32_t)RDR_MAX_TVERTS) << "peak tverts over the pool cap";
+}
+
+// CRC32 (IEEE, reflected; poly 0xEDB88320) over the framebuffer BYTES — must be
+// byte-identical to main.cc's fb_crc32 so the host reference equals the device
+// serial CRC. Both targets are little-endian → identical fb bytes → bit-equal
+// CRC whenever the pipeline is float-free (the offline-baked Q16.16 camera
+// guarantees that — TW-05 / ScriptedMvpComesOnlyFromCommittedTable).
+static uint32_t host_fb_crc32(const uint16_t* fb, int n) {
+  const uint8_t* p = (const uint8_t*)fb;
+  size_t const len = (size_t)n * sizeof(uint16_t);
+  uint32_t crc = 0xFFFFFFFFU;
+  for (size_t i = 0; i < len; ++i) {
+    crc ^= p[i];
+    for (int k = 0; k < 8; ++k) {
+      uint32_t const mask = (uint32_t)(-(int32_t)(crc & 1U));
+      crc = (crc >> 1) ^ (0xEDB88320U & mask);
+    }
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
+// HOST fb_crc REFERENCE DUMP (T0 host↔device cross-check generator). Env-gated
+// so normal ctest SKIPS it; set DUMP_FB_CRC_FRAMES=N to replay main.cc's
+// scripted loop for N frames on host and print `frame=K fb_crc=...` per frame —
+// the reference the on-target probe diffs the device USB-CDC serial against.
+// Mirrors main.cc EXACTLY: init cam/scroll, then per frame build→render→crc→
+// advance (cam.frame==loop index, scripted ignores input).
+TEST(TerrainSceneGuard, DumpFbCrcReferenceSequence) {
+  const char* env = getenv("DUMP_FB_CRC_FRAMES");
+  if (env == nullptr) {
+    GTEST_SKIP()
+        << "set DUMP_FB_CRC_FRAMES=N to emit the host fb_crc reference";
+  }
+  long const frames = strtol(env, nullptr, 10);
+  if (frames < 1) {
+    GTEST_SKIP() << "DUMP_FB_CRC_FRAMES must be >= 1";
+  }
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);
+  demo_scroll_init(&scroll);
+  for (long f = 0; f < frames; ++f) {
+    render_terrain(&cam, &scroll, &telem);
+    uint32_t const crc = host_fb_crc32(g_fb.px, RDR_SCREEN_W * RDR_SCREEN_H);
+    // Sum per-tile bin overflow: the ONLY "lost geometry" drop possible here
+    // (pool can't exhaust — peak tverts < cap; mesh indices are valid). The
+    // rest of tris_dropped is legitimate backface-cull / near-reject /
+    // guard-clip. binof>0 is the real missing-geometry alarm the plan means.
+    uint32_t binof = 0;
+    uint32_t maxtile = 0;  // worst single-tile demand = count + dropped (the
+                           // RDR_REFS_PER_TILE the worst tile actually needs)
+    for (int t = 0; t < GEOM_NUM_TILES; ++t) {
+      binof += g_frame.geom.tiles[t].dropped;
+      uint32_t const demand =
+          g_frame.geom.tiles[t].count + g_frame.geom.tiles[t].dropped;
+      if (demand > maxtile) {
+        maxtile = demand;
+      }
+    }
+    printf("frame=%u fb_crc=%08x dropped=%u tris=%u binof=%u maxtile=%u\n",
+           (unsigned)f, crc, (unsigned)g_frame.geom.tris_dropped,
+           (unsigned)g_frame.geom.tris_total, (unsigned)binof,
+           (unsigned)maxtile);
+    demo_camera_advance(&cam, 0, 0);
+    demo_scroll_advance(&scroll);
+  }
 }
 
 // Locate the PROJECTION-target SET_MATRIX command in a built stream; returns

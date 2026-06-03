@@ -91,10 +91,16 @@ int main(void) {
     // Per-STAGE telemetry: cmdgen (single-core front-end scene build) is called
     // out separately from geom transform/bin (tris=/dropped=) and back-end
     // raster (workers=). cam_mode surfaces the scripted/free-fly toggle.
+    // `frame=` is the 0-based scripted-frame index — the alignment key for the
+    // host↔device fb_crc cross-check (T0): the firmware does NOT wait for the
+    // USB-CDC host to attach, so leading frames are dropped from any capture;
+    // matching device `frame=K` against the host reference's `frame=K` makes
+    // the comparison robust to that enumeration delay (and to ACM
+    // re-enumeration).
     plat_log(
-        "frame_ms=%u cmdgen_cmds=%u cmdgen_draws=%u cmdgen_tris=%u tris=%u "
-        "dropped=%u scroll=%u cam_mode=%u workers=%u fb_crc=%08x\n",
-        (unsigned)(t1 - t0), (unsigned)telem.cmdgen_commands,
+        "frame=%u frame_ms=%u cmdgen_cmds=%u cmdgen_draws=%u cmdgen_tris=%u "
+        "tris=%u dropped=%u scroll=%u cam_mode=%u workers=%u fb_crc=%08x\n",
+        (unsigned)frame, (unsigned)(t1 - t0), (unsigned)telem.cmdgen_commands,
         (unsigned)telem.cmdgen_draws, (unsigned)telem.cmdgen_tris,
         (unsigned)s_frame.geom.tris_total, (unsigned)s_frame.geom.tris_dropped,
         (unsigned)telem.scroll_phase, (unsigned)s_cam.mode,
