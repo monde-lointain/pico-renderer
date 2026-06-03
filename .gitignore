@@ -27,3 +27,5 @@ tags
 [._]*.un~
 /.deps-cache/
 .git_idle_attempts
+# Harness-managed agent worktrees (parallel-stream isolation; never commit)
+/.claude/worktrees/

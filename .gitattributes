@@ -1,0 +1,5 @@
+# WORKFLOW.md is an append-heavy backlog edited by every parallel stream; the
+# built-in union merge driver keeps both sides' added lines instead of
+# conflicting on each fan-in. (Stream notes are distinct sections, so union is
+# clean; eyeball after a large multi-stream merge.)
+WORKFLOW.md merge=union
