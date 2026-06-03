@@ -32,9 +32,11 @@ uint16_t blend_pixel(uint8_t mode, uint16_t src, uint16_t dst);
 //   BLEND_ALPHA : out = round(src*a + dst*(255-a) over 255), per channel.
 //   BLEND_ADD   : out = clamp255(round(src*a / 255) + dst), per channel.
 // Channel math is unpacked to 8-bit, blended, then repacked to 565 (so the 565
-// quantization is the same as a fresh pack). All divides are by 255 over
-// non-negative operands -> truncation toward zero (host<->device
-// bit-identical).
+// quantization is the same as a fresh pack). Rounding is an independent +127
+// bias applied before each /255; the divide itself is over non-negative
+// operands -> truncation == floor (host<->device bit-identical). See blend.cc
+// for why this round-to-nearest is deliberate and NOT the same as a pure
+// truncating divide.
 uint16_t blend_pixel_alpha(uint8_t mode, uint16_t src, uint8_t src_alpha,
                            uint16_t dst);
 

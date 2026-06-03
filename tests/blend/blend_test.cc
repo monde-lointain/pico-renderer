@@ -106,6 +106,34 @@ TEST(Blend, AddOntoBlackIsScaledSrc) {
   EXPECT_EQ(blend_pixel_alpha(BLEND_ADD, src, 0xFF, 0x0000), src);
 }
 
+// Readable mid-alpha additive onto a non-black/non-white dst (the sweep covers
+// endpoints; this pins the interior arithmetic). src=white, a=0x80 -> source
+// contributes round(255*128/255) = 128 per channel, added onto dst.
+TEST(Blend, AddMidAlphaOntoGrayDst) {
+  uint16_t const src = 0xFFFF;  // white source
+  uint16_t const dst = 0x4208;  // mid-gray-ish (R5=8 G6=16 B5=8)
+  uint16_t const out = blend_pixel_alpha(BLEND_ADD, src, 0x80, dst);
+  uint8_t dr;
+  uint8_t dg;
+  uint8_t db;
+  oracle_unpack565(dst, &dr, &dg, &db);
+  uint8_t orr;
+  uint8_t og;
+  uint8_t ob;
+  oracle_unpack565(out, &orr, &og, &ob);
+  // Expected per channel = clamp255(128 + dst); compare within 565 slack.
+  int const er = (dr + 128 > 255) ? 255 : (dr + 128);
+  int const eg = (dg + 128 > 255) ? 255 : (dg + 128);
+  int const eb = (db + 128 > 255) ? 255 : (db + 128);
+  EXPECT_NEAR((int)orr, er, 8);
+  EXPECT_NEAR((int)og, eg, 8);
+  EXPECT_NEAR((int)ob, eb, 8);
+  // Sanity: additive made it strictly brighter than dst (none of these clamp).
+  EXPECT_GT((int)orr, (int)dr);
+  EXPECT_GT((int)og, (int)dg);
+  EXPECT_GT((int)ob, (int)db);
+}
+
 // ---- fog_lerp endpoints ----------------------------------------------------
 TEST(Fog, LerpEndpoints) {
   uint16_t const color = 0xF800;                 // red
@@ -219,4 +247,49 @@ TEST(Fog, LerpMatchesOracleSweep) {
       }
     }
   }
+}
+
+// ---- oracle coverage-multiply branch ---------------------------------------
+// The oracle's effective source alpha = texel_alpha * coverage. Every sweep
+// above passes coverage=1.0, leaving the multiply untested. Here coverage<1
+// must scale a fully-opaque texel: oracle_blend(ALPHA, a=255, cov=0.5) must
+// equal oracle_blend(ALPHA, a=128, cov=1.0) -- i.e. coverage folds into alpha.
+TEST(Oracle, BlendCoverageScalesSourceAlpha) {
+  uint8_t const dst_rgb[3] = {30, 90, 200};
+  // Opaque texel (a=255) at half coverage.
+  uint8_t const src_full[4] = {255, 0, 0, 255};
+  uint8_t cov_half[3];
+  ASSERT_EQ(oracle_blend(BLEND_ALPHA, src_full, 0.5F, dst_rgb, cov_half), 0);
+
+  // Same source color at ~half alpha (0.5*255 = 127.5 -> 128), full coverage.
+  uint8_t const src_half[4] = {255, 0, 0, 128};
+  uint8_t full_cov[3];
+  ASSERT_EQ(oracle_blend(BLEND_ALPHA, src_half, 1.0F, dst_rgb, full_cov), 0);
+
+  // Both compute src*0.5 + dst*0.5 (within float-rounding of the 127.5 split).
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_NEAR((int)cov_half[i], (int)full_cov[i], 1)
+        << "channel " << i << " cov_half=" << (int)cov_half[i]
+        << " full_cov=" << (int)full_cov[i];
+  }
+
+  // And both sit roughly midway between src and dst (not a no-op / not opaque).
+  // Midpoints precomputed as ints (no division inside EXPECT_NEAR's float ctx).
+  int const mid_r = 142;  // (255 + 30) / 2
+  int const mid_g = 45;   // (0 + 90) / 2
+  int const mid_b = 100;  // (0 + 200) / 2
+  EXPECT_NEAR((int)cov_half[0], mid_r, 2);
+  EXPECT_NEAR((int)cov_half[1], mid_g, 2);
+  EXPECT_NEAR((int)cov_half[2], mid_b, 2);
+}
+
+// coverage=0 fully erases the source contribution (effective alpha 0 -> dst).
+TEST(Oracle, BlendZeroCoverageIsDst) {
+  uint8_t const dst_rgb[3] = {12, 34, 56};
+  uint8_t const src[4] = {200, 100, 50, 255};  // opaque texel
+  uint8_t out[3];
+  ASSERT_EQ(oracle_blend(BLEND_ALPHA, src, 0.0F, dst_rgb, out), 0);
+  EXPECT_EQ((int)out[0], 12);
+  EXPECT_EQ((int)out[1], 34);
+  EXPECT_EQ((int)out[2], 56);
 }

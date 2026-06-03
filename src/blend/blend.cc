@@ -16,10 +16,12 @@
 // FIXED-POINT PARITY: channels are unpacked to 8-bit, blended with integer
 // math, then repacked to 565. The alpha-over and additive blends divide an
 // 8-bit product sum by 255; both operands are non-negative so the divide
-// truncates toward zero -- bit-identical host<->device (matches the project's
-// num/area2 truncation semantics). The +127 bias gives round-to-nearest before
-// the divide. Validated against the float oracle (oracle_blend) within
-// tolerance.
+// truncates toward zero == floor -- same floor discipline as raster's num/area2
+// (raster.cc), and bit-identical host<->device. NOTE: the +127 is an
+// INDEPENDENT round-to-nearest bias applied BEFORE the /255 -- this is NOT what
+// num/area2 does (that divide is pure truncation, no bias). Do not "reconcile"
+// the two: the +127 is deliberate here and the whole expression is validated
+// bit-exact against the float oracle (oracle_blend) across all inputs.
 #include "blend/blend.h"
 
 #include "gfx/framebuffer.h"
