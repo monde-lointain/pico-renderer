@@ -20,6 +20,7 @@ add_subdirectory(tex)
 add_subdirectory(shade)
 add_subdirectory(blend)
 add_subdirectory(sched)
+add_subdirectory(blit2d)  # Wave-D D.5: 2D sky background blits (NEW module)
 add_subdirectory(demo)
 
 # Final executable, one entry point per platform.
