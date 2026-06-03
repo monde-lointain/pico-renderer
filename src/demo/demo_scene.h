@@ -79,47 +79,48 @@ enum {
 // surfaced as the cmdgen telemetry counter, not the Command count.
 enum { DEMO_TERRAIN_CMD_CAP = 32 };
 
-// ---- scripted camera (deterministic; integer/fixed per-frame advance) -------
-// Keyframes are world-space eye/look targets in PRE-SCALED fixed-point world
-// units (Q16.16). The path is a closed loop of segments; each segment is walked
-// over a fixed integer number of frames, so the per-frame eye/look is a pure
-// integer-fractional interpolation of two keyframes (no float). The view+MVP
-// matrix is then BAKED (float, one-time setup) from that integer pose. The C1
-// camera lesson is pinned: the eye stays in front of the geometry (positive
-// view-z) and OFF the near plane for the whole path (no near-clip needed yet).
+// ---- scripted camera (deterministic; FLOAT-FREE per-frame path) -------------
+// Q5/TW-05 (Lead decision): the scripted path's V*P matrices are baked OFFLINE
+// to a committed Q16.16 table (src/demo/camera_path_gen.h, g_scripted_mvp[N])
+// by src/demo/gen_camera_path.py. The runtime scripted per-frame path is JUST
+// an integer index into that table (g_scripted_mvp[frame %
+// SCRIPTED_FRAME_COUNT]) — NO float, so host and device read the SAME committed
+// bytes -> bit-identical fb_crc. The keyframe poses + interpolation schedule
+// live in the generator; these enums define that schedule and (by construction)
+// SCRIPTED_FRAME_COUNT == DEMO_CAM_KEYFRAMES * DEMO_CAM_FRAMES_PER_SEG. The C1
+// camera lesson is pinned: the eye stays in front of the geometry, OFF the near
+// plane for the whole loop (no near-clip needed yet). FREE-FLY is the
+// sanctioned on-device-float exception (interactive, never fb_crc-compared).
 enum {
   DEMO_CAM_KEYFRAMES = 4,        // closed loop (last connects back to first)
   DEMO_CAM_FRAMES_PER_SEG = 120  // fixed integer frames per keyframe segment
 };
 
-// One scripted keyframe (pre-scaled fixed-point world coords, Q16.16).
-struct DemoCamKey {
-  fx16_16 eye[3];   // camera position
-  fx16_16 look[3];  // look-at target
-};
-
-// Camera mode: deterministic scripted path vs interactive free-fly.
+// Camera mode: deterministic scripted path (table) vs interactive free-fly.
 enum DemoCamMode { DEMO_CAM_SCRIPTED = 0, DEMO_CAM_FREEFLY = 1 };
 
-// Camera state. ALL per-frame mutation is integer: `frame` advances by 1, and
-// the free-fly eye/yaw move by fixed integer deltas. No float members.
+// Camera state. The SCRIPTED per-frame mutation is integer-only (`frame`
+// advances by 1; rendering reads the committed table). eye/look/yaw are the
+// FREE-FLY handoff state, mutated only by fixed integer deltas. No float
+// members; nothing on the scripted path touches float.
 struct DemoCamera {
   uint8_t mode;     // enum DemoCamMode
   uint32_t frame;   // scripted-path frame counter (advances by 1)
-  fx16_16 eye[3];   // current eye (Q16.16, pre-scaled world)
-  fx16_16 look[3];  // current look-at target (Q16.16)
-  int32_t yaw_q16;  // free-fly heading (Q16.16; index into the sin table)
+  fx16_16 eye[3];   // free-fly eye (Q16.16, pre-scaled world)
+  fx16_16 look[3];  // free-fly look-at target (Q16.16)
+  int32_t yaw_q16;  // free-fly heading reserve (Q16.16)
 };
 
-// Initialize the camera to the scripted N64 start pose (eye derived from the
-// LOCKED N64 initial eye (3210,-3330,7330) * DEMO_SCENE_SCALE).
+// Initialize the camera to the scripted N64 start pose (eye = the LOCKED N64
+// initial eye (3210,-3330,7330) * DEMO_SCENE_SCALE, committed as Q16.16
+// constants — no runtime float).
 void demo_camera_init(struct DemoCamera* cam);
 
 // Advance the camera one frame from `held`/`pressed` button bitmasks (enum
-// Button). Pure integer per-frame path (no float):
+// Button). Per-frame path is integer-only:
 //   * BTN_A edge (in `pressed`) toggles scripted <-> free-fly.
-//   * scripted: frame++ then sample the keyframe loop by integer interpolation.
-//   * free-fly: D-pad/face buttons move eye + heading by fixed integer deltas.
+//   * scripted: frame++ (rendering then indexes the committed V*P table).
+//   * free-fly: D-pad/face buttons move eye by fixed integer deltas.
 void demo_camera_advance(struct DemoCamera* cam, uint32_t held,
                          uint32_t pressed);
 

@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "demo/camera_path_gen.h"  // committed scripted V*P table (float-free)
 #include "gfx/framebuffer.h"
 #include "gtest/gtest.h"
 #include "platform/platform.h"  // enum Button (camera trace)
@@ -153,10 +154,13 @@ static void render_terrain(const struct DemoCamera* cam,
   struct Command cmds[DEMO_TERRAIN_CMD_CAP];
   uint32_t const n =
       demo_terrain_build(cmds, DEMO_TERRAIN_CMD_CAP, cam, scroll, telem);
-  ASSERT_GT(n, 0U);
-  ASSERT_LE(n, (uint32_t)DEMO_TERRAIN_CMD_CAP);
-  uint32_t const last = (n - 1) % (uint32_t)DEMO_TERRAIN_CMD_CAP;
-  ASSERT_EQ(cmds[last].op, (uint8_t)CMD_END);
+  // Plain control-flow bound (not gtest ASSERT, which the static analyzer does
+  // not model) so the direct cmds[n-1] index below is provably in range.
+  if (n < 1U || n > (uint32_t)DEMO_TERRAIN_CMD_CAP) {
+    FAIL() << "demo_terrain_build returned out-of-range n=" << n;
+    return;
+  }
+  ASSERT_EQ(cmds[n - 1].op, (uint8_t)CMD_END);
 
   g_frame.fb = g_fb.px;
   g_frame.width = RDR_SCREEN_W;
@@ -296,8 +300,8 @@ TEST(TerrainSceneGuard, ScriptedPathStaysOffNearPlane) {
   demo_camera_init(&cam);
   demo_scroll_init(&scroll);
 
-  uint32_t const total_frames =
-      (uint32_t)DEMO_CAM_KEYFRAMES * (uint32_t)DEMO_CAM_FRAMES_PER_SEG;
+  // The committed table IS the rendered path now; cover its whole loop.
+  uint32_t const total_frames = (uint32_t)SCRIPTED_FRAME_COUNT;
   // Sample the loop at a stride so the test stays fast but covers each segment.
   for (uint32_t f = 0; f < total_frames; f += 15) {
     render_terrain(&cam, &scroll, &telem);
@@ -307,6 +311,55 @@ TEST(TerrainSceneGuard, ScriptedPathStaysOffNearPlane) {
     for (int k = 0; k < 15; ++k) {
       demo_camera_advance(&cam, 0, 0);
       demo_scroll_advance(&scroll);
+    }
+  }
+}
+
+// Locate the PROJECTION-target SET_MATRIX command in a built stream; returns
+// its matrix pointer, or null if absent.
+static const struct Mat4fx* find_proj_matrix(const struct Command* cmds,
+                                             uint32_t n) {
+  for (uint32_t i = 0; i < n; ++i) {
+    if (cmds[i].op == (uint8_t)CMD_SET_MATRIX &&
+        cmds[i].u.set_matrix.target == (uint8_t)MTX_PROJECTION) {
+      return cmds[i].u.set_matrix.mat;
+    }
+  }
+  return nullptr;
+}
+
+// SCRIPTED PER-FRAME PATH IS FLOAT-FREE (Q5/TW-05): the V*P the scripted scene
+// submits must come ONLY from the committed Q16.16 table g_scripted_mvp — i.e.
+// it must bit-equal g_scripted_mvp[frame % SCRIPTED_FRAME_COUNT]. A regression
+// that reintroduces a per-frame float bake (or a wrong index) breaks this. The
+// committed bytes are identical host and device, so this also pins the
+// bit-identical fb_crc invariant the Lead decision is about.
+TEST(TerrainSceneGuard, ScriptedMvpComesOnlyFromCommittedTable) {
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);
+  demo_scroll_init(&scroll);
+  ASSERT_EQ(cam.mode, (uint8_t)DEMO_CAM_SCRIPTED);
+
+  // Probe several frames spread across the loop (incl. a wrap past the end).
+  uint32_t const probes[6] = {0,   1,   119,
+                              240, 479, (uint32_t)SCRIPTED_FRAME_COUNT + 7};
+  for (int p = 0; p < 6; ++p) {
+    // Advance the integer frame counter to the probe frame.
+    while (cam.frame < probes[p]) {
+      demo_camera_advance(&cam, 0, 0);
+    }
+    struct Command cmds[DEMO_TERRAIN_CMD_CAP];
+    uint32_t const n =
+        demo_terrain_build(cmds, DEMO_TERRAIN_CMD_CAP, &cam, &scroll, &telem);
+    const struct Mat4fx* vp = find_proj_matrix(cmds, n);
+    ASSERT_NE(vp, nullptr) << "no PROJECTION matrix in scripted stream";
+    uint32_t const idx = cam.frame % (uint32_t)SCRIPTED_FRAME_COUNT;
+    for (int e = 0; e < 16; ++e) {
+      EXPECT_EQ(vp->m[e], g_scripted_mvp[idx][e])
+          << "scripted V*P[" << e << "] != committed table at frame "
+          << cam.frame << " (a float bake re-crept in?)";
     }
   }
 }

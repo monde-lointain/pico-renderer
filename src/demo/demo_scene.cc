@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "cmd/cmd.h"
+#include "demo/camera_path_gen.h"  // committed Q16.16 scripted V*P table
 #include "fixed/fixed.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"  // enum Button (free-fly toggle/nudge)
@@ -430,10 +431,12 @@ static struct Vtx s_terrain_vtx[DEMO_TERRAIN_VERTS];
 static uint16_t s_terrain_idx[DEMO_TERRAIN_IDX];
 static struct Vtx s_tree_vtx[DEMO_TREE_VERTS];
 static uint16_t s_tree_idx[DEMO_TREE_IDX];
-static int s_terrain_geom_built;  // built once (geometry is static)
+static int s_terrain_geom_built;   // built once (geometry is static)
+static uint32_t s_terrain_vcount;  // verts emitted by demo_terrain_geometry
+static uint32_t s_tree_vcount;     // verts emitted by demo_tree_geometry
 static struct Mat4fx s_terrain_proj;
 static struct Mat4fx s_terrain_view;
-static struct Mat4fx s_terrain_vp;     // projection * view
+static struct Mat4fx s_freefly_vp;     // free-fly only: projection * view
 static struct Mat4fx s_terrain_model;  // identity (verts authored in world)
 static struct RenderState s_terrain_state;
 
@@ -441,106 +444,45 @@ static void terrain_geom_build_once(void) {
   if (s_terrain_geom_built) {
     return;
   }
-  demo_terrain_geometry(s_terrain_vtx, s_terrain_idx);
-  demo_tree_geometry(s_tree_vtx, s_tree_idx);
+  // Capture the RETURNED vert counts (not the macro) so a T0 swap to D.1's
+  // real mesh whose vert count differs from DEMO_TERRAIN_VERTS can't silently
+  // mismatch the LOAD_VERTS window.
+  s_terrain_vcount = demo_terrain_geometry(s_terrain_vtx, s_terrain_idx);
+  s_tree_vcount = demo_tree_geometry(s_tree_vtx, s_tree_idx);
   s_terrain_geom_built = 1;
 }
 
-// ---- scripted camera (deterministic integer advance) -----------------------
-// N64 LOCKED initial eye, raw world coords (pre-scaled by DEMO_SCENE_SCALE).
-#define N64_EYE_X 3210.0
-#define N64_EYE_Y (-3330.0)
-#define N64_EYE_Z 7330.0
-
-// Keyframe loop (Q16.16 pre-scaled world). Built once in demo_camera_init (the
-// float trig here is one-time SETUP). The eye orbits the front (+Z) hemisphere
-// at a fixed radius/height so the whole field stays in front of the near plane
-// for the entire loop (no near-clip needed at T0); keyframe 0 is the N64 pose.
-static struct DemoCamKey s_keys[DEMO_CAM_KEYFRAMES];
-static int s_keys_built;
-
-static void keys_build_once(void) {
-  if (s_keys_built) {
-    return;
-  }
-  // Keyframe 0: the LOCKED N64 eye (pre-scaled). The N64 frame is Y-DOWN; the
-  // placeholder uses Y-UP (ground in XZ, camera above), so the camera height is
-  // |N64_EYE_Y| (the magnitude is the locked fact; the handedness mapping is
-  // ours for the placeholder). All keyframes look at the field center (origin).
-  double const ex0 = N64_EYE_X * DEMO_SCENE_SCALE;     // ~16.05
-  double const ey0 = -(N64_EYE_Y * DEMO_SCENE_SCALE);  // ~16.65 (up)
-  double const ez0 = N64_EYE_Z * DEMO_SCENE_SCALE;     // ~36.65
-  // Orbit radius/height in the XZ plane derived from the N64 pose so the path
-  // is self-similar; the camera stays well above the ground (positive view-z
-  // for the whole field -> off the near plane for the entire loop).
-  double const radius = sqrt((ex0 * ex0) + (ez0 * ez0));  // ~40 units (XZ)
-  double const height = ey0;                              // ~16.65 (camera up)
-  double const pi = 3.14159265358979323846;
-  for (int k = 0; k < DEMO_CAM_KEYFRAMES; ++k) {
-    double ang;
-    double rad;
-    double hgt;
-    if (k == 0) {
-      // Exact N64 XZ position; height = |N64_EYE_Y|.
-      s_keys[k].eye[0] = fxd(ex0);
-      s_keys[k].eye[1] = fxd(ey0);
-      s_keys[k].eye[2] = fxd(ez0);
-      s_keys[k].look[0] = 0;
-      s_keys[k].look[1] = 0;
-      s_keys[k].look[2] = 0;
-      continue;
-    }
-    // Remaining keyframes: orbit the field center in XZ at a similar radius,
-    // varying height for visual interest. The camera always looks down at the
-    // up-facing ground, so the field never goes behind it. Pull the radius in
-    // (and lower the camera) on the mid keyframe for the near-terrain-fill
-    // worst case while staying off the near plane.
-    ang = atan2(ex0, ez0) + ((double)k * (pi / 6.0));  // <=90deg orbit sweep
-    rad = (k == 2) ? (radius * 0.7) : radius;          // worst-case fill at k2
-    hgt = (k == 2) ? (height * 0.7) : height;
-    s_keys[k].eye[0] = fxd(rad * sin(ang));
-    s_keys[k].eye[1] = fxd(hgt);
-    s_keys[k].eye[2] = fxd(rad * cos(ang));
-    s_keys[k].look[0] = 0;
-    s_keys[k].look[1] = 0;
-    s_keys[k].look[2] = 0;
-  }
-  s_keys_built = 1;
-}
+// ---- scripted camera (deterministic; FLOAT-FREE per-frame path) ------------
+// Q5/TW-05 (Lead decision): the scripted path's V*P matrices are baked OFFLINE
+// to a committed Q16.16 table (src/demo/camera_path_gen.h, g_scripted_mvp) by
+// src/demo/gen_camera_path.py; the per-frame path here just integer-indexes
+// that table (g_scripted_mvp[frame % SCRIPTED_FRAME_COUNT]). Host and device
+// read the SAME committed bytes -> bit-identical fb_crc. There is NO on-device
+// float on the scripted path (the old keyframe trig + per-frame double mat-mul
+// were deleted). The keyframe poses + interpolation schedule live in the
+// generator, which mirrors this file's enums; the table is the source of truth.
+//
+// The DemoCamera eye/look fields are retained only as the FREE-FLY handoff
+// state (free-fly is the sanctioned on-device-float exception);
+// demo_camera_init seeds them with the LOCKED N64 start pose as committed
+// Q16.16 CONSTANTS (no runtime float). 3210/-3330/7330 * 0.005, Y negated (N64
+// Y-down -> our Y-up), computed once via asset_convert.to_q16_16 (matches
+// gen_camera_path frame 0).
+#define N64_START_EYE_X 1051853 /* fx16_16(3210*0.005)  ~16.05 */
+#define N64_START_EYE_Y 1091174 /* fx16_16(3330*0.005)  ~16.65 (up) */
+#define N64_START_EYE_Z 2401894 /* fx16_16(7330*0.005)  ~36.65 */
 
 void demo_camera_init(struct DemoCamera* cam) {
-  keys_build_once();
   memset(cam, 0, sizeof *cam);
   cam->mode = DEMO_CAM_SCRIPTED;
   cam->frame = 0;
-  cam->eye[0] = s_keys[0].eye[0];
-  cam->eye[1] = s_keys[0].eye[1];
-  cam->eye[2] = s_keys[0].eye[2];
-  cam->look[0] = s_keys[0].look[0];
-  cam->look[1] = s_keys[0].look[1];
-  cam->look[2] = s_keys[0].look[2];
+  cam->eye[0] = N64_START_EYE_X;
+  cam->eye[1] = N64_START_EYE_Y;
+  cam->eye[2] = N64_START_EYE_Z;
+  cam->look[0] = 0;
+  cam->look[1] = 0;
+  cam->look[2] = 0;
   cam->yaw_q16 = 0;
-}
-
-// Integer linear interpolation in Q16.16: a + (b-a)*num/den. 64-bit widen so
-// the (delta*num) product never overflows. PURE INTEGER (no float).
-static fx16_16 lerp_q16(fx16_16 a, fx16_16 b, int32_t num, int32_t den) {
-  int64_t const delta = (int64_t)b - (int64_t)a;
-  return (fx16_16)((int64_t)a + ((delta * (int64_t)num) / (int64_t)den));
-}
-
-// Sample the scripted keyframe loop at the camera's integer frame (no float).
-static void scripted_sample(struct DemoCamera* cam) {
-  uint32_t const seg =
-      (cam->frame / (uint32_t)DEMO_CAM_FRAMES_PER_SEG) % DEMO_CAM_KEYFRAMES;
-  uint32_t const next = (seg + 1) % DEMO_CAM_KEYFRAMES;
-  int32_t const num = (int32_t)(cam->frame % (uint32_t)DEMO_CAM_FRAMES_PER_SEG);
-  int32_t const den = (int32_t)DEMO_CAM_FRAMES_PER_SEG;
-  for (int i = 0; i < 3; ++i) {
-    cam->eye[i] = lerp_q16(s_keys[seg].eye[i], s_keys[next].eye[i], num, den);
-    cam->look[i] =
-        lerp_q16(s_keys[seg].look[i], s_keys[next].look[i], num, den);
-  }
 }
 
 // Free-fly integer deltas (Q16.16 per frame). Conservative so the path stays
@@ -577,9 +519,10 @@ void demo_camera_advance(struct DemoCamera* cam, uint32_t held,
     }
     return;  // free-fly does not advance the scripted frame
   }
-  // Scripted: advance one integer frame, then sample the keyframe loop.
+  // Scripted: advance one integer frame. The rendered V*P is read from the
+  // committed table at demo_terrain_build time (g_scripted_mvp[frame % N]) —
+  // no pose math, no float, on this path.
   ++cam->frame;
-  scripted_sample(cam);
 }
 
 // ---- panorama / cloud scroll (deterministic integer phase) -----------------
@@ -602,20 +545,33 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
 
   memset(telem, 0, sizeof *telem);
   telem->scroll_phase = scroll->phase;
-
-  // ---- one-time-per-frame MVP bake from the INTEGER camera pose (setup) ----
-  // Q16.16 integer -> double only here, for the float lookAt/perspective bake.
-  double const ex = (double)cam->eye[0] / 65536.0;
-  double const ey = (double)cam->eye[1] / 65536.0;
-  double const ez = (double)cam->eye[2] / 65536.0;
-  double const lx = (double)cam->look[0] / 65536.0;
-  double const ly = (double)cam->look[1] / 65536.0;
-  double const lz = (double)cam->look[2] / 65536.0;
-  // 1:1 aspect, fill 240x240. near/far cover the pre-scaled field.
-  m_perspective(&s_terrain_proj, 50.0, 1.0, 0.5, 80.0);
-  m_lookat(&s_terrain_view, ex, ey, ez, lx, ly, lz, 0.0, 1.0, 0.0);
-  mat4_mul(&s_terrain_vp, &s_terrain_proj, &s_terrain_view);
   m_identity(&s_terrain_model);  // verts authored directly in pre-scaled world
+
+  // ---- V*P selection: scripted = committed table (FLOAT-FREE); free-fly =
+  //      on-device float bake (the sanctioned interactive exception) ---------
+  const struct Mat4fx* vp;
+  if (cam->mode == DEMO_CAM_SCRIPTED) {
+    // FLOAT-FREE: index the offline-baked Q16.16 V*P table by integer frame.
+    // The committed bytes are identical host and device -> bit-identical
+    // fb_crc. g_scripted_mvp[i] is fx16_16[16] == struct Mat4fx layout.
+    uint32_t const idx = cam->frame % (uint32_t)SCRIPTED_FRAME_COUNT;
+    vp = (const struct Mat4fx*)g_scripted_mvp[idx];
+  } else {
+    // FREE-FLY (interactive, non-profiled): bake from the integer eye/look.
+    // Float is allowed ONLY here; this path is never fb_crc-compared.
+    double const ex = (double)cam->eye[0] / 65536.0;
+    double const ey = (double)cam->eye[1] / 65536.0;
+    double const ez = (double)cam->eye[2] / 65536.0;
+    double const lx = (double)cam->look[0] / 65536.0;
+    double const ly = (double)cam->look[1] / 65536.0;
+    double const lz = (double)cam->look[2] / 65536.0;
+    // 1:1 aspect, fill 240x240. near/far cover the pre-scaled field. (Must
+    // match gen_camera_path.py's FOV/aspect/near/far so the two paths agree.)
+    m_perspective(&s_terrain_proj, 50.0, 1.0, 0.5, 80.0);
+    m_lookat(&s_terrain_view, ex, ey, ez, lx, ly, lz, 0.0, 1.0, 0.0);
+    mat4_mul(&s_freefly_vp, &s_terrain_proj, &s_terrain_view);
+    vp = &s_freefly_vp;
+  }
 
   struct Command c;
   memset(&c, 0, sizeof c);
@@ -625,7 +581,7 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   memset(&c, 0, sizeof c);
   c.u.set_matrix.target = MTX_PROJECTION;
   c.u.set_matrix.push = 0;
-  c.u.set_matrix.mat = &s_terrain_vp;
+  c.u.set_matrix.mat = vp;
   push(CMD_SET_MATRIX, &c);
 
   memset(&s_terrain_state, 0, sizeof s_terrain_state);
@@ -643,11 +599,14 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   push(CMD_SET_MATRIX, &c);
 
   // ---- terrain mesh: single LOAD_VERTS + DRAW_TRIS batch ----
+  // LOAD_VERTS.count is driven by the count RETURNED from demo_terrain_geometry
+  // (s_terrain_vcount), not the DEMO_TERRAIN_VERTS macro, so the T0 swap to
+  // D.1's real mesh can't silently mismatch the loaded window.
   memset(&c, 0, sizeof c);
   c.u.load_verts.ptr = s_terrain_vtx;
-  c.u.load_verts.count = (uint16_t)DEMO_TERRAIN_VERTS;
+  c.u.load_verts.count = (uint16_t)s_terrain_vcount;
   push(CMD_LOAD_VERTS, &c);
-  telem->cmdgen_verts += DEMO_TERRAIN_VERTS;
+  telem->cmdgen_verts += s_terrain_vcount;
   memset(&c, 0, sizeof c);
   c.u.draw_tris.idx = s_terrain_idx;
   c.u.draw_tris.tri_count = (uint16_t)DEMO_TERRAIN_TRIS;
@@ -658,9 +617,9 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   // ---- tree billboards: second batch (same model transform) ----
   memset(&c, 0, sizeof c);
   c.u.load_verts.ptr = s_tree_vtx;
-  c.u.load_verts.count = (uint16_t)DEMO_TREE_VERTS;
+  c.u.load_verts.count = (uint16_t)s_tree_vcount;
   push(CMD_LOAD_VERTS, &c);
-  telem->cmdgen_verts += DEMO_TREE_VERTS;
+  telem->cmdgen_verts += s_tree_vcount;
   memset(&c, 0, sizeof c);
   c.u.draw_tris.idx = s_tree_idx;
   c.u.draw_tris.tri_count = (uint16_t)DEMO_TREE_TRIS;
