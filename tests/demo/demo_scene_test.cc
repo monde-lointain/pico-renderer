@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "demo/camera_path_gen.h"  // committed scripted V*P table (float-free)
+#include "demo/debug_terrain_gen.h"  // committed FLASH-CONST placeholder geometry
 #include "gfx/framebuffer.h"
 #include "gtest/gtest.h"
 #include "platform/platform.h"  // enum Button (camera trace)
@@ -362,4 +363,65 @@ TEST(TerrainSceneGuard, ScriptedMvpComesOnlyFromCommittedTable) {
           << cam.frame << " (a float bake re-crept in?)";
     }
   }
+}
+
+// FLASH-CONST GEOMETRY MATCHES THE FILL API (integration-gate RAM fix): the
+// committed const arrays (g_debug_*) the device demo submits MUST be byte-
+// identical to what the runtime fill functions (demo_terrain_geometry /
+// demo_tree_geometry) produce. This is the closed-loop guard: if someone edits
+// the placeholder fill math without regenerating debug_terrain_gen.h (via
+// gen_debug_terrain.py), this fails — keeping the committed flash geometry
+// honest. (The fill API is retained for host tests + the T0 D.1 swap seam; the
+// device demo reads the flash arrays so the input geometry stays out of .bss.)
+// Field-wise vertex compare (NOT memcmp — Vtx has a union, so its object
+// representation is not unique and a raw memcmp is undefined / tidy-flagged).
+static int vtx_eq(const struct Vtx* a, const struct Vtx* b) {
+  for (int i = 0; i < 3; ++i) {
+    if (a->pos[i] != b->pos[i]) {
+      return 0;
+    }
+  }
+  for (int i = 0; i < 2; ++i) {
+    if (a->uv[i] != b->uv[i]) {
+      return 0;
+    }
+  }
+  for (int i = 0; i < 4; ++i) {
+    if (a->c.rgba[i] != b->c.rgba[i]) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+TEST(TerrainSceneGuard, FlashConstGeometryMatchesFillApi) {
+  static struct Vtx tv[DEMO_TERRAIN_VERTS];
+  static uint16_t ti[DEMO_TERRAIN_IDX];
+  static struct Vtx rv[DEMO_TREE_VERTS];
+  static uint16_t ri[DEMO_TREE_IDX];
+  uint32_t const nv = demo_terrain_geometry(tv, ti);
+  uint32_t const nrv = demo_tree_geometry(rv, ri);
+
+  // Counts agree with the committed const-array sizes.
+  uint32_t const gv =
+      (uint32_t)(sizeof g_debug_terrain_vtx / sizeof g_debug_terrain_vtx[0]);
+  uint32_t const grv =
+      (uint32_t)(sizeof g_debug_tree_vtx / sizeof g_debug_tree_vtx[0]);
+  ASSERT_EQ(nv, gv);
+  ASSERT_EQ(nrv, grv);
+
+  // Positions/colors byte-identical (field-wise; covers winding via indices).
+  for (uint32_t i = 0; i < nv; ++i) {
+    EXPECT_TRUE(vtx_eq(&tv[i], &g_debug_terrain_vtx[i]))
+        << "terrain vert " << i << " drifted from gen_debug_terrain.py";
+  }
+  for (uint32_t i = 0; i < nrv; ++i) {
+    EXPECT_TRUE(vtx_eq(&rv[i], &g_debug_tree_vtx[i]))
+        << "tree vert " << i << " drifted — regenerate debug_terrain_gen.h";
+  }
+  // Index arrays are plain uint16 (no union/padding) — memcmp is fine.
+  EXPECT_EQ(memcmp(ti, g_debug_terrain_idx, sizeof ti), 0)
+      << "terrain indices drifted — regenerate debug_terrain_gen.h";
+  EXPECT_EQ(memcmp(ri, g_debug_tree_idx, sizeof ri), 0)
+      << "tree indices drifted — regenerate debug_terrain_gen.h";
 }
