@@ -596,11 +596,15 @@ void demo_scroll_advance(struct DemoScroll* s) {
 // The N64 sky_bg.c draws a cloud PANEL first (the sky dome): an I8 64x64 cloud
 // texture composited via G_CC_BLENDIDECALA over a per-vertex blue Gouraud
 // gradient, with the panorama (sky_emit) + terrain drawn OVER it. We mirror
-// that layering ADDITIVELY: the panorama backdrop (blits[0]) stays full-frame
-// (T3a untouched), and blits[1] overlays CLOUDS on the visible SKY band above
-// the projected horizon (rows [0, horizon_row)), composited over the same blue
-// gradient. The 3D terrain z-writes over both, so the cloud strip is exactly
-// the visible sky — gap-free (T3 N4). Colors are lifted verbatim from the N64
+// that layering without touching the panorama path: blits[0] stays the
+// full-frame panorama backdrop (T3a), and blits[1] paints CLOUDS over the
+// visible SKY band above the projected horizon (rows [0, horizon_row)). The
+// cloud blit writes OPAQUELY — it REPLACES the panorama in that band,
+// compositing the I8 clouds over its OWN PROCEDURAL blue gradient (NOT the
+// panorama's pixels); "over the panorama" is screen-layer order, not an alpha
+// blend against it. The 3D terrain z-writes over both, so the cloud strip is
+// exactly the visible sky — gap-free (T3 N4). Colors are lifted verbatim from
+// the N64
 // panel template (sky_bg.c MG_SKY_PANEL_TMPL, the 3 emitted tris use verts
 // 0..4):
 //   sky_top     {11,197,255}   panel TOP row  (v0/v3/v4) — sky blue

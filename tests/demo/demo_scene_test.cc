@@ -830,8 +830,16 @@ TEST(TerrainSceneGuard, CloudLayerOverSkyBand) {
       ++diff;
     }
   }
-  EXPECT_GT(diff, 0)
-      << "cloud layer did not change the sky band — texture unbound / no-op?";
+  // Require a SUBSTANTIAL change (> one screen row), not just a stray pixel:
+  // the whole band is above the look-down terrain edge so it is pure sky, and
+  // the cloud composite differs from the panorama across essentially all of it.
+  // A >1-row floor also fails LOUDLY (rather than silently passing on a fluke)
+  // if a future pose let terrain fill the band — flagging the test needs a
+  // sky-guaranteed frame, not masking a no-op cloud blit.
+  EXPECT_GT(diff, RDR_SCREEN_W)
+      << "cloud layer barely changed the sky band — texture unbound / no-op? "
+         "diff="
+      << diff;
 }
 
 // Look-down scripted frame 374 bakes horizon_row=0 (the level horizon projects
