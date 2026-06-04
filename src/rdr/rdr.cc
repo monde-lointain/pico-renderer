@@ -40,6 +40,7 @@ RdrErr rdr_begin_frame(struct Frame* f) {
   f->cmds = 0;
   f->clear_color = 0;  // black
   f->clear_pending = 0;
+  f->blit_count = 0;  // T3: demo fills the 2D sky-blit list after begin_frame
   return RDR_OK;
 }
 
@@ -62,6 +63,14 @@ RdrErr rdr_end_frame(struct Frame* f) {
   uint16_t const c = f->clear_color;
   for (int i = 0; i < px; ++i) {
     f->fb[i] = c;
+  }
+  // T3: 2D sky background blits, full-frame BEFORE the 3D sweep. No depth —
+  // they do NOT seed the zbuf, so the opaque raster z-test wins wherever
+  // geometry covers (the terrain horizon silhouette is the seam). rdr owns the
+  // ORDERING (stays platform-free); the demo fills f->blits[0,blit_count). A
+  // bad descriptor returns non-OK and is skipped (best-effort background).
+  for (int i = 0; i < (int)f->blit_count; ++i) {
+    blit2d_render(&f->blits[i], f->fb);
   }
   return sched_rasterize(f);
 }
