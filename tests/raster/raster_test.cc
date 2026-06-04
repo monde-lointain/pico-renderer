@@ -2854,3 +2854,385 @@ TEST(RasterCoverage, XluFragmentStampsFullCoverage) {
   }
   EXPECT_EQ(found, 1) << "no XLU fragment blended — test is vacuous";
 }
+
+// ===========================================================================
+// R.4 — 2-cycle detail multitexture (TEXEL1 sample + shade_pixel2). cycle ==
+// COMBINE_TWO_CYCLE with a valid tex1 routes the detail combiner; the default
+// (cycle == ONE / no tex1) is BYTE-IDENTICAL to the pre-R.4 textured path. The
+// TEXEL1 UV = base UV << detail_shift.
+// ===========================================================================
+namespace {
+
+// A second 8x8 detail texture, distinct gradient from make_tex565 so its
+// contribution is observable separately from the base.
+void make_tex565_detail(struct Tex565* t) {
+  for (int v = 0; v < K_TEXH; ++v) {
+    for (int u = 0; u < K_TEXW; ++u) {
+      uint8_t const r = (uint8_t)(200 - (u * 20));
+      uint8_t const g = (uint8_t)(60 + (v * 20));
+      uint8_t const b = (uint8_t)(128 + ((u + v) * 8));
+      t->px[(v * K_TEXW) + u] = rgb565_pack(r, g, b);
+    }
+  }
+}
+
+// Build a 2-cycle render state: base TEXEL0 in rs.tex, detail TEXEL1 in
+// rs.tex1, cycle1 = TEXEL0 * TEXEL1, cycle2 = COMBINED * ENV(white) ~= cycle1.
+void mk_two_cycle_state(struct RenderState* rs, const struct Tex565* base,
+                        const struct Tex565* detail, uint8_t detail_shift) {
+  memset(rs, 0, sizeof(*rs));
+  tex_desc_565(&rs->tex, base);
+  tex_desc_565(&rs->tex1, detail);
+  rs->cycle = COMBINE_TWO_CYCLE;
+  rs->detail_shift = detail_shift;
+  rs->combiner.mode = COMBINE_CUSTOM;
+  rs->combiner.a = CC_TEXEL0;
+  rs->combiner.b = CC_ZERO;
+  rs->combiner.c = CC_TEXEL1;
+  rs->combiner.d = CC_ZERO;
+  rs->combiner2.mode = COMBINE_CUSTOM;
+  rs->combiner2.a = CC_COMBINED;
+  rs->combiner2.b = CC_ZERO;
+  rs->combiner2.c = CC_ENVIRONMENT;
+  rs->combiner2.d = CC_ZERO;
+  rs->env_color = 0xFFFF;  // white ENV
+  rs->alpha_cmp = 0;
+}
+
+// Expected 2-cycle 565 for an interior covered pixel (mirrors raster's integer
+// math: perspective UV, detail UV = base UV << shift, tex_sample both,
+// shade_pixel2). Returns 1 + writes *out if covered, else 0.
+int ref_two_cycle_pixel(const struct RefTri* t, const struct RenderState* rs,
+                        int sx, int sy, uint16_t* out) {
+  fx12_4 const cx = (fx12_4)((sx << 4) + 8);
+  fx12_4 const cy = (fx12_4)((sy << 4) + 8);
+  int32_t const w0 = edge_i(t->x1, t->y1, t->x2, t->y2, cx, cy);
+  int32_t const w1 = edge_i(t->x2, t->y2, t->x0, t->y0, cx, cy);
+  int32_t const w2 = edge_i(t->x0, t->y0, t->x1, t->y1, cx, cy);
+  int const in0 = (w0 > 0) || (w0 == 0 && t->tl1);
+  int const in1 = (w1 > 0) || (w1 == 0 && t->tl2);
+  int const in2 = (w2 > 0) || (w2 == 0 && t->tl0);
+  if (!(in0 && in1 && in2)) {
+    return 0;
+  }
+  int64_t const numiw =
+      ((int64_t)w0 * t->iw0) + ((int64_t)w1 * t->iw1) + ((int64_t)w2 * t->iw2);
+  int32_t const inv_w = (int32_t)(numiw / (int64_t)t->area2);
+  if (inv_w <= 0) {
+    return 0;
+  }
+  int64_t const numu = ((int64_t)w0 * t->u_iw0) + ((int64_t)w1 * t->u_iw1) +
+                       ((int64_t)w2 * t->u_iw2);
+  int64_t const numv = ((int64_t)w0 * t->v_iw0) + ((int64_t)w1 * t->v_iw1) +
+                       ((int64_t)w2 * t->v_iw2);
+  int32_t const u_iw_p = (int32_t)(numu / (int64_t)t->area2);
+  int32_t const v_iw_p = (int32_t)(numv / (int64_t)t->area2);
+  fx16_16 const u_q16 = (fx16_16)(((int64_t)u_iw_p << 27) / (int64_t)inv_w);
+  fx16_16 const v_q16 = (fx16_16)(((int64_t)v_iw_p << 27) / (int64_t)inv_w);
+  uint8_t const gr =
+      gouraud_ref(w0, w1, w2, t->s0[0], t->s1[0], t->s2[0], t->area2);
+  uint8_t const gg =
+      gouraud_ref(w0, w1, w2, t->s0[1], t->s1[1], t->s2[1], t->area2);
+  uint8_t const gb =
+      gouraud_ref(w0, w1, w2, t->s0[2], t->s1[2], t->s2[2], t->area2);
+  uint16_t const shade565 = rgb565_pack(gr, gg, gb);
+  uint16_t const texel0_565 = tex_sample(&rs->tex, u_q16, v_q16, 0);
+  fx16_16 const u1_q16 = (fx16_16)(u_q16 << rs->detail_shift);
+  fx16_16 const v1_q16 = (fx16_16)(v_q16 << rs->detail_shift);
+  uint16_t const texel1_565 = tex_sample(&rs->tex1, u1_q16, v1_q16, 0);
+  uint8_t keep = 1;
+  *out = shade_pixel2(rs, texel0_565, texel1_565, shade565, &keep);
+  return 1;
+}
+
+}  // namespace
+
+// 2-cycle textured render must EXACTLY equal the TEXEL0+TEXEL1+shade_pixel2
+// reference at every covered pixel (bit-exact wiring: TEXEL1 sample, detail UV,
+// feed-forward). Uses high-frequency textures so a UV/transposition slip shows.
+TEST(RasterDetail, TwoCycleMatchesShadePixel2Exact) {
+  struct Tex565 base;
+  struct Tex565 detail;
+  make_tex565(&base);
+  make_tex565_detail(&detail);
+  struct RenderState rs;
+  mk_two_cycle_state(&rs, &base, &detail, 0);
+  const struct RenderState* table = &rs;
+
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x20000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x08000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t expected;
+      if (!ref_two_cycle_pixel(&rt, &rs, sx, sy, &expected)) {
+        continue;
+      }
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "2-cycle detail pixel (" << sx << "," << sy << ") mismatch";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+}
+
+// The detail texture VISIBLY modulates the base: a 2-cycle render must differ
+// from a 1-cycle (base-only) render at a meaningful fraction of covered pixels
+// (magnitude-independent: count pixels where the two outputs differ).
+TEST(RasterDetail, DetailModulatesVsOneCycle) {
+  struct Tex565 base;
+  struct Tex565 detail;
+  make_tex565_smooth(&base);    // low-frequency base
+  make_tex565_detail(&detail);  // distinct detail
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  // 1-cycle (base only) render.
+  struct RenderState rs1;
+  memset(&rs1, 0, sizeof(rs1));
+  tex_desc_565(&rs1.tex, &base);
+  rs1.combiner.mode = COMBINE_MODULATE;  // TEXEL0 * SHADE (white) = TEXEL0
+  rs1.cycle = COMBINE_ONE_CYCLE;
+  static uint16_t fb1[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf1[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb1[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb1, zbuf1, &rs1, 0);
+
+  // 2-cycle (base * detail) render.
+  struct RenderState rs2;
+  mk_two_cycle_state(&rs2, &base, &detail, 0);
+  static uint16_t fb2[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf2[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb2[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb2, zbuf2, &rs2, 0);
+
+  int covered = 0;
+  int differ = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t const a = fb1[(sy * RDR_SCREEN_W) + sx];
+      uint16_t const b = fb2[(sy * RDR_SCREEN_W) + sx];
+      if (a == 0 && b == 0) {
+        continue;  // background (uncovered) on both
+      }
+      ++covered;
+      if (a != b) {
+        ++differ;
+      }
+    }
+  }
+  EXPECT_GT(covered, 50) << "too few covered pixels — test is vacuous";
+  // The detail multiply darkens most pixels -> the vast majority must differ.
+  EXPECT_GT(differ, covered / 2)
+      << "detail texture did not visibly modulate the base (" << differ << "/"
+      << covered << ")";
+}
+
+// detail_shift CHANGES the detail frequency: shift=0 vs shift=1 sample the
+// detail texture at different positions, so the 2-cycle output differs at a
+// meaningful fraction of pixels (sample positions differ).
+TEST(RasterDetail, DetailShiftChangesFrequency) {
+  struct Tex565 base;
+  struct Tex565 detail;
+  make_tex565_smooth(&base);
+  make_tex565_detail(&detail);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  struct RenderState rs0;
+  mk_two_cycle_state(&rs0, &base, &detail, 0);
+  struct RenderState rs1;
+  mk_two_cycle_state(&rs1, &base, &detail, 1);
+
+  static uint16_t fb0[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t fb1[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb0[i] = 0;
+    fb1[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb0, zbuf, &rs0, 0);
+  raster_tile(0, &bin, pool, fb1, zbuf, &rs1, 0);
+
+  int covered = 0;
+  int differ = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t const a = fb0[(sy * RDR_SCREEN_W) + sx];
+      uint16_t const b = fb1[(sy * RDR_SCREEN_W) + sx];
+      if (a == 0 && b == 0) {
+        continue;
+      }
+      ++covered;
+      if (a != b) {
+        ++differ;
+      }
+    }
+  }
+  EXPECT_GT(covered, 50) << "too few covered pixels — test is vacuous";
+  EXPECT_GT(differ, 0)
+      << "detail_shift did not change the detail sample positions";
+}
+
+// GATE: a 2-cycle render state whose tex1 is INVALID (data==0) must take the
+// EXACT 1-cycle path (shade_pixel on TEXEL0), byte-identical to a plain 1-cycle
+// material with the same combiner. Guards the "tex1 invalid => 1-cycle" rule.
+TEST(RasterDetail, TwoCycleWithNoTex1IsByteIdenticalToOneCycle) {
+  struct Tex565 base;
+  make_tex565(&base);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x20000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x08000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  // 1-cycle baseline: MODULATE TEXEL0 * SHADE.
+  struct RenderState rs1;
+  memset(&rs1, 0, sizeof(rs1));
+  tex_desc_565(&rs1.tex, &base);
+  rs1.combiner.mode = COMBINE_MODULATE;
+  rs1.cycle = COMBINE_ONE_CYCLE;
+
+  // "2-cycle" state with NO tex1 (tex1 zeroed) but SAME cycle-1 combiner -> the
+  // gate must fall back to the 1-cycle shade_pixel path.
+  struct RenderState rs2;
+  memset(&rs2, 0, sizeof(rs2));
+  tex_desc_565(&rs2.tex, &base);
+  rs2.combiner.mode = COMBINE_MODULATE;
+  rs2.cycle = COMBINE_TWO_CYCLE;  // claims 2-cycle...
+  rs2.detail_shift = 2;           // ...but tex1.data==0 -> 1-cycle path
+  // combiner2 left zero (COMBINE_MODULATE) — never consulted on the gate.
+
+  static uint16_t fb1[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t fb2[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb1[i] = 0;
+    fb2[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb1, zbuf, &rs1, 0);
+  raster_tile(0, &bin, pool, fb2, zbuf, &rs2, 0);
+
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    ASSERT_EQ(fb1[i], fb2[i])
+        << "2-cycle-with-no-tex1 must be byte-identical to 1-cycle at fb[" << i
+        << "]";
+  }
+}
+
+// detail_shift >= 32 must be UBSan-clean (the shift exponent is masked to
+// [0,31] in sample_texel1 — a raw `<< 32` on a 32-bit int is C++ shift-exponent
+// UB). 32 & 31 == 0, so a shift of 32 must render byte-identically to shift 0.
+// Under host-asan (UBSan) this exercises the masked path with no
+// shift-exponent diagnostic.
+TEST(RasterDetail, DetailShiftAtLeast32IsUbsanCleanAndMasks) {
+  struct Tex565 base;
+  struct Tex565 detail;
+  make_tex565_smooth(&base);
+  make_tex565_detail(&detail);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  struct RenderState rs0;
+  mk_two_cycle_state(&rs0, &base, &detail, 0);
+  struct RenderState rs32;
+  mk_two_cycle_state(&rs32, &base, &detail, 32);  // 32 & 31 == 0
+
+  static uint16_t fb0[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t fb32[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb0[i] = 0;
+    fb32[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb0, zbuf, &rs0, 0);
+  raster_tile(0, &bin, pool, fb32, zbuf, &rs32, 0);  // must not UB / crash
+
+  int checked = 0;
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    ASSERT_EQ(fb0[i], fb32[i])
+        << "detail_shift 32 (masked to 0) must equal shift 0 at fb[" << i
+        << "]";
+    if (fb0[i] != 0) {
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+}

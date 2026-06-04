@@ -246,6 +246,40 @@ static int rs_has_texture(const struct RenderState* rs) {
   return rs->tex.data != 0 && rs->tex.w != 0 && rs->tex.h != 0;
 }
 
+// R.4 — true iff this render state requests the 2-cycle detail multitexture
+// path: cycle == COMBINE_TWO_CYCLE AND tex1 is a sampleable (valid) descriptor.
+// When false (the DEFAULT: cycle == COMBINE_ONE_CYCLE, or tex1 null/zero-dim)
+// the per-pixel path is EXACTLY the pre-R.4 shade_pixel path -> byte-identical
+// output (the hard regression gate). The base TEXEL0 validity is checked
+// separately (rs_has_texture); a flat material never reaches the textured path.
+static int rs_two_cycle(const struct RenderState* rs) {
+  if (rs == 0) {
+    return 0;
+  }
+  if (rs->cycle != COMBINE_TWO_CYCLE) {
+    return 0;
+  }
+  return rs->tex1.data != 0 && rs->tex1.w != 0 && rs->tex1.h != 0;
+}
+
+// R.4 — sample the detail texture (TEXEL1) at the base Q16.16 texel coord
+// left-shifted by detail_shift (tiles the small detail tex at a higher
+// frequency). Δ4 WATCH: detail_shift left-shifts the Q16.16 texel coord, not
+// the u_iw numerator, so the worst case is u_q16 << shift; tex.cc wraps via a
+// pow2 mask AFTER flooring (q>>16), so even a large product is masked into
+// range — no |u_iw|-style affine-numerator overflow here. The shift EXPONENT is
+// masked to [0,31] (detail_shift is a uint8 with no upper bound in types.h; a
+// shift >= 32 is C++ shift-exponent UB — UBSan would trip it). A shift >= 32 is
+// nonsensical anyway (it pushes every integer texel bit out of a 32-bit Q16.16
+// coord); the mask keeps it defined. Honors tex1.filter/wrap.
+static uint16_t sample_texel1(const struct RenderState* rs, fx16_16 u_q16,
+                              fx16_16 v_q16) {
+  int const sh = (int)rs->detail_shift & 31;
+  fx16_16 const u1 = (fx16_16)((int32_t)u_q16 << sh);
+  fx16_16 const v1 = (fx16_16)((int32_t)v_q16 << sh);
+  return tex_sample(&rs->tex1, u1, v1, 0);
+}
+
 // Build TriSetup from the three transformed verts. Returns 0 on success, or
 // RDR_EDEGENERATE if the triangle area is <= epsilon (rejected at setup).
 static int tri_setup(struct TriSetup* t, const struct TVtx* a,
@@ -408,6 +442,10 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
                        int tile_px_x0, int tile_px_y0, uint16_t* fb,
                        uint16_t* zbuf, uint8_t* cov) {
   int const textured = rs_has_texture(rs);
+  // R.4: 2-cycle detail multitexture iff cycle==TWO and tex1 valid (constant
+  // per triangle). When 0, the combiner step below is the EXACT pre-R.4
+  // shade_pixel path -> byte-identical (the regression gate).
+  int const two_cyc = textured && rs_two_cycle(rs);
   // Pre-unpack the three shade colors once (textured path only; the fast path
   // never touches them so it stays bit-identical).
   uint8_t sr[3];
@@ -560,7 +598,16 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       }
 
       uint8_t keep = 1;
-      uint16_t out = shade_pixel(rs, texel565, shade565, &keep);
+      uint16_t out;
+      if (two_cyc) {
+        // R.4: sample the detail texel (TEXEL1) at the detail-shifted UV, then
+        // run the 2-cycle combiner (combiner -> combiner2, CC_COMBINED
+        // feed-forward).
+        uint16_t const texel1_565 = sample_texel1(rs, u_q16, v_q16);
+        out = shade_pixel2(rs, texel565, texel1_565, shade565, &keep);
+      } else {
+        out = shade_pixel(rs, texel565, shade565, &keep);
+      }
       if (!keep) {
         continue;  // forward-compat: honor a future alpha-compare in the
                    // combiner.
@@ -612,9 +659,16 @@ static void raster_one_xlu(const struct TriSetup* t,
                            const struct RenderState* rs, int tile_px_x0,
                            int tile_px_y0, uint16_t* fb, const uint16_t* zbuf,
                            uint8_t* cov) {
-  if (!rs_has_texture(rs)) {
+  int const textured = rs_has_texture(rs);
+  if (!textured) {
     return;  // XLU without a texture contributes nothing (flat path is opaque).
   }
+  // R.4: 2-cycle detail iff cycle==TWO and tex1 valid (constant per tri); else
+  // the EXACT pre-R.4 shade_pixel XLU path (byte-identical regression gate).
+  // The `textured &&` is redundant here (the early-return above guarantees it)
+  // but mirrors raster_one's form so a future refactor can't silently drop the
+  // base-texture guard.
+  int const two_cyc = textured && rs_two_cycle(rs);
   uint8_t sr[3];
   uint8_t sg[3];
   uint8_t sb[3];
@@ -725,7 +779,16 @@ static void raster_one_xlu(const struct TriSetup* t,
       uint16_t const texel565 = rgb565(rgba[0], rgba[1], rgba[2]);
 
       uint8_t keep = 1;
-      uint16_t combined = shade_pixel(rs, texel565, shade565, &keep);
+      uint16_t combined;
+      if (two_cyc) {
+        // R.4: detail texel (TEXEL1) at the detail-shifted UV, then the 2-cycle
+        // combiner. XLU still blends on TEXEL0's alpha (rgba[3]) below — the
+        // detail multitexture only affects the combined RGB.
+        uint16_t const texel1_565 = sample_texel1(rs, u_q16, v_q16);
+        combined = shade_pixel2(rs, texel565, texel1_565, shade565, &keep);
+      } else {
+        combined = shade_pixel(rs, texel565, shade565, &keep);
+      }
       if (!keep) {
         continue;  // forward-compat combiner alpha-compare.
       }
