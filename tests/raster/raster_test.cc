@@ -1654,12 +1654,14 @@ TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
       }
     }
   }
-  EXPECT_GT(checked, 50) << "too few doubly-covered pixels — order test vacuous";
+  EXPECT_GT(checked, 50)
+      << "too few doubly-covered pixels — order test vacuous";
 }
 
-// (3a) z-test honored: an XLU tri BEHIND an opaque occluder must be hidden where
-// the occluder already wrote depth. The occluded pixels stay the occluder's
-// color (no XLU blend leaks through a passed-but-not-tested fragment).
+// (3a) z-test honored: an XLU tri BEHIND an opaque occluder must be hidden
+// where the occluder already wrote depth. The occluded pixels stay the
+// occluder's color (no XLU blend leaks through a passed-but-not-tested
+// fragment).
 TEST(RasterXlu, ZTestHonoredBehindOpaqueOccluder) {
   struct Tex4444 tex;
   make_tex4444_alpha(&tex, 0x8);
@@ -1800,12 +1802,13 @@ TEST(RasterXlu, NoZWriteSoSecondXluStillComposites) {
       ++checked;
     }
   }
-  EXPECT_GT(checked, 50) << "too few doubly-covered pixels — no-z-write vacuous";
+  EXPECT_GT(checked, 50)
+      << "too few doubly-covered pixels — no-z-write vacuous";
 }
 
-// (4) Opaque path UNCHANGED: a mixed bin where an XLU material is added must NOT
-// perturb the opaque tris' output. We render an opaque-only bin and the SAME
-// opaque tris with an extra non-overlapping XLU tri; the opaque pixels are
+// (4) Opaque path UNCHANGED: a mixed bin where an XLU material is added must
+// NOT perturb the opaque tris' output. We render an opaque-only bin and the
+// SAME opaque tris with an extra non-overlapping XLU tri; the opaque pixels are
 // byte-identical (the two sweeps do not interfere outside the XLU footprint).
 TEST(RasterXlu, OpaqueSweepUnaffectedByPresenceOfXlu) {
   struct Tex4444 tex;
@@ -1878,9 +1881,8 @@ TEST(RasterXlu, OpaqueSweepUnaffectedByPresenceOfXlu) {
       }
     }
   }
-  EXPECT_EQ(diff, 0)
-      << "presence of an XLU tri perturbed the opaque region (" << diff
-      << " px) — the opaque sweep is not isolated";
+  EXPECT_EQ(diff, 0) << "presence of an XLU tri perturbed the opaque region ("
+                     << diff << " px) — the opaque sweep is not isolated";
 }
 
 // (5) DECAL is treated as opaque (T2 scope): a DECAL-zmode tri rasterizes in

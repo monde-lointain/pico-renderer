@@ -47,14 +47,27 @@
 //
 // `rstate_table` is the per-frame interned render-state table (Frame.
 // rstate_table); each triangle's TriRef.material indexes it. The selected
-// RenderState routes the per-pixel path (see R.1 in raster.cc):
+// RenderState routes the per-pixel path (see R.1/R.2 in raster.cc):
 //   - NO valid texture (tex.data==0 || tex.w==0 || tex.h==0) -> flat-fill fast
 //     path (provoking-vertex color), BIT-IDENTICAL to the pre-R.1 rasterizer.
 //   - valid texture -> textured + Gouraud + (A-B)*C+D combiner path
 //     (perspective-correct UV, affine SHADE, optional alpha-cutout discard).
-// R.1 is the OPAQUE pass only (no XLU/blend; that is R.2). `rstate_table` is
-// read-only here (immutable during raster -> the dual-core bit-identical
-// invariant holds).
+//
+// R.2 TWO-PASS (per tile, internal to raster_tile_noclear): the refs are swept
+// TWICE over the SAME bin:
+//   - SWEEP 1 (OPAQUE): every ref whose material zmode != ZMODE_XLU
+//     (ZMODE_OPAQUE and ZMODE_DECAL — DECAL treated as opaque for now)
+//     rasterized exactly as R.1 (z-test + z-write). BIT-IDENTICAL to the pre-
+//     R.2 single loop for any opaque-only bin (the hard regression gate).
+//   - SWEEP 2 (TRANSLUCENT): the ZMODE_XLU refs gathered, sorted BACK-TO-FRONT
+//     (ascending inv_w = farthest first; deterministic bin-order tie-break),
+//     then composited z-TEST-only (NO z-write) with texel-alpha alpha-over
+//     (blend_pixel_alpha(BLEND_ALPHA, combiner_out, texel.a, fb)). P3-3: XLU
+//     blends on TEXEL0 alpha, not coverage.
+// The sort is deterministic + each tile is drawn by exactly one worker, so the
+// dual-core sweep stays bit-identical to serial. `rstate_table` is read-only
+// here (immutable during raster -> the dual-core bit-identical invariant
+// holds).
 void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
                  uint16_t* fb, uint16_t* zbuf,
                  const struct RenderState* rstate_table);
@@ -68,5 +81,12 @@ void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
 void raster_tile_noclear(int tile, const struct TileBin* bin,
                          const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf,
                          const struct RenderState* rstate_table);
+
+// R.2 DEBUG telemetry: total XLU triangles dropped because a single tile's
+// translucent gather exceeded the fixed per-tile XLU sort cap (drop-with-count,
+// mirroring TileBin.dropped — never corrupt, surface the count). NEVER feeds
+// the framebuffer path; a nonzero value is a re-surface signal that the per-
+// tile XLU cap needs raising. Not atomic across raster workers (debug only).
+uint32_t raster_xlu_dropped(void);
 
 #endif  // RDR_RASTER_H
