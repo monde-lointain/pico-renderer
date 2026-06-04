@@ -880,6 +880,87 @@ TEST(RasterTextured, MatchesTexSampleAndShadeExact) {
   EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
 }
 
+// B1 GUARD: exercise the winding-normalize v1<->v2 swap ON THE TEXTURED PATH.
+// The verts are wound so the INITIAL area2 < 0, so tri_setup MUST swap v1<->v2
+// (and ALL six per-vertex attrs: x/y, iw, u_iw, v_iw, rgba) in lockstep. Each
+// vertex carries DISTINCT u_iw, DISTINCT v_iw, and DISTINCT rgba, so a single
+// cross-transposed attr (e.g. uiw2 = old v_iw) would change the sampled texel
+// or the shade at interior pixels and break the bit-exact comparison. The
+// reference (ref_setup) performs the SAME swap, so equality holds iff both swap
+// identically — and the per-vertex distinctness is what gives the comparison
+// teeth.
+//
+// VERIFIED BY HAND (not committed): if raster.cc's swap set, say, uiw2 = tviw
+// (u<-v cross) the impl would sample column-from-row coords; ref keeps the
+// correct mapping -> the ASSERT_EQ below fails at interior pixels. Same for any
+// of the six attrs swapped into the wrong slot.
+TEST(RasterTextured, ReversedWindingTexturedSwapsAllAttrsInLockstep) {
+  struct Tex565 tex;
+  make_tex565(&tex);  // high-frequency: each texel distinct -> a UV slip shows
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  tex_desc_565(&rs.tex, &tex);
+  rs.combiner.mode = COMBINE_MODULATE;
+  rs.alpha_cmp = 0;
+  const struct RenderState* table = &rs;
+
+  // Same screen positions as MatchesTexSampleAndShadeExact but with v1 and v2
+  // SWAPPED in the pool order -> initial area2 < 0 -> forces the swap block.
+  // DISTINCT per-vertex u_iw/v_iw (each vertex anchors a different texture
+  // corner) AND DISTINCT per-vertex shade (red / green / blue corners).
+  uint16_t const c0 = rgb565_pack(248, 0, 0);  // v0 shade
+  uint16_t const c1 = rgb565_pack(0, 252, 0);  // v1 shade
+  uint16_t const c2 = rgb565_pack(0, 0, 248);  // v2 shade
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x20000, 0, 0, c0);         // u=0,   v=0
+  pool[1] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, c1);  // u=0,   v=7  (was v2)
+  pool[2] = mk_tvtx_uv(52, 12, 0x08000, 7 * 32, 0, c2);  // u=7,   v=0  (was v1)
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  // Sanity: the chosen winding really is negative-area (so the swap runs).
+  ASSERT_LT(
+      edge_i(pool[0].x, pool[0].y, pool[1].x, pool[1].y, pool[2].x, pool[2].y),
+      0)
+      << "test geometry must have INITIAL area2 < 0 to exercise the swap";
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table);
+
+  // ref_setup mirrors tri_setup's swap; ref_textured_pixel mirrors the inner
+  // loop. Bit-exact equality at every covered pixel proves the impl swapped all
+  // six attrs into the same slots the reference did.
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t expected;
+      if (!ref_textured_pixel(&rt, &rs, sx, sy, &expected)) {
+        continue;
+      }
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "reversed-winding textured pixel (" << sx << "," << sy
+          << ") mismatch — attr swap transposed?";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+}
+
 // Float-oracle composition check. Two independent assertions per pixel:
 //   (1) PERSPECTIVE: the FLOAT perspective-correct texel index must agree with
 //       the fixed-point recovery to within 1 texel (catches a wrong shift /

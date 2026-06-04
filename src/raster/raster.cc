@@ -210,6 +210,10 @@ static int clampi(int v, int lo, int hi) {
 //   <=0; a valid in-front fragment has inv_w_p>0).
 static fx16_16 perspective_texcoord_q16(int32_t num_uiw, int32_t inv_w_p) {
   if (inv_w_p <= 0) {
+    // Mirrors the flat path: a non-positive inv_w is a behind-camera / invalid
+    // fragment (clip rejects those upstream, and depth_pack already clamps it
+    // to the clear sentinel) -> return a defined 0 texel coord, no
+    // divide-by-zero.
     return 0;
   }
   int64_t const q = ((int64_t)num_uiw << 27) / (int64_t)inv_w_p;
