@@ -428,7 +428,7 @@ static struct Mat4fx s_terrain_view;
 static struct Mat4fx s_freefly_vp;     // free-fly only: projection * view
 static struct Mat4fx s_terrain_model;  // identity (verts authored in world)
 static struct RenderState s_terrain_state;
-static struct RenderState s_tree_state;
+static struct RenderState s_tree_state;  // opaque cutout pass
 
 // ---- T1 material fillers (single source of truth) --------------------------
 // The build below populates its statics through THESE, and tests assert the
@@ -443,7 +443,13 @@ void demo_terrain_material(struct RenderState* out) {
   // are absolute within [0,512) so it samples in-range.
   out->tex.wrap_s = (uint8_t)WRAP_REPEAT;
   out->tex.wrap_t = (uint8_t)WRAP_REPEAT;
-  out->tex.filter = (uint8_t)FILTER_POINT;
+  // T2: bilinear (FILTER_THREE_POINT). The atlas is a gutter'd 512^2 pow2 build
+  // (design P3-1) — each tile's sub-region is bordered by a replicated gutter
+  // so a bilinear tap reads the tile's own replicated edge, NOT its neighbor.
+  // The baked absolute UVs already address those gutter'd sub-regions, so this
+  // is seam-correct. Bilinear is a SAMPLE-time op: it does not change u_iw
+  // birth, so the T1 Δ4 int16 bound still holds (no geom change).
+  out->tex.filter = (uint8_t)FILTER_THREE_POINT;
   out->tex.mip_levels = 1;
   out->tex.tlut = 0;
   // P4-2 ENV wiring: TEXEL0 x ENV. Without it the terrain would be untinted.
@@ -471,13 +477,20 @@ void demo_tree_material(struct RenderState* out) {
   // CLAMP so the sprite edge does not wrap.
   out->tex.wrap_s = (uint8_t)WRAP_CLAMP;
   out->tex.wrap_t = (uint8_t)WRAP_CLAMP;
+  // Trees stay POINT (crisp cutout edge); do NOT bilinear the trees.
   out->tex.filter = (uint8_t)FILTER_POINT;
   out->tex.mip_levels = 1;
   out->tex.tlut = 0;
   out->combiner.mode = (uint8_t)COMBINE_MODULATE;  // TEXEL x SHADE
   out->zmode = (uint8_t)ZMODE_OPAQUE;
   out->cull = (uint8_t)CULL_NONE;  // N6 double-sided billboard
-  out->alpha_cmp = 0;
+  // T2 opaque cutout pass (N64 G_RM_AA_ZB_TEX_EDGE, combiner alpha = TEXEL0).
+  // The tree0 sprite is 5551 (1-bit alpha) -> decoded texel alpha is 0 or 255,
+  // so ANY threshold in (0,255] cuts the same silhouette; 128 is the canonical
+  // midpoint. This activates raster's alpha_cmp discard path, killing the black
+  // billboard background and leaving only the tree silhouette (the visible T2
+  // win).
+  out->alpha_cmp = 128;
   out->lit = 0;
 }
 
@@ -656,7 +669,13 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   telem->cmdgen_draws += 1;
   telem->cmdgen_tris += terrain_tcount;
 
-  // ---- tree billboards: tree0 sprite (MODULATE), double-sided ----
+  // ---- tree billboards: tree0 sprite (MODULATE), double-sided, cutout ------
+  // T2 ships the OPAQUE cutout pass only (G_RM_AA_ZB_TEX_EDGE): alpha_cmp
+  // discards the transparent billboard background -> z-write the tree
+  // silhouette. The faithful XLU surface pass (G_RM_AA_ZB_XLU_SURF) is DEFERRED
+  // to T4: at 1-bit 5551 alpha with no coverage-AA yet it composites visually
+  // IDENTICALLY to the cutout, and the double-draw is what overflowed the
+  // shared bin-ref pool (RDR_BIN_POOL_REFS) — so its payoff waits for AA.
   memset(&c, 0, sizeof c);
   c.u.set_material.state = &s_tree_state;
   push(CMD_SET_MATERIAL, &c);

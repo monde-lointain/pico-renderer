@@ -188,9 +188,14 @@ uint32_t demo_tree_geometry(struct Vtx* verts, uint16_t* idx);
 // constants).
 void demo_terrain_material(struct RenderState* out);
 
-// Fill *out with the EXACT RenderState demo_terrain_build binds before the tree
-// draw: the 32x64 RGBA5551 tree0 sprite (CLAMP/POINT) with COMBINE_MODULATE
-// (TEXEL x SHADE), double-sided (CULL_NONE, N6 billboard). Opaque, pre-lit.
+// Fill *out with the EXACT RenderState demo_terrain_build binds before the
+// tree CUTOUT (opaque) pass: the 32x64 RGBA5551 tree0 sprite (CLAMP/POINT) with
+// COMBINE_MODULATE (TEXEL x SHADE), double-sided (CULL_NONE, N6 billboard),
+// ZMODE_OPAQUE + alpha_cmp != 0 (G_RM_AA_ZB_TEX_EDGE: alpha-test the 1-bit
+// 5551 alpha so the transparent billboard background is discarded). Pre-lit.
+// (The faithful XLU translucent pass is DEFERRED to T4 — it is visually
+// identical to the cutout at 1-bit alpha / no-AA, and the double-draw overflows
+// the shared bin-ref pool; its material filler lands with the AA pass.)
 void demo_tree_material(struct RenderState* out);
 
 // ---- terrain scene build ----------------------------------------------------

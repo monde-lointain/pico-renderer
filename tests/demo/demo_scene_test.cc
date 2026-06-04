@@ -253,6 +253,8 @@ TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
   EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_CUSTOM);
   EXPECT_EQ(rs.combiner.c, (uint8_t)CC_ENVIRONMENT);
   EXPECT_EQ(rs.cull, (uint8_t)CULL_BACK);
+  // T2: terrain samples bilinear (gutter'd atlas -> seam-correct).
+  EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_THREE_POINT);
 
   // Functional: TEXEL0 x ENV on a known non-black texel must equal the per-
   // channel combine of (texel) and (env). Pick a mid green-ish 565 texel.
@@ -274,8 +276,10 @@ TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
   EXPECT_EQ(got, want) << "terrain combiner is not TEXEL0 x ENV";
 }
 
-// TREE MATERIAL: faithful sprite descriptor (32x64 RGBA5551), MODULATE
-// (TEXEL x SHADE), double-sided billboard (CULL_NONE, N6).
+// TREE MATERIAL (opaque cutout, T2): faithful sprite descriptor (32x64
+// RGBA5551), MODULATE (TEXEL x SHADE), double-sided billboard (CULL_NONE, N6),
+// crisp POINT filter, and the alpha-cutout threshold that kills the
+// transparent billboard background (G_RM_AA_ZB_TEX_EDGE, the visible T2 win).
 TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
   struct RenderState rs;
   demo_tree_material(&rs);
@@ -285,6 +289,11 @@ TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
   EXPECT_EQ(rs.tex.format, (uint8_t)TEXFMT_RGBA5551);
   EXPECT_EQ(rs.cull, (uint8_t)CULL_NONE);
   EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_MODULATE);
+  EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_POINT);  // crisp cutout edge
+  EXPECT_EQ(rs.zmode, (uint8_t)ZMODE_OPAQUE);
+  EXPECT_NE(rs.alpha_cmp, (uint8_t)0)
+      << "tree cutout pass must alpha-test (else the black billboard "
+         "background is not discarded)";
 }
 
 // TERRAIN-SCENE GUARD: real-density TEXTURED terrain + trees produce VARIED
@@ -309,9 +318,11 @@ TEST(TerrainSceneGuard, RealDensityRendersTexturedTerrain) {
       << " dropped=" << g_frame.geom.tris_dropped << " (terrain not visible?)";
 
   // The cmdgen telemetry must report the real source-tri budget (front-end
-  // scene-build work), distinct from the geom-accepted count above.
+  // scene-build work), distinct from the geom-accepted count above. T2 ships
+  // the cutout pass only (the XLU pass is deferred to T4), so trees draw ONCE.
   EXPECT_EQ(telem.cmdgen_tris, (uint32_t)(DEMO_TERRAIN_TRIS + DEMO_TREE_TRIS));
-  EXPECT_GT(telem.cmdgen_draws, 0U);
+  // Two draws: terrain, tree-cutout.
+  EXPECT_EQ(telem.cmdgen_draws, 2U);
   EXPECT_EQ(telem.cmdgen_verts,
             (uint32_t)(DEMO_TERRAIN_VERTS + DEMO_TREE_VERTS));
 
@@ -553,6 +564,13 @@ TEST(TerrainSceneGuard, DumpFbCrcReferenceSequence) {
 // shared-pool + job-buffer high-water stay under their caps (with headroom). A
 // regression that under-sizes a cap or loses the variable-bin behavior trips
 // this. Prints the high-water marks for the T0 report.
+//
+// T2 NOTE: the faithful tree XLU pass (a SECOND tree draw) doubled the tree
+// per-tile spans and pushed worst-frame bin_pool demand 1756 -> 2310, over
+// RDR_BIN_POOL_REFS=2048. Per the Lead decision the XLU demo pass is DEFERRED
+// to T4 (visually identical at 1-bit alpha / no-AA), so trees draw ONCE again
+// and demand returns to ~1756 < 2048 — this guard passes with frame.h
+// UNTOUCHED.
 TEST(TerrainSceneGuard, ArenaBinsNoOverflowAcrossScriptedLoop) {
   struct DemoCamera cam;
   struct DemoScroll scroll;
@@ -622,7 +640,7 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0xa59eb386U)
+  EXPECT_EQ(digest, 0x1ad2135dU)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 
