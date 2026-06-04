@@ -45,6 +45,7 @@ _FMT = {'565': ac.TEXFMT_RGBA565, '4444': ac.TEXFMT_RGBA4444}
 _TERRAIN_GRID_C = 'terrain_grid.c'
 _TERRAIN_TEX_C = 'terrain_tex.c'
 _TERRAIN_DETAIL_C = 'terrain_detail.c'
+_CLOUD_INC = 'cloud.inc.c'  # 64x64 I8 cloud (cloud.c #includes this raw hex)
 _PANORAMA_C = 'panorama.c'
 _PANORAMA_TLUT_INC = 'panorama_tlut.inc.c'
 _PANORAMA_IMG_INC = 'panorama_img.inc.c'
@@ -63,6 +64,8 @@ _PANORAMA_H = 64
 _PANORAMA_TLUT_ENTRIES = 256
 _DETAIL_W = 32
 _DETAIL_H = 32
+_CLOUD_W = 64  # sky_cloud_i8_64x64: I8 cloud-intensity (alpha) for T3b clouds
+_CLOUD_H = 64
 
 
 def load_png_rgba(path):
@@ -305,6 +308,30 @@ def cmd_terrain_bake(args):
         (_DETAIL_W, _DETAIL_H, len(detail_blob))
     )
     print('  detail: %d bytes -> %s' % (len(detail_blob), detail_path))
+
+    # ---- 3b. Cloud texture (I8) ----
+    # 64x64 I8 cloud intensity (used as the cloud ALPHA by blit2d_clouds, T3b).
+    # cloud.c #includes cloud.inc.c (a raw comma-separated hex list, no braces);
+    # parse_n64_hex_array_c regex-extracts the 0x.. tokens regardless. I8 is one
+    # byte per texel -> no endianness, no palette.
+    cloud_src = _read_asset_src(n64_dir, _CLOUD_INC)
+    cloud_values = ac.parse_n64_hex_array_c(cloud_src, dtype='u8')
+    expected_cloud = _CLOUD_W * _CLOUD_H
+    print('  cloud: parsed %d bytes (expected %d)' %
+          (len(cloud_values), expected_cloud))
+    if len(cloud_values) != expected_cloud:
+        print('  WARNING: cloud size mismatch')
+    cloud_blob = ac.encode_i8_blob(cloud_values[:expected_cloud])
+    cloud_path = os.path.join(out_dir, 'terrain_cloud.h')
+    write_h_array_u8(
+        cloud_path,
+        'TERRAIN_CLOUD_H',
+        'g_terrain_cloud',
+        cloud_blob,
+        'Cloud sky: %dx%d I8 intensity/alpha (%d bytes)' %
+        (_CLOUD_W, _CLOUD_H, len(cloud_blob))
+    )
+    print('  cloud: %d bytes -> %s' % (len(cloud_blob), cloud_path))
 
     # ---- 4. Panorama TLUT + CI8 image ----
     pan_src = _read_asset_src(n64_dir, _PANORAMA_C)
