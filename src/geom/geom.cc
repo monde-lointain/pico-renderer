@@ -202,7 +202,7 @@ uint8_t geom_fog_u8(const struct FogState* fog, fx16_16 z) {
   fx16_16 const factor = geom_fog_factor(fog, z);
   int32_t u8 = (int32_t)(((int64_t)factor * 255) >> 16);
   if (u8 < 0) {
-    u8 = 0;
+    u8 = 0;  // defensive; factor is non-negative today (geom_fog_factor [0,1])
   }
   if (u8 > 255) {
     u8 = 255;

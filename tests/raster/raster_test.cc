@@ -2059,6 +2059,31 @@ int ref_fogged_pixel(const struct RefTri* t, const struct RenderState* rs,
   return 1;
 }
 
+// Bit-exact reference for the FLAT fast-path fogged pixel: the flat provoking
+// color `flat565` lerped toward fog_color by the affine per-pixel fog factor
+// (gouraud_ref over the winding-ordered fog triple) — the SAME integer path
+// raster_one's !textured branch runs (no combiner, base = t->color). Coverage +
+// top-left rule mirror ref_textured_pixel. Returns 1 + writes *out if covered.
+int ref_flat_fogged_pixel(const struct RefTri* t, uint16_t flat565,
+                          uint16_t fog_color, uint8_t fg0, uint8_t fg1,
+                          uint8_t fg2, int sx, int sy, uint16_t* out) {
+  fx12_4 const cx = (fx12_4)((sx << 4) + 8);
+  fx12_4 const cy = (fx12_4)((sy << 4) + 8);
+  int32_t const w0 = edge_i(t->x1, t->y1, t->x2, t->y2, cx, cy);
+  int32_t const w1 = edge_i(t->x2, t->y2, t->x0, t->y0, cx, cy);
+  int32_t const w2 = edge_i(t->x0, t->y0, t->x1, t->y1, cx, cy);
+  int const in0 = (w0 > 0) || (w0 == 0 && t->tl1);
+  int const in1 = (w1 > 0) || (w1 == 0 && t->tl2);
+  int const in2 = (w2 > 0) || (w2 == 0 && t->tl0);
+  if (!(in0 && in1 && in2)) {
+    return 0;
+  }
+  uint8_t const fogf =
+      gouraud_ref(w0, w1, w2, (int)fg0, (int)fg1, (int)fg2, t->area2);
+  *out = fog_lerp(flat565, fog_color, fogf);
+  return 1;
+}
+
 const uint16_t K_FOG565 = (uint16_t)((31U << 11) | (50U << 5) | 5U);
 
 }  // namespace
@@ -2389,4 +2414,73 @@ TEST(RasterFog, XluFogAppliedBeforeAlphaOver) {
   }
   EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
   EXPECT_GT(blended, 50) << "XLU+fog did not composite (no blend over bg)";
+}
+
+// Bit-exact wiring of the FLAT fast path under fog (symmetric with
+// TexturedFogMatchesReferenceExact): a NO-TEXTURE fog-enabled tri with a
+// per-vertex fog GRADIENT (0/128/255). The flat path (raster.cc !textured
+// branch) has no combiner — its base is the provoking color t->color — so every
+// covered pixel must EXACTLY equal fog_lerp(flat, fog_color,
+// affine_fog_factor). Pins the flat fog path bit-exactly (the mixed-scene CRC
+// only covers it indirectly). The provoking color is the FLAT color of v0
+// (pre-swap), constant across the tri, so the only per-pixel variation is the
+// fog factor.
+TEST(RasterFog, FlatFogMatchesReferenceExact) {
+  // No texture -> flat fast path. Fog enabled toward K_FOG565.
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  rs.fog.enabled = 1;
+  rs.fog.color = K_FOG565;
+  const struct RenderState* table = &rs;
+
+  // Distinct per-vertex fog (0/128/255); all three carry the SAME flat color so
+  // t->color (provoking v0) is unambiguous and the reference base is exact.
+  uint16_t const flat = rgb565_pack(40, 180, 220);
+  TVtx pool[3];
+  pool[0] = mk_vtx(8, 8, 0, 0, 0x10000);
+  pool[1] = mk_vtx(52, 12, 0, 0, 0x10000);
+  pool[2] = mk_vtx(14, 50, 0, 0, 0x10000);
+  for (int k = 0; k < 3; ++k) {
+    pool[k].rgba = flat;  // mk_vtx defaults to K_FLAT565; override to `flat`
+  }
+  set_fog3(pool, 0, 128, 255);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table);
+
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  uint8_t fg0;
+  uint8_t fg1;
+  uint8_t fg2;
+  ref_fog_order(pool, &fg0, &fg1, &fg2);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t expected;
+      if (!ref_flat_fogged_pixel(&rt, flat, K_FOG565, fg0, fg1, fg2, sx, sy,
+                                 &expected)) {
+        continue;
+      }
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "flat fogged pixel (" << sx << "," << sy << ") mismatch";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
 }

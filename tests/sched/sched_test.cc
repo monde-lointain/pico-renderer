@@ -476,7 +476,9 @@ TEST(SchedFogDeterminism, FogSceneSerialEqualsTwoWorker) {
 
 // TEETH: fog must actually have CHANGED pixels (otherwise the determinism test
 // is vacuous). Re-render the SAME scene with fog DISABLED; the fog scene MUST
-// differ. Also proves fog-disabled is the bit-identical no-fog path.
+// differ (fog-on != fog-off). (This proves only that the fog step is live; the
+// bit-identical-no-fog claim for the DISABLED path rests on the unchanged host
+// goldens + gate, not on this inequality.)
 TEST(SchedFogDeterminism, FogActuallyChangesPixels) {
   struct TileBin bin;
   build_xlu_scene(&bin);
