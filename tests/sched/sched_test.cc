@@ -392,3 +392,119 @@ TEST(SchedXluDeterminism, XluActuallyBlends) {
       << "XLU-as-XLU matched XLU-as-opaque — the translucent sweep did not "
          "blend, the determinism test would be vacuous";
 }
+
+// ===========================================================================
+// R.3 FOG determinism gate: fog is per-pixel, derived ONLY from per-vertex
+// TVtx.fog (immutable in the pool) + the read-only rstate_table fog state, so a
+// fog-enabled scene MUST stay bit-identical between the serial and 2-worker
+// sweeps (each tile drawn by exactly one worker; no shared mutable state). The
+// demo runs fog OFF, so this builds a fog-enabled scene by hand: the SAME mixed
+// opaque+XLU geometry as the XLU gate, now with fog enabled on every material
+// and a per-vertex fog gradient set on the pool.
+// ===========================================================================
+namespace {
+
+// Constant-expression 565 pack of (248,200,40) (avoid a non-constexpr call in a
+// file-scope initializer): (248&0xF8)<<8 | (200&0xFC)<<3 | (40>>3).
+const uint16_t K_FOGCOL565 = (uint16_t)((248U << 8) | (200U << 3) | (40U >> 3));
+
+// Fog-enabled copy of the mixed material table (opaque flat, opaque flat, XLU
+// textured), each with fog enabled toward K_FOGCOL565.
+struct RenderState g_fog_table[3];
+void make_fog_table(void) {
+  make_xlu_table();  // fills g_xlu_table
+  memcpy(g_fog_table, g_xlu_table, sizeof(g_fog_table));
+  for (int i = 0; i < 3; ++i) {
+    g_fog_table[i].fog.enabled = 1;
+    g_fog_table[i].fog.color = K_FOGCOL565;
+    g_fog_table[i].fog.near_z = 0;
+    g_fog_table[i].fog.far_z = (fx16_16)(4 << 16);
+  }
+}
+
+// Build the mixed scene then stamp a per-vertex fog GRADIENT onto every pooled
+// vertex (a function of its screen x so neighbouring tiles see distinct factors
+// -> the interp is exercised across tile seams). build_xlu_scene must run
+// first.
+void set_scene_fog_gradient(void) {
+  for (int i = 0; i < K_XNTRI * 3; ++i) {
+    int const px = (int)(g_xlu_pool[i].x >> 4);
+    int f = (px * 255) / RDR_SCREEN_W;
+    if (f < 0) {
+      f = 0;
+    }
+    if (f > 255) {
+      f = 255;
+    }
+    g_xlu_pool[i].fog = (uint8_t)f;
+  }
+}
+
+}  // namespace
+
+// serial == 2-worker, for a FOG-ENABLED mixed scene. Fog reads only immutable
+// per-vertex TVtx.fog + read-only rstate, so the per-tile-independent invariant
+// holds with fog exactly as without it.
+TEST(SchedFogDeterminism, FogSceneSerialEqualsTwoWorker) {
+  struct TileBin bin;
+  build_xlu_scene(&bin);
+  make_fog_table();
+  set_scene_fog_gradient();
+
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    g_fb_serial[i] = 0;
+    g_fb_par[i] = 0;
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table);
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    uint16_t* const z = (tile & 1) ? g_z1 : g_z0;
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_fog_table);
+  }
+
+  uint32_t const crc_serial =
+      crc32_fb(g_fb_serial, RDR_SCREEN_W * RDR_SCREEN_H);
+  uint32_t const crc_par = crc32_fb(g_fb_par, RDR_SCREEN_W * RDR_SCREEN_H);
+  EXPECT_EQ(crc_serial, crc_par)
+      << "fog mixed-scene dual-core invariant VIOLATED: serial crc=0x"
+      << std::hex << crc_serial << " 2-worker crc=0x" << crc_par;
+  EXPECT_EQ(memcmp(g_fb_serial, g_fb_par,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0);
+}
+
+// TEETH: fog must actually have CHANGED pixels (otherwise the determinism test
+// is vacuous). Re-render the SAME scene with fog DISABLED; the fog scene MUST
+// differ (fog-on != fog-off). (This proves only that the fog step is live; the
+// bit-identical-no-fog claim for the DISABLED path rests on the unchanged host
+// goldens + gate, not on this inequality.)
+TEST(SchedFogDeterminism, FogActuallyChangesPixels) {
+  struct TileBin bin;
+  build_xlu_scene(&bin);
+  make_fog_table();
+  set_scene_fog_gradient();
+
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    g_fb_serial[i] = 0;
+    g_fb_par[i] = 0;
+  }
+  // Fog ON.
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table);
+  }
+  // Fog OFF (same table, fog disabled) into g_fb_par.
+  struct RenderState fog_off[3];
+  memcpy(fog_off, g_fog_table, sizeof(fog_off));
+  for (int i = 0; i < 3; ++i) {
+    fog_off[i].fog.enabled = 0;
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, fog_off);
+  }
+  EXPECT_NE(memcmp(g_fb_serial, g_fb_par,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0)
+      << "fog-on matched fog-off — the fog step did not change any pixel, the "
+         "determinism test would be vacuous";
+}

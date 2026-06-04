@@ -110,6 +110,11 @@ struct TriSetup {
   // Per-vertex packed shade color (RGB565), post winding-normalize. Affine
   // (screen-linear) Gouraud interpolation unpacks these in-loop.
   uint16_t rgba0, rgba1, rgba2;
+  // Per-vertex fog factor [0,255] (TVtx.fog), post winding-normalize. R.3:
+  // interpolated AFFINE (screen-linear, NOT perspective-corrected — matches the
+  // N64 per-vertex fog convention, same path as Gouraud SHADE) and applied
+  // post-combiner (fog_lerp toward rstate.fog.color). 0 -> no fog (no-op).
+  uint8_t fog0, fog1, fog2;
   int32_t area2;      // 2*signed area (Q24.8), > 0 after normalize
   int tl0, tl1, tl2;  // top-left flags for edges v0->v1, v1->v2, v2->v0
   uint16_t color;     // flat fill (provoking vertex v0)
@@ -159,6 +164,10 @@ static int tri_setup(struct TriSetup* t, const struct TVtx* a,
   uint16_t const rg0 = a->rgba;
   uint16_t rg1 = b->rgba;
   uint16_t rg2 = c->rgba;
+  // Per-vertex fog factor [0,255], widened to int32 for the lockstep swap.
+  int32_t const fg0 = (int32_t)a->fog;
+  int32_t fg1 = (int32_t)b->fog;
+  int32_t fg2 = (int32_t)c->fog;
 
   int32_t area2 = edge_eval(x0, y0, x1, y1, x2, y2);
   int32_t const mag = (area2 < 0) ? -area2 : area2;
@@ -167,7 +176,7 @@ static int tri_setup(struct TriSetup* t, const struct TVtx* a,
   }
   if (area2 < 0) {
     // Swap v1<->v2 to normalize to positive area. CRITICAL: EVERY per-vertex
-    // attribute (position, iw, u_iw, v_iw, rgba) MUST swap in lockstep — a
+    // attribute (position, iw, u_iw, v_iw, rgba, fog) MUST swap in lockstep — a
     // transposition here is the classic textured-raster bug (R.1 re-surface
     // trigger). Keep this block exhaustive.
     fx12_4 const tx = x1;
@@ -176,18 +185,21 @@ static int tri_setup(struct TriSetup* t, const struct TVtx* a,
     int32_t const tuiw = uiw1;
     int32_t const tviw = viw1;
     uint16_t const trg = rg1;
+    int32_t const tfg = fg1;
     x1 = x2;
     y1 = y2;
     iw1 = iw2;
     uiw1 = uiw2;
     viw1 = viw2;
     rg1 = rg2;
+    fg1 = fg2;
     x2 = tx;
     y2 = ty;
     iw2 = tiw;
     uiw2 = tuiw;
     viw2 = tviw;
     rg2 = trg;
+    fg2 = tfg;
     area2 = -area2;
   }
 
@@ -209,6 +221,9 @@ static int tri_setup(struct TriSetup* t, const struct TVtx* a,
   t->rgba0 = rg0;
   t->rgba1 = rg1;
   t->rgba2 = rg2;
+  t->fog0 = (uint8_t)fg0;
+  t->fog1 = (uint8_t)fg1;
+  t->fog2 = (uint8_t)fg2;
   t->area2 = area2;
   t->tl0 = edge_is_top_left(x0, y0, x1, y1);
   t->tl1 = edge_is_top_left(x1, y1, x2, y2);
@@ -371,14 +386,23 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       uint16_t const znew = depth_pack(inv_w);
 
       if (!textured) {
-        // FAST PATH (BIT-IDENTICAL to the pre-R.1 rasterizer): flat fill.
-        // w-buffer: larger inv_w is closer. Pass if at least as close as
-        // stored.
+        // FAST PATH (BIT-IDENTICAL to the pre-R.1 rasterizer WHEN FOG OFF):
+        // flat fill. w-buffer: larger inv_w is closer. Pass if at least as
+        // close as stored.
         if (znew < zbuf[zi]) {
           continue;
         }
         zbuf[zi] = znew;
-        fb[(sy * RDR_SCREEN_W) + sx] = t->color;
+        // R.3 FOG: an untextured material can still carry fog. Disabled fog
+        // skips this branch -> the write stays t->color, BIT-IDENTICAL to the
+        // pre-R.3 flat path (the regression gate). Affine per-pixel factor.
+        uint16_t out = t->color;
+        if (rs->fog.enabled) {
+          uint8_t const fogf = gouraud_chan(
+              w0, w1, w2, (int)t->fog0, (int)t->fog1, (int)t->fog2, t->area2);
+          out = fog_lerp(out, rs->fog.color, fogf);
+        }
+        fb[(sy * RDR_SCREEN_W) + sx] = out;
         continue;
       }
 
@@ -420,10 +444,22 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       }
 
       uint8_t keep = 1;
-      uint16_t const out = shade_pixel(rs, texel565, shade565, &keep);
+      uint16_t out = shade_pixel(rs, texel565, shade565, &keep);
       if (!keep) {
         continue;  // forward-compat: honor a future alpha-compare in the
                    // combiner.
+      }
+      // R.3 FOG (post-combiner): lerp the combiner color toward
+      // rstate.fog.color by the per-pixel fog factor (affine / screen-linear
+      // interp of the per-vertex TVtx.fog — NOT perspective-corrected, matching
+      // the N64 per-vertex fog convention; same form/truncation as
+      // gouraud_chan). Disabled fog -> skip (TVtx.fog is born 0 then, so this
+      // is bit-identical to no-fog regardless, but the gate also avoids the
+      // work).
+      if (rs->fog.enabled) {
+        uint8_t const fogf = gouraud_chan(w0, w1, w2, (int)t->fog0,
+                                          (int)t->fog1, (int)t->fog2, t->area2);
+        out = fog_lerp(out, rs->fog.color, fogf);
       }
       // z-test AFTER cutout/keep so a discarded fragment never seeds depth.
       if (znew < zbuf[zi]) {
@@ -567,9 +603,19 @@ static void raster_one_xlu(const struct TriSetup* t,
       uint16_t const texel565 = rgb565(rgba[0], rgba[1], rgba[2]);
 
       uint8_t keep = 1;
-      uint16_t const combined = shade_pixel(rs, texel565, shade565, &keep);
+      uint16_t combined = shade_pixel(rs, texel565, shade565, &keep);
       if (!keep) {
         continue;  // forward-compat combiner alpha-compare.
+      }
+      // R.3 FOG (post-combiner, BEFORE the alpha-over): fog the combiner color
+      // toward rstate.fog.color by the affine per-pixel fog factor, then
+      // composite the fogged color over the framebuffer by its texel alpha
+      // (faithful: a distant translucent fragment fogs, then blends). Affine
+      // interp (N64 per-vertex fog), same path as the opaque sweep.
+      if (rs->fog.enabled) {
+        uint8_t const fogf = gouraud_chan(w0, w1, w2, (int)t->fog0,
+                                          (int)t->fog1, (int)t->fog2, t->area2);
+        combined = fog_lerp(combined, rs->fog.color, fogf);
       }
       // Texel-alpha alpha-over the current framebuffer pixel. NO z-write.
       int const fbi = (sy * RDR_SCREEN_W) + sx;

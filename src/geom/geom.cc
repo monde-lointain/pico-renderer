@@ -191,6 +191,25 @@ fx16_16 geom_fog_factor(const struct FogState* fog, fx16_16 z) {
   return (fx16_16)fx_div(z - fog->near_z, range);
 }
 
+uint8_t geom_fog_u8(const struct FogState* fog, fx16_16 z) {
+  if (fog == 0 || !fog->enabled) {
+    return 0;  // disabled: born 0 -> raster fog no-ops (bit-identical no-fog)
+  }
+  // factor is Q16.16 in [0, FX_ONE]. Map [0,1] -> [0,255] by scaling then
+  // truncating (>> 16): factor * 255 >> 16. 64-bit product avoids overflow
+  // (max FX_ONE*255 = 16711680, fits int32, but widen for clarity/safety).
+  // Truncating divide == fx_to_int discipline (P3-5: bit-identical host<->dev).
+  fx16_16 const factor = geom_fog_factor(fog, z);
+  int32_t u8 = (int32_t)(((int64_t)factor * 255) >> 16);
+  if (u8 < 0) {
+    u8 = 0;  // defensive; factor is non-negative today (geom_fog_factor [0,1])
+  }
+  if (u8 > 255) {
+    u8 = 255;
+  }
+  return (uint8_t)u8;
+}
+
 // ---- backface cull ---------------------------------------------------------
 int32_t geom_signed_area2(const struct TVtx* a, const struct TVtx* b,
                           const struct TVtx* c) {
@@ -713,6 +732,11 @@ static int geom_visit(void* ctx, const struct Command* c) {
                              rgba) != RDR_OK) {
               // geom_project failed (w<=0 re-check): sentinel.
               tv.inv_w = -1;
+            } else {
+              // R.3-fog: populate per-vertex fog from the camera-space view-z
+              // proxy (clip.w = +view_z under this +z-forward projection; see
+              // geom_fog_factor / geom.h Q9). Disabled fog -> 0 (no-op raster).
+              tv.fog = geom_fog_u8(&f->rstate.fog, clip.w);
             }
           }
           uint32_t const emitted = geom_emit_tvert(&f->geom, &tv);

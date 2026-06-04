@@ -158,6 +158,29 @@ TEST(Geom, FogFactorLinearRamp) {
   EXPECT_NEAR((double)mid / 65536.0, 0.5, 0.01);
 }
 
+// ---- fog u8 (R.3): factor [0,1] -> TVtx.fog [0,255]; disabled -> 0 ----------
+TEST(Geom, FogU8ScalesAndGatesOnEnabled) {
+  struct FogState fog;
+  memset(&fog, 0, sizeof fog);
+  fog.enabled = 1;
+  fog.near_z = fx(2.0);
+  fog.far_z = fx(10.0);
+  fog.color = 0;
+  // Endpoints exact: <=near -> 0, >=far -> 255.
+  EXPECT_EQ(geom_fog_u8(&fog, fx(1.0)), 0);
+  EXPECT_EQ(geom_fog_u8(&fog, fx(12.0)), 255);
+  // Midpoint ~ 0.5 * 255 ~ 127 (truncation; within a quantum).
+  uint8_t const mid = geom_fog_u8(&fog, fx(6.0));
+  EXPECT_GE((int)mid, 126);
+  EXPECT_LE((int)mid, 128);
+  // Monotone: farther z -> more fog.
+  EXPECT_LT((int)geom_fog_u8(&fog, fx(3.0)), (int)geom_fog_u8(&fog, fx(8.0)));
+  // Disabled -> always 0 regardless of z (raster fog step no-ops).
+  fog.enabled = 0;
+  EXPECT_EQ(geom_fog_u8(&fog, fx(6.0)), 0);
+  EXPECT_EQ(geom_fog_u8(&fog, fx(12.0)), 0);
+}
+
 // ---- backface cull: pin winding against the oracle -------------------------
 // Build a front-facing (NDC-CCW) triangle, project it, and confirm CULL_BACK
 // keeps it while CULL_FRONT drops it; mirrored modelview (det<0) flips that.
@@ -851,4 +874,87 @@ TEST(GeomMaterial, EmittedTriRefsCarryInternedId) {
   EXPECT_GT(seen1, 0);
   EXPECT_EQ(seen0, 2 * seen1);  // mat_a drawn twice, mat_b once (same geometry)
   EXPECT_EQ(seen_other, 0);
+}
+
+// ---- fog end-to-end (R.3): geom_run populates TVtx.fog from view-z ----------
+// CMD_SET_FOG enables fog; LOAD_VERTS at distinct depths must birth DISTINCT,
+// monotone-with-distance TVtx.fog. Without SET_FOG, fog stays 0
+// (bit-identical).
+TEST(GeomShare, FogPopulatesPerVertexFromDepth) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  // Three verts at increasing view-z (clip.w = +view_z here): z=4,12,30.
+  static struct Vtx verts[3];
+  verts[0] = mk_vtx(0, 0, 4);
+  verts[1] = mk_vtx(0, 0, 12);
+  verts[2] = mk_vtx(0, 0, 30);
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+
+  struct Command cmds[4];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_SET_FOG;
+  cmds[n].u.set_fog.near_z = fx(5.0);
+  cmds[n].u.set_fog.far_z = fx(25.0);
+  cmds[n].u.set_fog.color = 0;
+  ++n;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  ASSERT_EQ(f.geom.tvert_count, 3U);
+  // z=4 <= near(5) -> 0; z=30 >= far(25) -> 255; z=12 strictly between.
+  EXPECT_EQ((int)f.geom.tverts[0].fog, 0);
+  EXPECT_EQ((int)f.geom.tverts[2].fog, 255);
+  EXPECT_GT((int)f.geom.tverts[1].fog, 0);
+  EXPECT_LT((int)f.geom.tverts[1].fog, 255);
+  // Monotone with distance.
+  EXPECT_LT((int)f.geom.tverts[0].fog, (int)f.geom.tverts[1].fog);
+  EXPECT_LT((int)f.geom.tverts[1].fog, (int)f.geom.tverts[2].fog);
+}
+
+// Fog DISABLED (no SET_FOG): every TVtx.fog stays 0 -> raster fog no-ops ->
+// bit-identical to the pre-R.3 pipeline (the load-bearing regression guard).
+TEST(GeomShare, FogDisabledBirthsZero) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  static struct Vtx verts[3];
+  verts[0] = mk_vtx(0, 0, 4);
+  verts[1] = mk_vtx(0, 0, 12);
+  verts[2] = mk_vtx(0, 0, 30);
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+
+  struct Command cmds[3];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  ASSERT_EQ(f.geom.tvert_count, 3U);
+  for (uint32_t i = 0; i < f.geom.tvert_count; ++i) {
+    EXPECT_EQ((int)f.geom.tverts[i].fog, 0);
+  }
 }
