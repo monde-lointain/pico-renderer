@@ -16,13 +16,16 @@
 #include <string.h>
 
 #include "cmd/cmd.h"
+#include "demo/assets/terrain/terrain_atlas.h"  // T1 gutter'd terrain atlas (512^2 5551)
 #include "demo/assets/terrain/terrain_grid_idx.h"  // shared per-tile index pattern
 #include "demo/assets/terrain/terrain_grid_vtx.h"  // D.1 baked terrain mesh (pos/UV)
+#include "demo/assets/terrain/terrain_tree0.h"  // T1 tree0 billboard sprite (32x64 5551)
 #include "demo/camera_path_gen.h"  // committed Q16.16 scripted V*P table
 #include "demo/debug_terrain_gen.h"  // committed FLASH-CONST debug-colored geometry
 #include "fixed/fixed.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"  // enum Button (free-fly toggle/nudge)
+#include "shade/shade.h"  // CC_* combiner mux ids + COMBINE_* presets (T1 materials)
 
 // ---- Q16.16 matrix builders (demo-local; fixed.cc has no proj/lookAt) ------
 #define FXONE (1 << 16)
@@ -354,12 +357,17 @@ uint32_t demo_terrain_geometry(struct Vtx* verts, uint16_t* idx) {
 
 uint32_t demo_tree_geometry(struct Vtx* verts, uint16_t* idx) {
   // Tree billboard quads: upright planes STANDING on the ground (extending in
-  // +Y), scattered over the field at distinct positions, each a DISTINCT bright
-  // debug sprite color (so a sprite-id transform/winding bug is catchable). The
-  // quad spans X (width) x Y (height); both faces drawn (CULL_BACK keeps the
-  // one toward the camera). Two tris per quad. NOT view-aligned (true
-  // billboarding needs per-frame float; a static upright quad keeps the
-  // per-frame path float-free) — fine for the placeholder.
+  // +Y), scattered over the field at distinct positions, textured with the
+  // tree0 sprite (MODULATE = TEXEL x SHADE) under a gray Gouraud gradient. The
+  // quad spans X (width) x Y (height); double-sided (CULL_NONE, N6). Two tris
+  // per quad. NOT view-aligned (true billboarding needs per-frame float; a
+  // static upright quad keeps the per-frame path float-free) — fine for T1.
+  //
+  // UVs map the 32x64 tree0 sprite upright (S10.5 = texel*32 -> u in {0,1024},
+  // v in {0,2048}; texture v=0 at top). Per-corner: 0 bl=(0,2048) 1 br=(1024,
+  // 2048) 2 tl=(0,0) 3 tr=(1024,0). The per-vertex color is the N64 tree's gray
+  // gradient: top corners (2,3) = 206, bottom corners (0,1) = 157 — exercises
+  // the Gouraud interp path through the MODULATE combiner.
   int o = 0;
   for (int t = 0; t < DEMO_TREE_COUNT; ++t) {
     // Deterministic scatter inside the field (XZ ground positions).
@@ -367,32 +375,35 @@ uint32_t demo_tree_geometry(struct Vtx* verts, uint16_t* idx) {
     int const cz = -12 + ((t * 11) % 25);
     int const hw = 2;  // billboard half-width (world units, along X)
     int const ht = 5;  // billboard height (world units, along +Y)
-    // Distinct bright sprite color per sprite-id.
-    uint8_t const r = (uint8_t)(128 + ((t * 43) & 0x7F));
-    uint8_t const g = (uint8_t)(128 + ((t * 29) & 0x7F));
-    uint8_t const bcol = (uint8_t)(128 + ((t * 71) & 0x7F));
     int const base = t * 4;
     // Corners: 0 bl, 1 br, 2 tl, 3 tr (Y up, X across; Z fixed at cz).
     int const corner[4][2] = {{-hw, 0}, {hw, 0}, {-hw, ht}, {hw, ht}};
+    // Per-corner sprite UVs (S10.5) and gray Gouraud gradient (top 206 / bot
+    // 157), matched to the corner order above.
+    int const corner_uv[4][2] = {{0, 2048}, {1024, 2048}, {0, 0}, {1024, 0}};
+    uint8_t const corner_gray[4] = {157, 157, 206, 206};
     for (int k = 0; k < 4; ++k) {
       struct Vtx* v = &verts[base + k];
       memset(v, 0, sizeof *v);
       v->pos[0] = (int16_t)(cx + corner[k][0]);
       v->pos[1] = (int16_t)(TERRAIN_BASE_Y + corner[k][1]);
       v->pos[2] = (int16_t)cz;
-      v->c.rgba[0] = r;
-      v->c.rgba[1] = g;
-      v->c.rgba[2] = bcol;
+      v->uv[0] = (int16_t)corner_uv[k][0];
+      v->uv[1] = (int16_t)corner_uv[k][1];
+      uint8_t const gray = corner_gray[k];
+      v->c.rgba[0] = gray;
+      v->c.rgba[1] = gray;
+      v->c.rgba[2] = gray;
       v->c.rgba[3] = 255;
     }
     uint16_t const a = (uint16_t)(base + 0);
     uint16_t const b = (uint16_t)(base + 1);
     uint16_t const c2 = (uint16_t)(base + 2);
     uint16_t const d = (uint16_t)(base + 3);
-    // Front face winding toward -Z (a,c,b / b,c,d) AND the mirror (a,b,c /
-    // b,d,c) is NOT added — CULL_BACK drops whichever side faces away. Provide
-    // the -Z-facing order; the upright quad is visible from the +Z camera
-    // hemisphere.
+    // Two tris per quad (a,c,b / b,c,d). The tree material is CULL_NONE (N6
+    // double-sided billboard), so the quad is visible from either hemisphere —
+    // the winding sense no longer culls a side. Order kept verbatim from the
+    // debug placeholder so the geometry is unchanged but for uv + color.
     idx[o++] = a;
     idx[o++] = c2;
     idx[o++] = b;
@@ -417,6 +428,58 @@ static struct Mat4fx s_terrain_view;
 static struct Mat4fx s_freefly_vp;     // free-fly only: projection * view
 static struct Mat4fx s_terrain_model;  // identity (verts authored in world)
 static struct RenderState s_terrain_state;
+static struct RenderState s_tree_state;
+
+// ---- T1 material fillers (single source of truth) --------------------------
+// The build below populates its statics through THESE, and tests assert the
+// bound material through THESE, so the constants live in exactly one place.
+void demo_terrain_material(struct RenderState* out) {
+  memset(out, 0, sizeof *out);
+  out->tex.data = g_terrain_atlas;
+  out->tex.w = (uint16_t)g_terrain_atlas_w;  // 512
+  out->tex.h = (uint16_t)g_terrain_atlas_h;  // 512
+  out->tex.format = (uint8_t)TEXFMT_RGBA5551;
+  // pow2 512 atlas: REPEAT mask-wrap is the S0-locked sampler discipline. UVs
+  // are absolute within [0,512) so it samples in-range.
+  out->tex.wrap_s = (uint8_t)WRAP_REPEAT;
+  out->tex.wrap_t = (uint8_t)WRAP_REPEAT;
+  out->tex.filter = (uint8_t)FILTER_POINT;
+  out->tex.mip_levels = 1;
+  out->tex.tlut = 0;
+  // P4-2 ENV wiring: TEXEL0 x ENV. Without it the terrain would be untinted.
+  out->combiner.mode = (uint8_t)COMBINE_CUSTOM;
+  out->combiner.a = (uint8_t)CC_TEXEL0;
+  out->combiner.b = (uint8_t)CC_ZERO;
+  out->combiner.c = (uint8_t)CC_ENVIRONMENT;
+  out->combiner.d = (uint8_t)CC_ZERO;
+  // T1 placeholder ENV tint; faithful N64 ENV resolved at T4 from the RDP
+  // combine. Light sage: deterministic, provably non-identity, preserves the
+  // atlas hue variety.
+  out->env_color = rgb565(216, 232, 200);
+  out->zmode = (uint8_t)ZMODE_OPAQUE;
+  out->cull = (uint8_t)CULL_BACK;
+  out->alpha_cmp = 0;
+  out->lit = 0;
+}
+
+void demo_tree_material(struct RenderState* out) {
+  memset(out, 0, sizeof *out);
+  out->tex.data = g_terrain_tree0;
+  out->tex.w = 32;
+  out->tex.h = 64;
+  out->tex.format = (uint8_t)TEXFMT_RGBA5551;
+  // CLAMP so the sprite edge does not wrap.
+  out->tex.wrap_s = (uint8_t)WRAP_CLAMP;
+  out->tex.wrap_t = (uint8_t)WRAP_CLAMP;
+  out->tex.filter = (uint8_t)FILTER_POINT;
+  out->tex.mip_levels = 1;
+  out->tex.tlut = 0;
+  out->combiner.mode = (uint8_t)COMBINE_MODULATE;  // TEXEL x SHADE
+  out->zmode = (uint8_t)ZMODE_OPAQUE;
+  out->cull = (uint8_t)CULL_NONE;  // N6 double-sided billboard
+  out->alpha_cmp = 0;
+  out->lit = 0;
+}
 
 // ---- scripted camera (deterministic; FLOAT-FREE per-frame path) ------------
 // Q5/TW-05 (Lead decision): the scripted path's V*P matrices are baked OFFLINE
@@ -562,10 +625,12 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   c.u.set_matrix.mat = vp;
   push(CMD_SET_MATRIX, &c);
 
-  memset(&s_terrain_state, 0, sizeof s_terrain_state);
-  s_terrain_state.zmode = ZMODE_OPAQUE;
-  s_terrain_state.cull = CULL_BACK;
-  s_terrain_state.lit = 0;  // flat-shaded pre-lit debug colors
+  // T1: terrain + trees use DISTINCT materials (textured atlas vs tree sprite),
+  // so each draw is preceded by its own SET_MATERIAL (was one shared untextured
+  // state). The fillers are the single source of truth (also used by tests).
+  demo_terrain_material(&s_terrain_state);
+  demo_tree_material(&s_tree_state);
+
   memset(&c, 0, sizeof c);
   c.u.set_material.state = &s_terrain_state;
   push(CMD_SET_MATERIAL, &c);
@@ -576,7 +641,7 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   c.u.set_matrix.mat = &s_terrain_model;
   push(CMD_SET_MATRIX, &c);
 
-  // ---- terrain mesh: single LOAD_VERTS + DRAW_TRIS batch ----
+  // ---- terrain mesh: textured atlas (TEXEL0 x ENV) ----
   // Submitted straight from the FLASH-CONST arrays (g_debug_*), so no RAM input
   // buffer. count comes from the const-array size (T0-swap-safe; see above).
   memset(&c, 0, sizeof c);
@@ -591,7 +656,10 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   telem->cmdgen_draws += 1;
   telem->cmdgen_tris += terrain_tcount;
 
-  // ---- tree billboards: second batch (same model transform) ----
+  // ---- tree billboards: tree0 sprite (MODULATE), double-sided ----
+  memset(&c, 0, sizeof c);
+  c.u.set_material.state = &s_tree_state;
+  push(CMD_SET_MATERIAL, &c);
   memset(&c, 0, sizeof c);
   c.u.load_verts.ptr = g_debug_tree_vtx;
   c.u.load_verts.count = (uint16_t)tree_vcount;

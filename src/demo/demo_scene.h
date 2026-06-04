@@ -172,9 +172,26 @@ struct DemoTelemetry {
 // Returns the vertex count written (DEMO_TERRAIN_VERTS).
 uint32_t demo_terrain_geometry(struct Vtx* verts, uint16_t* idx);
 
-// Fill caller-provided arrays with the placeholder tree billboard quads (each a
-// distinct debug sprite color by sprite-id). Returns the vertex count.
+// Fill caller-provided arrays with the placeholder tree billboard quads. UVs
+// map the 32x64 tree0 sprite upright (corners bl/br/tl/tr -> the sprite's
+// bottom/bottom/top/top edges, S10.5 = texel*32); the per-vertex color is a
+// gray Gouraud gradient (top 206, bottom 157) exercising the Gouraud interp.
+// Returns the vertex count.
 uint32_t demo_tree_geometry(struct Vtx* verts, uint16_t* idx);
+
+// ---- material fillers (single source of truth for the bound RenderStates) ---
+// Fill *out with the EXACT RenderState demo_terrain_build binds before the
+// terrain draw: the gutter'd 512x512 RGBA5551 atlas (REPEAT/POINT) with the
+// P4-2 ENV combiner (TEXEL0 x ENV, COMBINE_CUSTOM, c=CC_ENVIRONMENT) and a
+// near-neutral light-sage ENV tint. Opaque, CULL_BACK, pre-lit. Tests assert
+// the bound material via these; the build uses the SAME fillers (no duplicated
+// constants).
+void demo_terrain_material(struct RenderState* out);
+
+// Fill *out with the EXACT RenderState demo_terrain_build binds before the tree
+// draw: the 32x64 RGBA5551 tree0 sprite (CLAMP/POINT) with COMBINE_MODULATE
+// (TEXEL x SHADE), double-sided (CULL_NONE, N6 billboard). Opaque, pre-lit.
+void demo_tree_material(struct RenderState* out);
 
 // ---- terrain scene build ----------------------------------------------------
 // Build the terrain scene into `buf` (capacity `cap` Commands) for the given
