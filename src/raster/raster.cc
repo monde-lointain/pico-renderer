@@ -48,8 +48,10 @@ enum { RASTER_AREA_EPS = 256 };
 //   then per pixel:
 //     d256_i = (16 * (int64)w_i * recip_i + ROUND) >> AA_RECIP_SHIFT  (=
 //     256*d_i) cov255 = clamp(128 + d256_min, 0, 255).
-//   len_q124 = isqrt(dx*dx + dy*dy), dx/dy the edge's Q12.4 deltas (<= ~3840 ->
-//   product <= ~3e7 -> int32 isqrt is exact). 16*w*recip fits int64
+//   len_q124 = isqrt(dx*dx + dy*dy), dx/dy the edge's Q12.4 deltas. Coords are
+//   guard-band clipped (clip.h RDR_GUARD_X/Y = 2*screen = +/-480 px -> ~7680
+//   Q12.4), so an edge delta reaches ~15360 and dx*dx+dy*dy ~5e8 -> still well
+//   within int32 (< 2^31), and the isqrt is exact. 16*w*recip fits int64
 //   comfortably. AA_RECIP_SHIFT=22: 2^22/len has ~22 bits of headroom even for
 //   a 1px edge (len_q124~16 -> recip ~262144); precision near the edge (small
 //   w) is the only regime that matters since interiors saturate to 255.

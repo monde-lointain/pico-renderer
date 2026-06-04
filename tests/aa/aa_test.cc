@@ -192,6 +192,15 @@ TEST(AaResolve, VerticalEdgeMatchesRefAndIsEdgeGated) {
   }
   uint16_t ref[RDR_TILE_W * RDR_TILE_H];
   resolve_ref(g_fb, g_cov, 0, 0, ref);
+  // Snapshot the ORIGINAL tile colours BEFORE the in-place resolve so the
+  // anti-vacuity count below is "pixels whose value actually changed", not
+  // "pixels visited" (nit #3).
+  uint16_t orig[RDR_TILE_W * RDR_TILE_H];
+  for (int ty = 0; ty < RDR_TILE_H; ++ty) {
+    for (int tx = 0; tx < RDR_TILE_W; ++tx) {
+      orig[(ty * RDR_TILE_W) + tx] = g_fb[(ty * RDR_SCREEN_W) + tx];
+    }
+  }
 
   aa_resolve_tile(g_fb, g_cov, 0, 0);
 
@@ -204,14 +213,17 @@ TEST(AaResolve, VerticalEdgeMatchesRefAndIsEdgeGated) {
       // Edge-gated: a FULL-coverage interior pixel is unchanged.
       if (g_cov[(ty * RDR_TILE_W) + tx] >= 255) {
         ASSERT_EQ(got, (tx < edge_x) ? col_a : col_b);
-      } else {
-        ++changed;  // count edge pixels processed (ref may equal orig if flat)
+      }
+      // Anti-vacuity: count pixels whose value ACTUALLY changed (proves the
+      // resolve did real work, not merely that edge pixels were visited).
+      if (got != orig[(ty * RDR_TILE_W) + tx]) {
+        ++changed;
       }
       // No sentinel ever leaked in (would mean an OOB read).
       ASSERT_NE(got, sentinel) << "sentinel leaked at tx=" << tx;
     }
   }
-  EXPECT_GT(changed, 0);
+  EXPECT_GT(changed, 0) << "resolve changed no pixel — the edge blend is inert";
   aa_set_enabled(0);
 }
 

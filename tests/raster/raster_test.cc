@@ -2646,3 +2646,211 @@ TEST(RasterCoverage, ParityWithFloatOracle) {
   }
   EXPECT_GT(checked, 10) << "too few partial edge pixels — test is weak";
 }
+
+// AA ON, NEGATIVE-initial-area tri (triggers tri_setup's v1<->v2 winding swap).
+// This is the ONLY check that distinguishes a post-swap recip (correct: the
+// per-edge gradient reciprocals must be computed from the FINAL, swapped verts)
+// from a pre-swap recip (the classic skew bug — would still pass every
+// positive-area parity test). We feed reversed winding, reconstruct the SAME
+// post-swap ordering raster.cc produces (swap v1<->v2 to positive area), and
+// assert cov-byte parity vs oracle_coverage computed on those FINAL edges.
+TEST(RasterCoverage, ParityWithFloatOracleReversedWinding) {
+  OneTri o;
+  // A NEGATIVE-initial-area tri with DELIBERATELY ASYMMETRIC edge lengths so a
+  // pre-swap recip would mis-pair the per-edge gradient: under the v1<->v2
+  // swap, slot r1 (edge v2->v0) and slot r2 (edge v0->v1) exchange lengths (~52
+  // px vs ~17 px here), so a pre-swap recip pairs the 17 px reciprocal with the
+  // 52 px edge (~3x skew) -> cov parity blows past the +/-3 tolerance. (A
+  // symmetric tri would hide it: r0's edge length is swap-invariant and a
+  // near-isoceles r1/r2 makes the mis-pairing invisible.)
+  one_tri(&o, mk_vtx(8, 28, 0, 0, 0x10000), mk_vtx(20, 40, 0, 0, 0x10000),
+          mk_vtx(56, 8, 0, 0, 0x10000));
+  // Sanity: the INPUT really is negative initial area (so the swap path runs).
+  double const ix0 = (double)o.pool[0].x;
+  double const iy0 = (double)o.pool[0].y;
+  double const ix1 = (double)o.pool[1].x;
+  double const iy1 = (double)o.pool[1].y;
+  double const ix2 = (double)o.pool[2].x;
+  double const iy2 = (double)o.pool[2].y;
+  double const init_area2 = edge_f(ix0, iy0, ix1, iy1, ix2, iy2);
+  ASSERT_LT(init_area2, 0.0)
+      << "test setup wrong — input must be negative-area to exercise the swap";
+
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+
+  // Reconstruct the FINAL (post-swap) vertex order: tri_setup swaps v1<->v2 on
+  // negative area, leaving v0 fixed. cov_byte uses these final edges.
+  double const x0 = ix0;
+  double const y0 = iy0;
+  double const x1 = ix2;  // swapped
+  double const y1 = iy2;
+  double const x2 = ix1;
+  double const y2 = iy1;
+  double const len0 = edge_len_q124(x1, y1, x2, y2);  // w0 = edge(v1,v2)
+  double const len1 = edge_len_q124(x2, y2, x0, y0);  // w1 = edge(v2,v0)
+  double const len2 = edge_len_q124(x0, y0, x1, y1);  // w2 = edge(v0,v1)
+
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint8_t const cv = cov[(sy * RDR_TILE_W) + sx];
+      if (cv == AA_COV_FULL) {
+        continue;
+      }
+      double const px = (double)((sx << 4) + 8);
+      double const py = (double)((sy << 4) + 8);
+      double const w0 = edge_f(x1, y1, x2, y2, px, py);
+      double const w1 = edge_f(x2, y2, x0, y0, px, py);
+      double const w2 = edge_f(x0, y0, x1, y1, px, py);
+      double const d0 = w0 / (16.0 * len0);
+      double const d1 = w1 / (16.0 * len1);
+      double const d2 = w2 / (16.0 * len2);
+      float ocov = 0.0F;
+      ASSERT_EQ(oracle_coverage((float)d0, (float)d1, (float)d2, &ocov), 0);
+      int const expect = (int)lround((double)ocov * 255.0);
+      int const diff = (int)cv - expect;
+      int const adiff = diff < 0 ? -diff : diff;
+      ASSERT_LE(adiff, 3) << "reversed-winding coverage parity at (" << sx
+                          << "," << sy << ") cv=" << (int)cv
+                          << " oracle=" << expect
+                          << " — recip likely computed PRE-swap (skew bug)";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 10) << "too few partial edge pixels — test is weak";
+}
+
+// AA ON, TEXTURED-opaque path: the winning textured fragment writes coverage
+// (raster.cc:587) the SAME way the flat path does (cov_byte over the final
+// edges). nit #2: value-check it (the determinism CRC alone never pinned the
+// value). Parity vs oracle_coverage on the partial edge pixels.
+TEST(RasterCoverage, TexturedOpaqueParityWithOracle) {
+  struct Tex565 tex;
+  make_tex565(&tex);
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  tex_desc_565(&rs.tex, &tex);
+  rs.combiner.mode = COMBINE_MODULATE;
+  rs.alpha_cmp = 0;
+  const struct RenderState* table = &rs;
+
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  // Positive-area, low-frequency; distinct inv_w (perspective) — coverage is
+  // path-independent so the textured write must match the same oracle.
+  pool[0] = mk_tvtx_uv(8, 6, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 14, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(16, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  aa_set_enabled(1);
+  raster_tile(0, &bin, pool, fb, zbuf, table, cov);
+  aa_set_enabled(0);
+
+  double const x0 = (double)pool[0].x;
+  double const y0 = (double)pool[0].y;
+  double const x1 = (double)pool[1].x;
+  double const y1 = (double)pool[1].y;
+  double const x2 = (double)pool[2].x;
+  double const y2 = (double)pool[2].y;
+  double const len0 = edge_len_q124(x1, y1, x2, y2);
+  double const len1 = edge_len_q124(x2, y2, x0, y0);
+  double const len2 = edge_len_q124(x0, y0, x1, y1);
+
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint8_t const cv = cov[(sy * RDR_TILE_W) + sx];
+      if (cv == AA_COV_FULL) {
+        continue;
+      }
+      double const px = (double)((sx << 4) + 8);
+      double const py = (double)((sy << 4) + 8);
+      double const w0 = edge_f(x1, y1, x2, y2, px, py);
+      double const w1 = edge_f(x2, y2, x0, y0, px, py);
+      double const w2 = edge_f(x0, y0, x1, y1, px, py);
+      double const d0 = w0 / (16.0 * len0);
+      double const d1 = w1 / (16.0 * len1);
+      double const d2 = w2 / (16.0 * len2);
+      float ocov = 0.0F;
+      ASSERT_EQ(oracle_coverage((float)d0, (float)d1, (float)d2, &ocov), 0);
+      int const expect = (int)lround((double)ocov * 255.0);
+      int const diff = (int)cv - expect;
+      int const adiff = diff < 0 ? -diff : diff;
+      ASSERT_LE(adiff, 3) << "textured coverage parity at (" << sx << "," << sy
+                          << ") cv=" << (int)cv << " oracle=" << expect;
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 10) << "too few partial edge pixels — test is weak";
+}
+
+// AA ON, XLU path: a covered translucent fragment STAMPS cov==AA_COV_FULL
+// (raster.cc:747 — AA ignores translucent geometry, plan v1). nit #2:
+// value-check an XLU-covered pixel reads full coverage (so the resolve treats
+// it as interior, never edge-blending over the alpha-over result).
+TEST(RasterCoverage, XluFragmentStampsFullCoverage) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);  // fractional alpha so the XLU fragment writes
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  const struct RenderState* table = &rs;
+
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  uint16_t const bg = rgb565_pack(30, 70, 110);
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  aa_set_enabled(1);
+  raster_tile(0, &bin, pool, fb, zbuf, table, cov);
+  aa_set_enabled(0);
+
+  // Find a pixel the XLU fragment actually touched (fb changed from bg), assert
+  // its coverage is FULL (255). Anti-vacuity: require we found one.
+  int found = 0;
+  for (int sy = 0; sy < RDR_TILE_H && !found; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W && !found; ++sx) {
+      if (fb[(sy * RDR_SCREEN_W) + sx] != bg) {
+        EXPECT_EQ(cov[(sy * RDR_TILE_W) + sx], AA_COV_FULL)
+            << "XLU-covered pixel (" << sx << "," << sy
+            << ") must stamp full coverage (AA ignores XLU)";
+        found = 1;
+      }
+    }
+  }
+  EXPECT_EQ(found, 1) << "no XLU fragment blended — test is vacuous";
+}
