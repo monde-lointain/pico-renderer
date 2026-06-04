@@ -14,13 +14,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "demo/camera_path_gen.h"  // committed scripted V*P table (float-free)
+#include "demo/camera_path_gen.h"  // committed scripted V*P + sky table (float-free)
 #include "demo/debug_terrain_gen.h"  // committed FLASH-CONST placeholder geometry
 #include "fixed/fixed.h"             // Vec4fx, fx_* (Δ4 u_iw overflow probe)
 #include "geom/geom.h"               // geom_transform_clip/project (Δ4 probe)
 #include "gfx/framebuffer.h"
 #include "gtest/gtest.h"
 #include "platform/platform.h"  // enum Button (camera trace)
+#include "png_io.h"             // png_write_rgb8 (env-gated visual dump)
 #include "rdr/config.h"
 #include "rdr/frame.h"
 #include "rdr/rdr.h"
@@ -172,6 +173,10 @@ static void render_terrain(const struct DemoCamera* cam,
   g_frame.width = RDR_SCREEN_W;
   g_frame.height = RDR_SCREEN_H;
   ASSERT_EQ(rdr_begin_frame(&g_frame), RDR_OK);
+  // T3a: fill the sky-blit list exactly as main.cc does (after begin, before
+  // end), so the host-rendered fb mirrors the device frame for frame (and the
+  // fb_crc golden / on-target reference includes the scrolling panorama).
+  demo_fill_blits(&g_frame, cam);
   ASSERT_EQ(rdr_submit(&g_frame, cmds), RDR_OK);
   ASSERT_EQ(rdr_end_frame(&g_frame), RDR_OK);
 }
@@ -556,6 +561,45 @@ TEST(TerrainSceneGuard, DumpFbCrcReferenceSequence) {
   }
 }
 
+// ENV-GATED PNG DUMP (visual inspection). The host fb_crc digest pins
+// determinism but NOT visual correctness — the T3a panorama's vertical
+// orientation + overall look need an eyeball (the T2 lesson). Set
+// DUMP_FB_PNG=<dir> to write frame_<K>.png for a few representative scripted
+// frames (full sky+terrain, exactly as the device renders); SKIPs otherwise.
+TEST(TerrainSceneGuard, DumpFramePng) {
+  const char* dir = getenv("DUMP_FB_PNG");
+  if (dir == nullptr) {
+    GTEST_SKIP() << "set DUMP_FB_PNG=<dir> to write frame PNGs";
+  }
+  static uint8_t rgb[RDR_SCREEN_W * RDR_SCREEN_H * 3];
+  int const want[] = {0, 120, 240, 360};
+  for (int wi = 0; wi < 4; ++wi) {
+    struct DemoCamera cam;
+    struct DemoScroll scroll;
+    struct DemoTelemetry telem;
+    demo_camera_init(&cam);
+    demo_scroll_init(&scroll);
+    for (int f = 0; f < want[wi]; ++f) {
+      demo_camera_advance(&cam, 0, 0);
+      demo_scroll_advance(&scroll);
+    }
+    render_terrain(&cam, &scroll, &telem);
+    for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+      int r;
+      int g;
+      int b;
+      unpack565(g_fb.px[i], &r, &g, &b);
+      rgb[(i * 3) + 0] = (uint8_t)r;
+      rgb[(i * 3) + 1] = (uint8_t)g;
+      rgb[(i * 3) + 2] = (uint8_t)b;
+    }
+    char path[256];
+    snprintf(path, sizeof path, "%s/frame_%03d.png", dir, want[wi]);
+    EXPECT_EQ(png_write_rgb8(path, rgb, RDR_SCREEN_W, RDR_SCREEN_H), 0)
+        << "png_write failed: " << path;
+  }
+}
+
 // ARENA-BINS GUARD (Wave-E): the T0 probe found the OLD fixed per-tile bins
 // (RDR_REFS_PER_TILE=256) overflowed every frame — worst single tile demanded
 // 759 tris, dropping real geometry. Arena-backed variable bins draw from one
@@ -609,6 +653,114 @@ TEST(TerrainSceneGuard, ArenaBinsNoOverflowAcrossScriptedLoop) {
       << "job high-water at/over cap — size RDR_BIN_MAX_JOBS up";
 }
 
+// ===========================================================================
+// T3a panorama sky blit
+// ===========================================================================
+
+// The committed sky table must stay in range, actually scroll (azimuth-coupled,
+// not a constant), and keep the horizon in the upper frame for the look-down
+// scripted path — the sky band anchors there to meet the 3D terrain horizon.
+TEST(TerrainSceneGuard, SkyTableInRangeAndScrolls) {
+  int16_t const first = g_scripted_sky[0][0];
+  bool varies = false;
+  for (uint32_t f = 0; f < (uint32_t)SCRIPTED_FRAME_COUNT; ++f) {
+    int const scroll_x = g_scripted_sky[f][0];
+    int const horizon = g_scripted_sky[f][1];
+    EXPECT_GE(scroll_x, 0);
+    EXPECT_LT(scroll_x, DEMO_PANORAMA_W)
+        << "scroll_x out of cylinder at f=" << f;
+    EXPECT_GE(horizon, 0);
+    EXPECT_LT(horizon, RDR_SCREEN_H / 2)
+        << "horizon not in the upper frame at f=" << f << " (=" << horizon
+        << ")";
+    if (g_scripted_sky[f][0] != first) {
+      varies = true;
+    }
+  }
+  EXPECT_TRUE(varies) << "panorama scroll never changes — azimuth not coupled";
+}
+
+// The blit fill must be DETERMINISTIC and PERIODIC with the camera loop: frame
+// K and frame K+SCRIPTED_FRAME_COUNT produce the SAME descriptor. This is what
+// keeps the on-target fb_crc cross-check aligned on frame%480 now that the sky
+// renders (T1/T2 relied on no scroll rendering; T3a preserves the period).
+// Compares the per-frame-varying fields explicitly (not memcmp — Blit2dRect has
+// padding, no unique object representation).
+TEST(TerrainSceneGuard, PanoramaBlitDeterministicAndPeriodic) {
+  g_frame.width = RDR_SCREEN_W;
+  g_frame.height = RDR_SCREEN_H;
+  struct DemoCamera cam;
+  demo_camera_init(&cam);
+  for (int i = 0; i < 37; ++i) {
+    demo_camera_advance(&cam, 0, 0);  // -> scripted frame 37
+  }
+  demo_fill_blits(&g_frame, &cam);
+  EXPECT_EQ(g_frame.blit_count, 1U);
+  struct Blit2dRect const a = g_frame.blits[0];
+  EXPECT_EQ(a.mode, (uint8_t)BLIT2D_PANORAMA);
+  EXPECT_NE(a.src, (const void*)nullptr);   // bound to the committed panorama
+  EXPECT_NE(a.tlut, (const void*)nullptr);  // bound to the committed TLUT
+  EXPECT_EQ(a.dst_w, (uint16_t)RDR_SCREEN_W);
+  for (int i = 0; i < SCRIPTED_FRAME_COUNT; ++i) {
+    demo_camera_advance(&cam, 0, 0);  // -> frame 37 + 480
+  }
+  demo_fill_blits(&g_frame, &cam);
+  struct Blit2dRect const b = g_frame.blits[0];
+  // The azimuth scroll + projected horizon are the per-frame fields; equal over
+  // one full loop => period 480 holds (the on-target alignment invariant).
+  EXPECT_EQ(a.scroll_x, b.scroll_x)
+      << "panorama scroll not periodic over the camera loop — breaks frame%480";
+  EXPECT_EQ(a.horizon_row, b.horizon_row) << "horizon not periodic over loop";
+  EXPECT_EQ(a.mode, b.mode);
+  EXPECT_EQ(a.src, b.src);
+  EXPECT_EQ(a.dst_w, b.dst_w);
+  EXPECT_EQ(a.dst_h, b.dst_h);
+}
+
+// The panorama must actually render INTO the frame as a FULL-FRAME backdrop:
+// every pixel is panorama, or terrain rasterized over it, so the clear color is
+// essentially absent (a real gap => the backdrop is not wired / not covering).
+// It must also produce decoded color variety (CI8+TLUT), not a flat fill.
+// Renders the scripted start frame.
+TEST(TerrainSceneGuard, PanoramaBackdropCoversFrame) {
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);
+  demo_scroll_init(&scroll);
+  render_terrain(&cam, &scroll, &telem);
+
+  // Full-frame backdrop + terrain over it => clear color essentially absent
+  // (only a stray pixel that coincidentally equals it). A genuine gap (backdrop
+  // missing) lights up thousands.
+  uint16_t const clear = g_frame.clear_color;
+  int clear_px = 0;
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    if (g_frame.fb[i] == clear) {
+      ++clear_px;
+    }
+  }
+  EXPECT_LT(clear_px, 200) << "clear-color gaps (" << clear_px
+                           << ") — backdrop not covering frame";
+  // The upper sky+hills region (rows above the look-down terrain edge ~row 90)
+  // is pure panorama backdrop: scanning it must yield several distinct colors
+  // (sky -> hill scenery) — a flat fill would mean a broken sampler / a
+  // single-index source window.
+  unsigned char seen[512];
+  memset(seen, 0, sizeof seen);
+  int distinct = 0;
+  for (int y = 0; y < 70; ++y) {
+    for (int x = 0; x < RDR_SCREEN_W; ++x) {
+      int const b = hue_bucket(g_frame.fb[(y * RDR_SCREEN_W) + x]);
+      if (!seen[b]) {
+        seen[b] = 1;
+        ++distinct;
+      }
+    }
+  }
+  EXPECT_GE(distinct, 3) << "panorama backdrop is a flat fill — decode broken?";
+}
+
 // FB_CRC STREAM GOLDEN (NIT-1): pin the demo scene's full per-frame fb_crc
 // stream — the arena-bins model's actual rendered OUTPUT — so any change to
 // determinism or visible geometry trips a host test. There is no golden vs the
@@ -640,7 +792,7 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0x1ad2135dU)
+  EXPECT_EQ(digest, 0x22856499U)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 

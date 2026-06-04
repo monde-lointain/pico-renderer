@@ -19,12 +19,15 @@
 #include "demo/assets/terrain/terrain_atlas.h"  // T1 gutter'd terrain atlas (512^2 5551)
 #include "demo/assets/terrain/terrain_grid_idx.h"  // shared per-tile index pattern
 #include "demo/assets/terrain/terrain_grid_vtx.h"  // D.1 baked terrain mesh (pos/UV)
+#include "demo/assets/terrain/terrain_panorama.h"  // T3a CI8 512x64 sky panorama
+#include "demo/assets/terrain/terrain_tlut.h"      // T3a panorama RGBA5551 TLUT
 #include "demo/assets/terrain/terrain_tree0.h"  // T1 tree0 billboard sprite (32x64 5551)
-#include "demo/camera_path_gen.h"  // committed Q16.16 scripted V*P table
+#include "demo/camera_path_gen.h"  // committed Q16.16 scripted V*P + sky table
 #include "demo/debug_terrain_gen.h"  // committed FLASH-CONST debug-colored geometry
 #include "fixed/fixed.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"  // enum Button (free-fly toggle/nudge)
+#include "rdr/frame.h"  // struct Frame (blits[]/blit_count), RDR_SCREEN_*
 #include "shade/shade.h"  // CC_* combiner mux ids + COMBINE_* presets (T1 materials)
 
 // ---- Q16.16 matrix builders (demo-local; fixed.cc has no proj/lookAt) ------
@@ -573,6 +576,86 @@ void demo_scroll_init(struct DemoScroll* s) { s->phase = 0; }
 void demo_scroll_advance(struct DemoScroll* s) {
   s->phase =
       (s->phase + (uint32_t)DEMO_SCROLL_DELTA) % (uint32_t)DEMO_SCROLL_PERIOD;
+}
+
+// ---- T3a panorama sky blit -------------------------------------------------
+// The committed g_terrain_panorama is a 512x64 CI8 cylinder (DEMO_PANORAMA_W is
+// the 360-deg circumference, defined in camera_path_gen.h). It is a FULL
+// surround scene (sky / hills / water reflection), not a sky gradient, so it is
+// drawn as a FULL-FRAME cylindrical BACKDROP: the source wraps horizontally by
+// the view azimuth (scroll_x) and stretches over the whole frame. The 3D sweep
+// rasterizes over it (z-write, no zbuf seed), so the seam where sky meets the
+// terrain is just the terrain silhouette — inherently gap-free (T3 N4). The
+// per-frame projected horizon_row is NOT needed to place this backdrop, but is
+// carried in the descriptor (panorama ignores it) for T3b clouds. (A thin
+// horizon band was prototyped but the surround art reads better full-frame.)
+#define DEMO_PANORAMA_H 64
+
+// Free-fly sky (sanctioned interactive-float exception; never fb_crc-compared):
+// recompute scroll_x (view azimuth) + horizon_row (level ray; here a no-roll
+// small-angle form ndc_y = -fscale*fy/hlen, geom.cc viewport map row =
+// H/2*(1-ndc_y)) from the integer eye/look in float. APPROXIMATES (not bit-for-
+// bit) gen_camera_path.sky_for_frame's full V*P projection — they agree
+// VISUALLY; exactness is unneeded since free-fly is never fb_crc-compared.
+static void freefly_sky(const struct DemoCamera* cam, int* scroll_x,
+                        int* horizon_row) {
+  double const pi = 3.14159265358979323846;
+  double const ex = (double)cam->eye[0] / 65536.0;
+  double const ey = (double)cam->eye[1] / 65536.0;
+  double const ez = (double)cam->eye[2] / 65536.0;
+  double const fx = ((double)cam->look[0] / 65536.0) - ex;
+  double const fy = ((double)cam->look[1] / 65536.0) - ey;
+  double const fz = ((double)cam->look[2] / 65536.0) - ez;
+  int sx = (int)lrint(atan2(fx, fz) / (2.0 * pi) * (double)DEMO_PANORAMA_W);
+  sx %= DEMO_PANORAMA_W;
+  if (sx < 0) {
+    sx += DEMO_PANORAMA_W;
+  }
+  *scroll_x = sx;
+  double const hlen = sqrt((fx * fx) + (fz * fz));
+  if (hlen <= 0.0) {
+    *horizon_row = RDR_SCREEN_H / 2;
+    return;
+  }
+  double const fscale = 1.0 / tan(50.0 * 0.5 * pi / 180.0);
+  double const ndc_y = -fscale * fy / hlen;
+  int row = (int)lrint((RDR_SCREEN_H * 0.5) * (1.0 - ndc_y));
+  if (row < 0) {
+    row = 0;
+  }
+  if (row > RDR_SCREEN_H - 1) {
+    row = RDR_SCREEN_H - 1;
+  }
+  *horizon_row = row;
+}
+
+void demo_fill_blits(struct Frame* f, const struct DemoCamera* cam) {
+  int scroll_x;
+  int horizon_row;
+  if (cam->mode == DEMO_CAM_SCRIPTED) {
+    // FLOAT-FREE: index the committed sky table (host==device fb_crc).
+    uint32_t const idx = cam->frame % (uint32_t)SCRIPTED_FRAME_COUNT;
+    scroll_x = (int)g_scripted_sky[idx][0];
+    horizon_row = (int)g_scripted_sky[idx][1];
+  } else {
+    freefly_sky(cam, &scroll_x, &horizon_row);
+  }
+  struct Blit2dRect* b = &f->blits[0];
+  memset(b, 0, sizeof *b);
+  b->mode = (uint8_t)BLIT2D_PANORAMA;
+  b->src = g_terrain_panorama;
+  b->tlut = g_terrain_panorama_tlut;
+  b->src_w = (uint16_t)DEMO_PANORAMA_W;
+  b->src_h = (uint16_t)DEMO_PANORAMA_H;
+  b->dst_x = 0;
+  b->dst_y = 0;
+  b->dst_w = (uint16_t)f->width;
+  b->dst_h = (uint16_t)f->height;  // full-frame cylindrical backdrop
+  b->scroll_x = (uint16_t)scroll_x;
+  b->elevation = 0;  // vertical parallax (pitch) deferred (T4+)
+  // Panorama IGNORES horizon_row; carried for T3b clouds (gradient endpoint).
+  b->horizon_row = (int16_t)horizon_row;
+  f->blit_count = 1;
 }
 
 // ---- terrain scene build ---------------------------------------------------
