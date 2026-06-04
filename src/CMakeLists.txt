@@ -8,6 +8,7 @@ add_subdirectory(platform)
 
 # Renderer modules (Stream A pre-registration; feature branches add only their own
 # sources behind these already-registered subdirs — never edit this file again).
+add_subdirectory(prof)  # T5: granular profiler (early — no module deps; others link it)
 add_subdirectory(rdr)
 add_subdirectory(fixed)
 add_subdirectory(arena)

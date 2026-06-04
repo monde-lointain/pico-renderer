@@ -9,6 +9,7 @@
 
 #include <string.h>
 
+#include "prof/prof.h"  // T5: PROF_CLEAR_BLIT + PROF_RASTER_DISPATCH (no-op when off)
 #include "rdr/frame.h"
 #include "sched/sched.h"
 
@@ -56,21 +57,35 @@ RdrErr rdr_end_frame(struct Frame* f) {
   if (f == 0 || f->fb == 0) {
     return RDR_EINVAL;
   }
-  // Clear the framebuffer to the recorded CLEAR color (or black). Done here, at
-  // end_frame, so the geometry pass (which records CLEAR) runs first; the clear
-  // precedes rasterization of the opaque scene over it.
-  int const px = f->width * f->height;
-  uint16_t const c = f->clear_color;
-  for (int i = 0; i < px; ++i) {
-    f->fb[i] = c;
+  // T5: clear + 2D sky blits are one profiled stage (PROF_CLEAR_BLIT) — the
+  // ~115KB clear plus the full-frame background blits, all core0
+  // front-of-raster.
+  {
+    PROF_BLOCK(PROF_CLEAR_BLIT);
+    // Clear the framebuffer to the recorded CLEAR color (or black). Done here,
+    // at end_frame, so the geometry pass (which records CLEAR) runs first; the
+    // clear precedes rasterization of the opaque scene over it.
+    int const px = f->width * f->height;
+    uint16_t const c = f->clear_color;
+    for (int i = 0; i < px; ++i) {
+      f->fb[i] = c;
+    }
+    // T3: 2D sky background blits, full-frame BEFORE the 3D sweep. No depth —
+    // they do NOT seed the zbuf, so the opaque raster z-test wins wherever
+    // geometry covers (the terrain horizon silhouette is the seam). rdr owns
+    // the ORDERING (stays platform-free); the demo fills
+    // f->blits[0,blit_count). A bad descriptor returns non-OK and is skipped
+    // (best-effort background).
+    for (int i = 0; i < (int)f->blit_count; ++i) {
+      blit2d_render(&f->blits[i], f->fb);
+    }
   }
-  // T3: 2D sky background blits, full-frame BEFORE the 3D sweep. No depth —
-  // they do NOT seed the zbuf, so the opaque raster z-test wins wherever
-  // geometry covers (the terrain horizon silhouette is the seam). rdr owns the
-  // ORDERING (stays platform-free); the demo fills f->blits[0,blit_count). A
-  // bad descriptor returns non-OK and is skipped (best-effort background).
-  for (int i = 0; i < (int)f->blit_count; ++i) {
-    blit2d_render(&f->blits[i], f->fb);
+  // T5: PROF_RASTER_DISPATCH = the WHOLE raster stage WALL span on core0 —
+  // incl. the dual-core DONE-join wait (its exclusive time = core0_idle). The
+  // dtor runs on the return path, after sched_rasterize (and the join)
+  // completes.
+  {
+    PROF_BLOCK(PROF_RASTER_DISPATCH);
+    return sched_rasterize(f);
   }
-  return sched_rasterize(f);
 }
