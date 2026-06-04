@@ -17,6 +17,7 @@
 
 #include "cmd/cmd.h"
 #include "demo/assets/terrain/terrain_atlas.h"  // T1 gutter'd terrain atlas (512^2 5551)
+#include "demo/assets/terrain/terrain_cloud.h"     // T3b I8 64x64 cloud texture
 #include "demo/assets/terrain/terrain_grid_idx.h"  // shared per-tile index pattern
 #include "demo/assets/terrain/terrain_grid_vtx.h"  // D.1 baked terrain mesh (pos/UV)
 #include "demo/assets/terrain/terrain_panorama.h"  // T3a CI8 512x64 sky panorama
@@ -591,6 +592,30 @@ void demo_scroll_advance(struct DemoScroll* s) {
 // horizon band was prototyped but the surround art reads better full-frame.)
 #define DEMO_PANORAMA_H 64
 
+// ---- T3b cloud sky layer ---------------------------------------------------
+// The N64 sky_bg.c draws a cloud PANEL first (the sky dome): an I8 64x64 cloud
+// texture composited via G_CC_BLENDIDECALA over a per-vertex blue Gouraud
+// gradient, with the panorama (sky_emit) + terrain drawn OVER it. We mirror
+// that layering ADDITIVELY: the panorama backdrop (blits[0]) stays full-frame
+// (T3a untouched), and blits[1] overlays CLOUDS on the visible SKY band above
+// the projected horizon (rows [0, horizon_row)), composited over the same blue
+// gradient. The 3D terrain z-writes over both, so the cloud strip is exactly
+// the visible sky — gap-free (T3 N4). Colors are lifted verbatim from the N64
+// panel template (sky_bg.c MG_SKY_PANEL_TMPL, the 3 emitted tris use verts
+// 0..4):
+//   sky_top     {11,197,255}   panel TOP row  (v0/v3/v4) — sky blue
+//   sky_horizon {226,255,202}  panel MID row  (v1/v2)    — pale near-white
+//   cloud       white          BLENDIDECALA over an I8 tex =>
+//   white-by-intensity
+// Cloud horizontal wind-scroll is DEFERRED: blit2d_clouds maps dst->src
+// linearly and ignores scroll_x, so honoring the N64 cloud drift is a blit2d.cc
+// change (a later slice) — the cloud field is STATIC here. Look-down frames
+// bake horizon_row=0 (level horizon above screen-top => no sky on screen): then
+// NO cloud blit is added (a 0-height band is degenerate), blit_count stays 1.
+// g_terrain_cloud is 64x64 I8 (g_terrain_cloud_len == 64*64).
+#define DEMO_CLOUD_W 64
+#define DEMO_CLOUD_H 64
+
 // Free-fly sky (sanctioned interactive-float exception; never fb_crc-compared):
 // recompute scroll_x (view azimuth) + horizon_row (level ray; here a no-roll
 // small-angle form ndc_y = -fscale*fy/hlen, geom.cc viewport map row =
@@ -653,9 +678,31 @@ void demo_fill_blits(struct Frame* f, const struct DemoCamera* cam) {
   b->dst_h = (uint16_t)f->height;  // full-frame cylindrical backdrop
   b->scroll_x = (uint16_t)scroll_x;
   b->elevation = 0;  // vertical parallax (pitch) deferred (T4+)
-  // Panorama IGNORES horizon_row; carried for T3b clouds (gradient endpoint).
+  // Panorama IGNORES horizon_row; carried for the T3b cloud gradient endpoint.
   b->horizon_row = (int16_t)horizon_row;
   f->blit_count = 1;
+
+  // T3b: overlay the cloud sky on the visible band [0, horizon_row). Skip the
+  // degenerate look-down frame (horizon_row<=0: no sky on screen) so the band
+  // is never 0-height. Static (no wind-scroll yet); see the layer note above.
+  if (horizon_row > 0) {
+    struct Blit2dRect* cl = &f->blits[1];
+    memset(cl, 0, sizeof *cl);
+    cl->mode = (uint8_t)BLIT2D_CLOUDS;
+    cl->src = g_terrain_cloud;
+    cl->tlut = 0;  // I8 intensity: no palette
+    cl->src_w = (uint16_t)DEMO_CLOUD_W;
+    cl->src_h = (uint16_t)DEMO_CLOUD_H;
+    cl->dst_x = 0;
+    cl->dst_y = 0;
+    cl->dst_w = (uint16_t)f->width;
+    cl->dst_h = (uint16_t)horizon_row;        // sky band above the 3D horizon
+    cl->horizon_row = (int16_t)horizon_row;   // gradient endpoint (bottom)
+    cl->sky_top = rgb565(11, 197, 255);       // N64 panel TOP (sky blue)
+    cl->sky_horizon = rgb565(226, 255, 202);  // N64 panel MID (pale)
+    cl->cloud_color = rgb565(255, 255, 255);  // BLENDIDECALA white-by-intensity
+    f->blit_count = 2;
+  }
 }
 
 // ---- terrain scene build ---------------------------------------------------

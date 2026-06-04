@@ -82,10 +82,11 @@ int main(void) {
     struct DemoTelemetry telem;
     demo_terrain_build(s_cmd, DEMO_TERRAIN_CMD_CAP, &s_cam, &s_scroll, &telem);
     rdr_begin_frame(&s_frame);
-    // T3a: fill the 2D sky-blit list (scrolling panorama) AFTER begin_frame
-    // (which reset blit_count) and BEFORE end_frame runs the blits as the
-    // full-frame background. Deterministic on the scripted path (committed sky
-    // table) so device fb_crc == host reference.
+    // T3a/T3b: fill the 2D sky-blit list AFTER begin_frame (which reset
+    // blit_count) and BEFORE end_frame runs the blits as the full-frame
+    // background: blits[0]=scrolling panorama, blits[1]=cloud band (when the
+    // pose shows sky). Deterministic on the scripted path (committed sky table)
+    // so device fb_crc == host reference.
     demo_fill_blits(&s_frame, &s_cam);
     rdr_submit(&s_frame, s_cmd);
     rdr_end_frame(&s_frame);
@@ -104,13 +105,14 @@ int main(void) {
     // re-enumeration).
     plat_log(
         "frame=%u frame_ms=%u cmdgen_cmds=%u cmdgen_draws=%u cmdgen_tris=%u "
-        "tris=%u dropped=%u scroll=%u pano=%u cam_mode=%u workers=%u "
+        "tris=%u dropped=%u scroll=%u pano=%u blits=%u cam_mode=%u workers=%u "
         "fb_crc=%08x\n",
         (unsigned)frame, (unsigned)(t1 - t0), (unsigned)telem.cmdgen_commands,
         (unsigned)telem.cmdgen_draws, (unsigned)telem.cmdgen_tris,
         (unsigned)s_frame.geom.tris_total, (unsigned)s_frame.geom.tris_dropped,
         (unsigned)telem.scroll_phase, (unsigned)s_frame.blits[0].scroll_x,
-        (unsigned)s_cam.mode, (unsigned)DEMO_RASTER_WORKERS, (unsigned)fb_crc);
+        (unsigned)s_frame.blit_count, (unsigned)s_cam.mode,
+        (unsigned)DEMO_RASTER_WORKERS, (unsigned)fb_crc);
 
     // Advance the DETERMINISTIC per-frame path by integer deltas (no float).
     demo_camera_advance(&s_cam, in.held, in.pressed);
