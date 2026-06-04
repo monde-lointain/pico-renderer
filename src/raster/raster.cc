@@ -446,8 +446,7 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
 // z-write invariant, enforced at the type level — a write would not compile).
 static void raster_one_xlu(const struct TriSetup* t,
                            const struct RenderState* rs, int tile_px_x0,
-                           int tile_px_y0, uint16_t* fb,
-                           const uint16_t* zbuf) {
+                           int tile_px_y0, uint16_t* fb, const uint16_t* zbuf) {
   if (!rs_has_texture(rs)) {
     return;  // XLU without a texture contributes nothing (flat path is opaque).
   }
