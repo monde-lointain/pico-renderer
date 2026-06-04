@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aa/aa.h"                 // aa_set_enabled (T4a: match device AA-on)
 #include "demo/camera_path_gen.h"  // committed scripted V*P + sky table (float-free)
 #include "demo/debug_terrain_gen.h"  // committed FLASH-CONST placeholder geometry
 #include "fixed/fixed.h"             // Vec4fx, fx_* (Δ4 u_iw overflow probe)
@@ -158,6 +159,11 @@ static int hue_bucket(uint16_t px) {
 static void render_terrain(const struct DemoCamera* cam,
                            const struct DemoScroll* scroll,
                            struct DemoTelemetry* telem) {
+  // T4a: the device demo runs with coverage AA ON (main.cc), so every host
+  // full-frame render must match — enable it here (idempotent runtime flag) so
+  // the fb_crc golden + on-target reference are computed AA-on. Terrain fog is
+  // material-driven (demo_terrain_material), so it needs no toggle here.
+  aa_set_enabled(1);
   struct Command cmds[DEMO_TERRAIN_CMD_CAP];
   uint32_t const n =
       demo_terrain_build(cmds, DEMO_TERRAIN_CMD_CAP, cam, scroll, telem);
@@ -896,7 +902,7 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0x39b7dd60U)
+  EXPECT_EQ(digest, 0xa87dac5bU)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 
