@@ -6,6 +6,6 @@
     "T3": ["src/tex/**", "tests/tex/**", "src/shade/**", "tests/shade/**", "src/blend/**", "tests/blend/**"],
     "T4": ["src/cmd/**", "tests/cmd/**", "src/arena/**", "tests/arena/**", "src/sched/**", "tests/sched/**", "src/platform/**", "tests/platform/**"],
     "T5": ["tests/harness/**", "tools/**", ".claude/**", ".github/**"],
-    "Lead": ["src/rdr/**", "src/demo/**", "CMakeLists.txt", "src/CMakeLists.txt", "tests/CMakeLists.txt", "CMakePresets.json"]
+    "Lead": ["src/rdr/**", "src/demo/**", "tests/demo/**", "CMakeLists.txt", "src/CMakeLists.txt", "tests/CMakeLists.txt", "CMakePresets.json"]
   }
 }
