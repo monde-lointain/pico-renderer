@@ -139,10 +139,12 @@ void demo_camera_advance(struct DemoCamera* cam, uint32_t held,
 // LEGACY determinism-anchor counter, surfaced in telemetry. SUPERSEDED by the
 // committed sky table for the actual T3a panorama drive: the real panorama
 // scroll/horizon track the camera AZIMUTH/pitch via g_scripted_sky (period 480,
-// see demo_fill_blits), NOT this counter. Retained so the per-frame path keeps
-// a fixed-integer-delta determinism anchor without churning
-// demo_terrain_build's signature + tests; candidate for retirement when clouds
-// (T3b) land. Wraps at DEMO_SCROLL_PERIOD (power-of-two so the wrap is exact).
+// see demo_fill_blits), NOT this counter. T3b clouds landed STATIC (no
+// wind-scroll yet — blit2d_clouds ignores scroll_x), so this counter still
+// drives no pixels; retained as the per-frame fixed-integer-delta determinism
+// anchor (avoids churning demo_terrain_build's signature + tests). It becomes
+// the natural cloud-scroll source if/when blit2d_clouds honors scroll_x.
+// Wraps at DEMO_SCROLL_PERIOD (power-of-two so the wrap is exact).
 enum { DEMO_SCROLL_PERIOD = 1024, DEMO_SCROLL_DELTA = 3 };
 struct DemoScroll {
   uint32_t phase;  // [0, DEMO_SCROLL_PERIOD)
@@ -150,13 +152,16 @@ struct DemoScroll {
 void demo_scroll_init(struct DemoScroll* s);
 void demo_scroll_advance(struct DemoScroll* s);  // (phase+DELTA) % PERIOD
 
-// ---- T3a panorama sky blit --------------------------------------------------
-// Fill the frame's 2D sky-blit list (f->blits[0], blit_count=1) with the
-// scrolling CI8 panorama for the camera's current pose. rdr_end_frame runs the
-// blits full-frame as the BACKGROUND before the 3D sweep (no depth; the terrain
-// horizon silhouette is the seam). The panorama band's BOTTOM is anchored at
-// the projected horizon row so the 2D sky meets the 3D terrain horizon
-// seam-free (T3 N4), and it scrolls horizontally with the view AZIMUTH.
+// ---- T3a/T3b sky blits ------------------------------------------------------
+// Fill the frame's 2D sky-blit list, run full-frame as the BACKGROUND before
+// the 3D sweep (no depth; the terrain horizon silhouette is the seam, N4):
+//   * blits[0] = the scrolling CI8 panorama, FULL-FRAME backdrop, scrolling
+//     horizontally with the view AZIMUTH (T3a).
+//   * blits[1] = (T3b) the CLOUD sky over the visible band [0, horizon_row]:
+//     an I8 cloud texture composited over the N64 blue Gouraud gradient. ADDED
+//     only when horizon_row>0 (look-down frames have no on-screen sky), so
+//     blit_count is 1 or 2. The cloud band's bottom is the projected horizon so
+//     it meets the 3D terrain seam-free.
 //   * scripted: indexes the committed FLOAT-FREE sky table
 //     (g_scripted_sky[frame % SCRIPTED_FRAME_COUNT]) -> host==device fb_crc.
 //   * free-fly: recomputes scroll/horizon in float (the sanctioned interactive

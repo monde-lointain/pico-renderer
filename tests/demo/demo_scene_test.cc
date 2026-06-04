@@ -695,19 +695,27 @@ TEST(TerrainSceneGuard, PanoramaBlitDeterministicAndPeriodic) {
     demo_camera_advance(&cam, 0, 0);  // -> scripted frame 37
   }
   demo_fill_blits(&g_frame, &cam);
-  EXPECT_EQ(g_frame.blit_count, 1U);
+  // Frame 37 has horizon_row=10 (>0) so the cloud band is added: panorama +
+  // clouds = 2 blits.
+  EXPECT_EQ(g_frame.blit_count, 2U);
   struct Blit2dRect const a = g_frame.blits[0];
   EXPECT_EQ(a.mode, (uint8_t)BLIT2D_PANORAMA);
   EXPECT_NE(a.src, (const void*)nullptr);   // bound to the committed panorama
   EXPECT_NE(a.tlut, (const void*)nullptr);  // bound to the committed TLUT
   EXPECT_EQ(a.dst_w, (uint16_t)RDR_SCREEN_W);
+  struct Blit2dRect const ac = g_frame.blits[1];  // the cloud layer
+  EXPECT_EQ(ac.mode, (uint8_t)BLIT2D_CLOUDS);
+  EXPECT_EQ(ac.dst_h, (uint16_t)a.horizon_row);  // band = [0, horizon_row)
   for (int i = 0; i < SCRIPTED_FRAME_COUNT; ++i) {
     demo_camera_advance(&cam, 0, 0);  // -> frame 37 + 480
   }
   demo_fill_blits(&g_frame, &cam);
+  EXPECT_EQ(g_frame.blit_count, 2U);
   struct Blit2dRect const b = g_frame.blits[0];
+  struct Blit2dRect const bc = g_frame.blits[1];
   // The azimuth scroll + projected horizon are the per-frame fields; equal over
-  // one full loop => period 480 holds (the on-target alignment invariant).
+  // one full loop => period 480 holds (the on-target alignment invariant). The
+  // cloud band is a pure function of horizon_row, so it is periodic too.
   EXPECT_EQ(a.scroll_x, b.scroll_x)
       << "panorama scroll not periodic over the camera loop — breaks frame%480";
   EXPECT_EQ(a.horizon_row, b.horizon_row) << "horizon not periodic over loop";
@@ -715,6 +723,8 @@ TEST(TerrainSceneGuard, PanoramaBlitDeterministicAndPeriodic) {
   EXPECT_EQ(a.src, b.src);
   EXPECT_EQ(a.dst_w, b.dst_w);
   EXPECT_EQ(a.dst_h, b.dst_h);
+  EXPECT_EQ(ac.dst_h, bc.dst_h) << "cloud band not periodic over the loop";
+  EXPECT_EQ(ac.horizon_row, bc.horizon_row);
 }
 
 // The panorama must actually render INTO the frame as a FULL-FRAME backdrop:
@@ -761,6 +771,100 @@ TEST(TerrainSceneGuard, PanoramaBackdropCoversFrame) {
   EXPECT_GE(distinct, 3) << "panorama backdrop is a flat fill — decode broken?";
 }
 
+// ===========================================================================
+// T3b cloud sky layer
+// ===========================================================================
+
+// CLOUD LAYER WIRING: at a sky-showing frame, blits[1] binds the I8 cloud asset
+// + the N64 sky_bg.c panel colors over the band [0, horizon_row), and the
+// composite ACTUALLY changes the sky band (the same band rendered panorama-only
+// differs) — proving the cloud texture is sampled, not a no-op.
+TEST(TerrainSceneGuard, CloudLayerOverSkyBand) {
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);  // frame 0: horizon_row=13 (>0 => cloud layer added)
+  demo_scroll_init(&scroll);
+
+  g_frame.width = RDR_SCREEN_W;
+  g_frame.height = RDR_SCREEN_H;
+  demo_fill_blits(&g_frame, &cam);
+  ASSERT_EQ(g_frame.blit_count, 2U) << "cloud layer not added at a sky frame";
+  struct Blit2dRect const cl = g_frame.blits[1];
+  EXPECT_EQ(cl.mode, (uint8_t)BLIT2D_CLOUDS);
+  EXPECT_NE(cl.src, (const void*)nullptr);  // bound to g_terrain_cloud
+  EXPECT_EQ(cl.dst_y, (int16_t)0);
+  EXPECT_GT(cl.dst_h, (uint16_t)0);               // non-degenerate band
+  EXPECT_EQ(cl.dst_h, (uint16_t)cl.horizon_row);  // band = [0, horizon_row)
+  // N64 sky_bg.c MG_SKY_PANEL_TMPL colors, verbatim.
+  EXPECT_EQ(cl.sky_top, rgb565(11, 197, 255));
+  EXPECT_EQ(cl.sky_horizon, rgb565(226, 255, 202));
+  EXPECT_EQ(cl.cloud_color, rgb565(255, 255, 255));
+
+  int const band = (int)cl.dst_h;
+  int const npx = band * RDR_SCREEN_W;
+  static uint16_t with_clouds[13 * RDR_SCREEN_W];  // band <= 13 on this path
+  ASSERT_LE(npx, (int)(sizeof with_clouds / sizeof with_clouds[0]));
+
+  // Render with clouds (the real path), snapshot the sky band.
+  render_terrain(&cam, &scroll, &telem);
+  for (int i = 0; i < npx; ++i) {
+    with_clouds[i] = g_frame.fb[i];
+  }
+
+  // Render the SAME frame panorama-only (suppress the cloud blit): the band
+  // must differ — proving the cloud composite (texture sample + gradient over)
+  // actually replaced the panorama in the sky band, not silently no-op'd.
+  struct Command cmds[DEMO_TERRAIN_CMD_CAP];
+  uint32_t const n =
+      demo_terrain_build(cmds, DEMO_TERRAIN_CMD_CAP, &cam, &scroll, &telem);
+  ASSERT_GT(n, 0U);
+  ASSERT_EQ(rdr_begin_frame(&g_frame), RDR_OK);
+  demo_fill_blits(&g_frame, &cam);
+  g_frame.blit_count = 1;  // panorama backdrop only (no cloud layer)
+  ASSERT_EQ(rdr_submit(&g_frame, cmds), RDR_OK);
+  ASSERT_EQ(rdr_end_frame(&g_frame), RDR_OK);
+  int diff = 0;
+  for (int i = 0; i < npx; ++i) {
+    if (g_frame.fb[i] != with_clouds[i]) {
+      ++diff;
+    }
+  }
+  // Require a SUBSTANTIAL change (> one screen row), not just a stray pixel:
+  // the whole band is above the look-down terrain edge so it is pure sky, and
+  // the cloud composite differs from the panorama across essentially all of it.
+  // A >1-row floor also fails LOUDLY (rather than silently passing on a fluke)
+  // if a future pose let terrain fill the band — flagging the test needs a
+  // sky-guaranteed frame, not masking a no-op cloud blit.
+  EXPECT_GT(diff, RDR_SCREEN_W)
+      << "cloud layer barely changed the sky band — texture unbound / no-op? "
+         "diff="
+      << diff;
+}
+
+// Look-down scripted frame 374 bakes horizon_row=0 (the level horizon projects
+// above the screen top => no sky on screen): NO cloud blit is added, so
+// blit_count stays 1. Guards the 0-endpoint handling (a 0-height band would be
+// a degenerate blit).
+TEST(TerrainSceneGuard, CloudLayerSkippedOnLookDownFrame) {
+  struct DemoCamera cam;
+  demo_camera_init(&cam);
+  while (cam.frame < 374U) {
+    demo_camera_advance(&cam, 0, 0);
+  }
+  // Index the committed table via the same modulo the runtime uses, so the
+  // access is provably in [0, SCRIPTED_FRAME_COUNT) for the static analyzer
+  // (gtest ASSERT_LT is not modeled as a bound).
+  uint32_t const f = cam.frame % (uint32_t)SCRIPTED_FRAME_COUNT;
+  EXPECT_EQ((int)g_scripted_sky[f][1], 0)
+      << "frame 374 expected horizon_row=0 (camera path regen drift?)";
+  g_frame.width = RDR_SCREEN_W;
+  g_frame.height = RDR_SCREEN_H;
+  demo_fill_blits(&g_frame, &cam);
+  EXPECT_EQ(g_frame.blit_count, 1U)
+      << "degenerate look-down frame must add no cloud blit";
+}
+
 // FB_CRC STREAM GOLDEN (NIT-1): pin the demo scene's full per-frame fb_crc
 // stream — the arena-bins model's actual rendered OUTPUT — so any change to
 // determinism or visible geometry trips a host test. There is no golden vs the
@@ -792,7 +896,7 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0x22856499U)
+  EXPECT_EQ(digest, 0x39b7dd60U)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 
