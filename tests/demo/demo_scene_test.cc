@@ -261,11 +261,23 @@ TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
   demo_terrain_material(&rs);
   ASSERT_NE(rs.tex.data, (const void*)0);
   EXPECT_EQ(rs.tex.format, (uint8_t)TEXFMT_RGBA5551);
-  EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_CUSTOM);
-  EXPECT_EQ(rs.combiner.c, (uint8_t)CC_ENVIRONMENT);
   EXPECT_EQ(rs.cull, (uint8_t)CULL_BACK);
   // T2: terrain samples bilinear (gutter'd atlas -> seam-correct).
   EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_THREE_POINT);
+  // T4b 2-cycle detail: cycle1 = base(TEXEL0) x detail(TEXEL1); cycle2 =
+  // COMBINED x ENV. Pin the mux so a wrong/forgotten combiner2 (which would
+  // silently drop cycle 1 — shade_pixel2 footgun) trips HERE, legibly.
+  EXPECT_EQ(rs.cycle, (uint8_t)COMBINE_TWO_CYCLE);
+  EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_CUSTOM);
+  EXPECT_EQ(rs.combiner.a, (uint8_t)CC_TEXEL0);
+  EXPECT_EQ(rs.combiner.c, (uint8_t)CC_TEXEL1);
+  EXPECT_EQ(rs.combiner2.mode, (uint8_t)COMBINE_CUSTOM);
+  EXPECT_EQ(rs.combiner2.a, (uint8_t)CC_COMBINED);
+  EXPECT_EQ(rs.combiner2.c, (uint8_t)CC_ENVIRONMENT);
+  ASSERT_NE(rs.tex1.data, (const void*)0);
+  EXPECT_EQ(rs.tex1.format, (uint8_t)TEXFMT_I8);
+  EXPECT_EQ(rs.tex1.w, (uint16_t)32);
+  EXPECT_EQ(rs.tex1.h, (uint16_t)32);
   // T4a fog: terrain hazes to the N64 sage color over the field's far depth.
   // Pin the params so an accidental edit trips HERE (legible), not just the
   // opaque golden CRC.
@@ -275,24 +287,34 @@ TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
   EXPECT_LT(rs.fog.near_z, rs.fog.far_z);
   EXPECT_EQ(rs.fog.color, rgb565(190, 219, 190));
 
-  // Functional: TEXEL0 x ENV on a known non-black texel must equal the per-
-  // channel combine of (texel) and (env). Pick a mid green-ish 565 texel.
-  uint16_t const texel = rgb565(120, 200, 80);
+  // Functional (2-cycle): cycle1 = base(TEXEL0) x detail(TEXEL1); cycle2 =
+  // COMBINED x ENV. Verify shade_pixel2 on a known base + detail texel matches
+  // the per-channel N64 combine through BOTH cycles.
+  uint16_t const texel = rgb565(120, 200, 80);    // base
+  uint16_t const detail = rgb565(200, 200, 200);  // I8 grain (gray)
   uint8_t keep = 0;
-  uint16_t const got = shade_pixel(&rs, texel, 0xFFFF, &keep);
+  uint16_t const got = shade_pixel2(&rs, texel, detail, 0xFFFF, &keep);
   int tr;
   int tg;
   int tb;
   unpack565_8(texel, &tr, &tg, &tb);
+  int dr;
+  int dg;
+  int db;
+  unpack565_8(detail, &dr, &dg, &db);
   int er;
   int eg;
   int eb;
   unpack565_8(rs.env_color, &er, &eg, &eb);
-  // a=texel, b=0, c=env, d=0  ->  out = clamp((texel*env + 0x80) >> 8).
-  uint16_t const want = rgb565((uint8_t)combine_chan_ref(tr, 0, er, 0),
-                               (uint8_t)combine_chan_ref(tg, 0, eg, 0),
-                               (uint8_t)combine_chan_ref(tb, 0, eb, 0));
-  EXPECT_EQ(got, want) << "terrain combiner is not TEXEL0 x ENV";
+  // cycle1: (base - 0)*detail + 0 = base*detail. cycle2: (combined-0)*env+0.
+  int const c1r = combine_chan_ref(tr, 0, dr, 0);
+  int const c1g = combine_chan_ref(tg, 0, dg, 0);
+  int const c1b = combine_chan_ref(tb, 0, db, 0);
+  uint16_t const want = rgb565((uint8_t)combine_chan_ref(c1r, 0, er, 0),
+                               (uint8_t)combine_chan_ref(c1g, 0, eg, 0),
+                               (uint8_t)combine_chan_ref(c1b, 0, eb, 0));
+  EXPECT_EQ(got, want)
+      << "terrain 2-cycle combine is not (TEXEL0 x detail) x ENV";
 }
 
 // TREE MATERIAL (opaque cutout, T2): faithful sprite descriptor (32x64
@@ -912,7 +934,7 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0xa87dac5bU)
+  EXPECT_EQ(digest, 0x850571caU)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 

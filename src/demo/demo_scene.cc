@@ -17,7 +17,8 @@
 
 #include "cmd/cmd.h"
 #include "demo/assets/terrain/terrain_atlas.h"  // T1 gutter'd terrain atlas (512^2 5551)
-#include "demo/assets/terrain/terrain_cloud.h"     // T3b I8 64x64 cloud texture
+#include "demo/assets/terrain/terrain_cloud.h"  // T3b I8 64x64 cloud texture
+#include "demo/assets/terrain/terrain_detail.h"  // T4b I8 32x32 detail grain (TEXEL1)
 #include "demo/assets/terrain/terrain_grid_idx.h"  // shared per-tile index pattern
 #include "demo/assets/terrain/terrain_grid_vtx.h"  // D.1 baked terrain mesh (pos/UV)
 #include "demo/assets/terrain/terrain_panorama.h"  // T3a CI8 512x64 sky panorama
@@ -456,16 +457,44 @@ void demo_terrain_material(struct RenderState* out) {
   out->tex.filter = (uint8_t)FILTER_THREE_POINT;
   out->tex.mip_levels = 1;
   out->tex.tlut = 0;
-  // P4-2 ENV wiring: TEXEL0 x ENV. Without it the terrain would be untinted.
+  // T4b 2-cycle detail (R.4 + Δ2). FAITHFUL-ENOUGH fixed combine (the N64
+  // LOD-lerps detail via COMBINED_ALPHA/G_TL_TILE; we have no per-pixel LOD, so
+  // we modulate at fixed strength): cycle1 = base(TEXEL0) x detail(TEXEL1);
+  // cycle2 = COMBINED x ENV (the P4-2 sage tint, preserved). The detail is a
+  // near-white I8 grain (range 190..255) -> a subtle ~0.75..1.0 darkening
+  // grain.
   out->combiner.mode = (uint8_t)COMBINE_CUSTOM;
-  out->combiner.a = (uint8_t)CC_TEXEL0;
+  out->combiner.a = (uint8_t)CC_TEXEL0;  // base atlas
   out->combiner.b = (uint8_t)CC_ZERO;
-  out->combiner.c = (uint8_t)CC_ENVIRONMENT;
+  out->combiner.c = (uint8_t)CC_TEXEL1;  // detail grain modulates the base
   out->combiner.d = (uint8_t)CC_ZERO;
+  // cycle2 MUST read CC_COMBINED (a default/zero combiner2 would silently drop
+  // cycle 1 — see shade_pixel2 doc): combined x ENV.
+  out->combiner2.mode = (uint8_t)COMBINE_CUSTOM;
+  out->combiner2.a = (uint8_t)CC_COMBINED;  // cycle-1 output (base x detail)
+  out->combiner2.b = (uint8_t)CC_ZERO;
+  out->combiner2.c = (uint8_t)CC_ENVIRONMENT;  // sage tint
+  out->combiner2.d = (uint8_t)CC_ZERO;
+  out->cycle = (uint8_t)COMBINE_TWO_CYCLE;
   // T1 placeholder ENV tint; faithful N64 ENV resolved at T4 from the RDP
   // combine. Light sage: deterministic, provably non-identity, preserves the
   // atlas hue variety.
   out->env_color = rgb565(216, 232, 200);
+  // Detail texture (N64 32x32 I8 grain) -> TEXEL1, tiled at detail_shift. UV is
+  // derived from the base atlas UV (<<shift): NOTE the gutter'd atlas UVs jump
+  // across terrain tiles, so the grain phase-jumps at tile seams — acceptable
+  // because the grain is faint (escalate to a true 2nd UV only if inspection
+  // shows it; N2). Bilinear like the N64 G_TF_BILERP.
+  out->tex1.data = g_terrain_detail;
+  out->tex1.w = 32;  // N64 detail is 32x32 I8 (g_terrain_detail_len == 1024)
+  out->tex1.h = 32;
+  out->tex1.format = (uint8_t)TEXFMT_I8;
+  out->tex1.wrap_s = (uint8_t)WRAP_REPEAT;
+  out->tex1.wrap_t = (uint8_t)WRAP_REPEAT;
+  out->tex1.filter = (uint8_t)FILTER_THREE_POINT;
+  out->tex1.mip_levels = 1;
+  out->tex1.tlut = 0;
+  out->detail_shift = 2;  // tiles the 32x32 grain ~4x denser than the base UV
   out->zmode = (uint8_t)ZMODE_OPAQUE;
   out->cull = (uint8_t)CULL_BACK;
   out->alpha_cmp = 0;
