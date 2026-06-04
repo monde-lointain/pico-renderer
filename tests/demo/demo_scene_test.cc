@@ -185,11 +185,10 @@ static void render_terrain(const struct DemoCamera* cam,
 // width (the value BEFORE the int16 narrow), and asserts the true peak fits
 // int16. peak >= 32767 => Δ4 FIRES (widen TVtx.u_iw int16->int32 in the FROZEN
 // types.h, a Lead-owned contract delta — out of T1 scope). Modelview is
-// identity (verts authored in world), so the MVP is g_scripted_mvp[frame % N];
-// viewport is the full 240x240 (rdr.cc: vp_from_cmd(&f->vp, 0,0,width,height)).
+// identity (verts authored in world), so the MVP is g_scripted_mvp[frame % N].
+// u_iw = u * inv_w is viewport-INDEPENDENT (the viewport map only scales x/y),
+// so no Viewport is needed here.
 TEST(TerrainSceneGuard, TexcoordTimesInvWFitsInt16) {
-  struct Viewport vp;
-  vp_from_cmd(&vp, 0, 0, RDR_SCREEN_W, RDR_SCREEN_H);
   int32_t peak = 0;
   for (uint32_t frame = 0; frame < (uint32_t)SCRIPTED_FRAME_COUNT; ++frame) {
     const struct Mat4fx* mvp = (const struct Mat4fx*)
@@ -342,7 +341,8 @@ TEST(TerrainSceneGuard, RealDensityRendersTexturedTerrain) {
     }
   }
   fprintf(stderr, "[hist] distinct hue buckets = %d\n", distinct);
-  EXPECT_GE(distinct, 8)
+  // actual ~35; 20 leaves margin while still biting a partial collapse.
+  EXPECT_GE(distinct, 20)
       << "too few distinct hues — flat-fill / wrong-UV regression? distinct="
       << distinct;
 }

@@ -375,7 +375,7 @@ App-side of the T0 "real-density geometry + deterministic camera" milestone. Sel
 
 **Change:** demo terrain renders TEXTURED. `demo_terrain/tree_material(RenderState*)` fillers = single source of truth; `demo_terrain_build` binds a distinct SET_MATERIAL per draw (atlas TEXEL0×ENV, light-sage ENV tint rgb565(216,232,200); tree0 sprite MODULATE, CULL_NONE). Tree verts gain sprite UVs (S10.5=texel×32, upright) + gray Gouraud gradient (top 206/bot 157); generator mirrored + regenerated. Raster untouched (R.1 path). Flat-fill elsewhere bit-identical.
 
-**Δ4 VERDICT — FITS (peak 32611, headroom only 157):** real terrain UVs over the full scripted loop give peak |u·inv_w| = 32611 < 32767 → int16 `TVtx.u_iw` does NOT overflow at T1. BUT margin is thin (157). A nearer camera, larger pre-scale, or atlas >512 would FIRE Δ4 (widen TVtx.u_iw/v_iw int16→int32, frozen types.h, Lead). The `TexcoordTimesInvWFitsInt16` guard now pins this; if a future change trips it, escalate rather than weaken the bound.
+**Δ4 VERDICT — FITS (peak 32611, headroom only 156):** real terrain UVs over the full scripted loop give peak |u·inv_w| = 32611 < 32767 → int16 `TVtx.u_iw` does NOT overflow at T1. BUT margin is thin (156). A nearer camera, larger pre-scale, or atlas >512 would FIRE Δ4 (widen TVtx.u_iw/v_iw int16→int32, frozen types.h, Lead). The `TexcoordTimesInvWFitsInt16` guard now pins this; if a future change trips it, escalate rather than weaken the bound.
 
 **fb_crc golden rebake:** 0x9ab0a0f9 → 0xa59eb386 (intended: render changed flat→textured). Histogram 35 distinct hue buckets (≥8 threshold; light-sage ENV preserves atlas hue variety — not washed out).
 
