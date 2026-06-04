@@ -86,24 +86,27 @@ def build_terrain():
 
 
 def build_trees():
-    """Mirror demo_tree_geometry() in demo_scene.cc (uv = 0)."""
+    """Mirror demo_tree_geometry() in demo_scene.cc (T1: sprite UVs + gray
+    Gouraud gradient; CULL_NONE double-sided)."""
     verts = []
     idx = []
+    # Per-corner tree0 sprite UVs (S10.5 = texel*32; 32x64 sprite, v=0 at top)
+    # and the N64 gray Gouraud gradient (top 206 / bottom 157).
+    corner_uv = ((0, 2048), (1024, 2048), (0, 0), (1024, 0))
+    corner_gray = (157, 157, 206, 206)
     for t in range(TREE_COUNT):
         cx = -12 + ((t * 7) % 25)
         cz = -12 + ((t * 11) % 25)
         hw = 2
         ht = 5
-        r = 128 + ((t * 43) & 0x7F)
-        g = 128 + ((t * 29) & 0x7F)
-        b = 128 + ((t * 71) & 0x7F)
         base = t * 4
         corner = ((-hw, 0), (hw, 0), (-hw, ht), (hw, ht))
         for k in range(4):
+            gray = corner_gray[k]
             verts.append((cx + corner[k][0], TERRAIN_BASE_Y + corner[k][1], cz,
-                          0, 0, r, g, b))
+                          corner_uv[k][0], corner_uv[k][1], gray, gray, gray))
         a, bb, c, d = base + 0, base + 1, base + 2, base + 3
-        idx += [a, c, bb, bb, c, d]  # -Z-facing order (CULL_BACK drops the back)
+        idx += [a, c, bb, bb, c, d]  # winding kept; CULL_NONE => double-sided
     return verts, idx
 
 
