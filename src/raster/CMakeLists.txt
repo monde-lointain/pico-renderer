@@ -12,6 +12,10 @@ target_link_libraries(Renderer_raster
     # cycle: gfx does not depend on raster).
     # R.2: the XLU sweep composes blend_pixel_alpha (Renderer::Blend) for the
     # texel-alpha alpha-over; also PRIVATE (not in raster.h's interface).
-    PRIVATE Renderer::Tex Renderer::Shade Renderer::Blend renderer::gfx)
+    # R.3-AA: the coverage WRITE + the end-of-tile resolve compose Renderer::Aa
+    # (aa_enabled / aa_resolve_tile / AA_COV_FULL); PRIVATE — none is in
+    # raster.h's interface (the nullable cov param is just a uint8_t*).
+    PRIVATE Renderer::Tex Renderer::Shade Renderer::Blend renderer::gfx
+            Renderer::Aa)
 orthodoxy_enforce(Renderer_raster)
 pico_tidy_enable(Renderer_raster)
