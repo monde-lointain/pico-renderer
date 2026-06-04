@@ -703,16 +703,32 @@ void unpack565_t(uint16_t c, uint8_t* r, uint8_t* g, uint8_t* b) {
   *b = (uint8_t)((b5 << 3) | (b5 >> 2));
 }
 void ref_setup(struct RefTri* t, const TVtx* a, const TVtx* b, const TVtx* c) {
-  fx12_4 x0 = a->x, y0 = a->y, x1 = b->x, y1 = b->y, x2 = c->x, y2 = c->y;
-  int32_t iw0 = a->inv_w, iw1 = b->inv_w, iw2 = c->inv_w;
-  int32_t u0 = a->u_iw, u1 = b->u_iw, u2 = c->u_iw;
-  int32_t v0 = a->v_iw, v1 = b->v_iw, v2 = c->v_iw;
-  uint16_t r0 = a->rgba, r1 = b->rgba, r2 = c->rgba;
+  fx12_4 const x0 = a->x;
+  fx12_4 const y0 = a->y;
+  fx12_4 x1 = b->x;
+  fx12_4 y1 = b->y;
+  fx12_4 x2 = c->x;
+  fx12_4 y2 = c->y;
+  int32_t const iw0 = a->inv_w;
+  int32_t iw1 = b->inv_w;
+  int32_t iw2 = c->inv_w;
+  int32_t const u0 = a->u_iw;
+  int32_t u1 = b->u_iw;
+  int32_t u2 = c->u_iw;
+  int32_t const v0 = a->v_iw;
+  int32_t v1 = b->v_iw;
+  int32_t v2 = c->v_iw;
+  uint16_t const r0 = a->rgba;
+  uint16_t r1 = b->rgba;
+  uint16_t r2 = c->rgba;
   int32_t area2 = edge_i(x0, y0, x1, y1, x2, y2);
   if (area2 < 0) {
-    fx12_4 tx = x1, ty = y1;
-    int32_t tiw = iw1, tu = u1, tv = v1;
-    uint16_t tr = r1;
+    fx12_4 const tx = x1;
+    fx12_4 const ty = y1;
+    int32_t const tiw = iw1;
+    int32_t const tu = u1;
+    int32_t const tv = v1;
+    uint16_t const tr = r1;
     x1 = x2;
     y1 = y2;
     iw1 = iw2;
@@ -786,6 +802,9 @@ int ref_textured_pixel(const struct RefTri* t, const struct RenderState* rs,
                        ((int64_t)w2 * t->v_iw2);
   int32_t const u_iw_p = (int32_t)(numu / (int64_t)t->area2);
   int32_t const v_iw_p = (int32_t)(numv / (int64_t)t->area2);
+  if (inv_w <= 0) {
+    return 0;  // matches the impl's perspective_texcoord_q16 guard
+  }
   fx16_16 const u_q16 = (fx16_16)(((int64_t)u_iw_p << 27) / (int64_t)inv_w);
   fx16_16 const v_q16 = (fx16_16)(((int64_t)v_iw_p << 27) / (int64_t)inv_w);
   uint8_t const gr =
@@ -905,23 +924,35 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
 
   // Float reference per covered pixel. Mirror oracle_fill_tri's winding-
   // normalize + top-left rule, then float-interpolate.
-  float fx0 = (float)pool[0].x / 16.0F, fy0 = (float)pool[0].y / 16.0F;
-  float fx1 = (float)pool[1].x / 16.0F, fy1 = (float)pool[1].y / 16.0F;
-  float fx2 = (float)pool[2].x / 16.0F, fy2 = (float)pool[2].y / 16.0F;
-  float iwf0 = (float)pool[0].inv_w / 65536.0F;
+  float const fx0 = (float)pool[0].x / 16.0F;
+  float const fy0 = (float)pool[0].y / 16.0F;
+  float fx1 = (float)pool[1].x / 16.0F;
+  float fy1 = (float)pool[1].y / 16.0F;
+  float fx2 = (float)pool[2].x / 16.0F;
+  float fy2 = (float)pool[2].y / 16.0F;
+  float const iwf0 = (float)pool[0].inv_w / 65536.0F;
   float iwf1 = (float)pool[1].inv_w / 65536.0F;
   float iwf2 = (float)pool[2].inv_w / 65536.0F;
   // Raw S10.5 per vertex (reconstruct from u_iw/inv_w for the float oracle's
   // perspective recovery — the oracle does NOT need geom's truncation).
-  int us0 = 0, us1 = 7 * 32, us2 = 0;  // matches mk_tvtx_uv inputs
-  int vs0 = 0, vs1 = 0, vs2 = 7 * 32;
-  uint8_t shr, shg, shb;
+  int const us0 = 0;  // matches mk_tvtx_uv inputs
+  int us1 = 7 * 32;
+  int us2 = 0;
+  int const vs0 = 0;
+  int vs1 = 0;
+  int vs2 = 7 * 32;
+  uint8_t shr;
+  uint8_t shg;
+  uint8_t shb;
   oracle_unpack565(shade, &shr, &shg, &shb);
   float const area = ((fx1 - fx0) * (fy2 - fy0)) - ((fy1 - fy0) * (fx2 - fx0));
   // Normalize winding so the barycentric ratios are positive (swap 1<->2).
   if (area < 0.0F) {
-    float tx = fx1, ty = fy1, tiw = iwf1;
-    int tu = us1, tv = vs1;
+    float const tx = fx1;
+    float const ty = fy1;
+    float const tiw = iwf1;
+    int const tu = us1;
+    int const tv = vs1;
     fx1 = fx2;
     fy1 = fy2;
     iwf1 = iwf2;
@@ -937,10 +968,12 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
 
-  int checked = 0, worst = 0;
+  int checked = 0;
+  int worst = 0;
   for (int sy = 0; sy < RDR_TILE_H; ++sy) {
     for (int sx = 0; sx < RDR_TILE_W; ++sx) {
-      float const cxp = (float)sx + 0.5F, cyp = (float)sy + 0.5F;
+      float const cxp = (float)sx + 0.5F;
+      float const cyp = (float)sy + 0.5F;
       float const e0 =
           ((fx2 - fx1) * (cyp - fy1)) - ((fy2 - fy1) * (cxp - fx1));
       float const e1 =
@@ -949,16 +982,18 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
           ((fx1 - fx0) * (cyp - fy0)) - ((fy1 - fy0) * (cxp - fx0));
       // Stay strictly interior (avoid edge-rule ambiguity in this tolerance
       // test; the exact test above covers the boundary).
-      if (!(e0 > 0.5F && e1 > 0.5F && e2 > 0.5F)) {
+      if (e0 <= 0.5F || e1 <= 0.5F || e2 <= 0.5F) {
         continue;
       }
       float const a2 = e0 + e1 + e2;
-      float const b0 = e0 / a2, b1 = e1 / a2, b2 = e2 / a2;
+      float const b0 = e0 / a2;
+      float const b1 = e1 / a2;
+      float const b2 = e2 / a2;
       float const invw_p = (b0 * iwf0) + (b1 * iwf1) + (b2 * iwf2);
-      float const uoverw =
-          (b0 * us0 * iwf0) + (b1 * us1 * iwf1) + (b2 * us2 * iwf2);
-      float const voverw =
-          (b0 * vs0 * iwf0) + (b1 * vs1 * iwf1) + (b2 * vs2 * iwf2);
+      float const uoverw = (b0 * (float)us0 * iwf0) + (b1 * (float)us1 * iwf1) +
+                           (b2 * (float)us2 * iwf2);
+      float const voverw = (b0 * (float)vs0 * iwf0) + (b1 * (float)vs1 * iwf1) +
+                           (b2 * (float)vs2 * iwf2);
       float const u_s105 = uoverw / invw_p;
       float const v_s105 = voverw / invw_p;
       int const ftu = (int)floorf(u_s105 / 32.0F);  // FLOAT perspective texel
@@ -984,7 +1019,8 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
       int const itv = (int)((((int64_t)viwp << 27) / (int64_t)iwp) >> 16);
 
       // (1) PERSPECTIVE cross-check: float and fixed texel indices within 1.
-      int dtu = itu - ftu, dtv = itv - ftv;
+      int dtu = itu - ftu;
+      int dtv = itv - ftv;
       if (dtu < 0) {
         dtu = -dtu;
       }
@@ -1001,9 +1037,9 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
       uint8_t texel[4];
       ASSERT_EQ(oracle_sample_texel(&rs.tex, itu, itv, texel), 0);
       // flat shade across this tri -> affine SHADE == the vertex shade.
-      int er = (int)lrintf((float)texel[0] * shr / 255.0F);
-      int eg = (int)lrintf((float)texel[1] * shg / 255.0F);
-      int eb = (int)lrintf((float)texel[2] * shb / 255.0F);
+      long er = lrintf((float)texel[0] * (float)shr / 255.0F);
+      long eg = lrintf((float)texel[1] * (float)shg / 255.0F);
+      long eb = lrintf((float)texel[2] * (float)shb / 255.0F);
       if (er > 255) {
         er = 255;
       }
@@ -1013,11 +1049,15 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
       if (eb > 255) {
         eb = 255;
       }
-      uint8_t exr, exg, exb;
+      uint8_t exr;
+      uint8_t exg;
+      uint8_t exb;
       oracle_unpack565(rgb565_pack((uint8_t)er, (uint8_t)eg, (uint8_t)eb), &exr,
                        &exg, &exb);
       uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
-      uint8_t gr8, gg8, gb8;
+      uint8_t gr8;
+      uint8_t gg8;
+      uint8_t gb8;
       oracle_unpack565(got, &gr8, &gg8, &gb8);
       int dr = (int)gr8 - (int)exr;
       int dg = (int)gg8 - (int)exg;
@@ -1036,7 +1076,8 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
       // quantum expands (with bit-replication) to <=9 in 8-bit for R/B (5-bit)
       // and <=5 for G (6-bit). A transposition / wrong shift blows FAR past
       // this bound.
-      int const tol_rb = 9, tol_g = 5;
+      int const tol_rb = 9;
+      int const tol_g = 5;
       if (dr > worst) {
         worst = dr;
       }
@@ -1224,7 +1265,6 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
   // determinism test it is enough to bin all tris into all tiles and let the
   // tile-clip in raster_one drop what falls outside (same refs, same order ->
   // any divergence is purely from shared mutable state, which is what we test).
-  int const tiles_per_row = RDR_SCREEN_W / RDR_TILE_W;
   int const num_tiles =
       (RDR_SCREEN_W / RDR_TILE_W) * (RDR_SCREEN_H / RDR_TILE_H);
   static uint16_t fb_serial[RDR_SCREEN_W * RDR_SCREEN_H];
@@ -1240,7 +1280,6 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
   bin.count = K_NTRI;
   bin.cap = K_NTRI;
   bin.dropped = 0;
-  (void)tiles_per_row;
 
   for (int tile = 0; tile < num_tiles; ++tile) {
     raster_tile(tile, &bin, pool, fb_serial, z0, table);
