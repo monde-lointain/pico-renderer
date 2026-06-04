@@ -16,12 +16,15 @@
 
 #include "demo/camera_path_gen.h"  // committed scripted V*P table (float-free)
 #include "demo/debug_terrain_gen.h"  // committed FLASH-CONST placeholder geometry
+#include "fixed/fixed.h"             // Vec4fx, fx_* (Δ4 u_iw overflow probe)
+#include "geom/geom.h"               // geom_transform_clip/project (Δ4 probe)
 #include "gfx/framebuffer.h"
 #include "gtest/gtest.h"
 #include "platform/platform.h"  // enum Button (camera trace)
 #include "rdr/config.h"
 #include "rdr/frame.h"
 #include "rdr/rdr.h"
+#include "shade/shade.h"  // shade_pixel + CC_* (ENV-wiring proof)
 
 // Frame is large (pool + bins) -> BSS, not the stack.
 static struct Frame g_frame;
@@ -173,10 +176,123 @@ static void render_terrain(const struct DemoCamera* cam,
   ASSERT_EQ(rdr_end_frame(&g_frame), RDR_OK);
 }
 
-// TERRAIN-SCENE GUARD: real-density geometry renders, with the debug-color
-// histogram proving distinct per-cell colors reach the framebuffer (catches the
-// transform/cull/winding bugs a uniform-gray blob would hide).
-TEST(TerrainSceneGuard, RealDensityRendersDistinctDebugCells) {
+// Δ4 MEASUREMENT (the most load-bearing T1 guard): the textured terrain submits
+// REAL absolute-atlas UVs in S10.5 (u up to ~512*32 = 16384 raw). geom births
+// TVtx.u_iw = (int16_t)(u_s105 * inv_w_real) — an int16. If the perspective
+// scale (inv_w) pushes |u*inv_w| past 32767, that int16 OVERFLOWS and the
+// textured sampler reads garbage texels. This sweeps the WHOLE scripted camera
+// loop over every terrain vertex, replicating geom's project math at FULL int32
+// width (the value BEFORE the int16 narrow), and asserts the true peak fits
+// int16. peak >= 32767 => Δ4 FIRES (widen TVtx.u_iw int16->int32 in the FROZEN
+// types.h, a Lead-owned contract delta — out of T1 scope). Modelview is
+// identity (verts authored in world), so the MVP is g_scripted_mvp[frame % N];
+// viewport is the full 240x240 (rdr.cc: vp_from_cmd(&f->vp, 0,0,width,height)).
+TEST(TerrainSceneGuard, TexcoordTimesInvWFitsInt16) {
+  struct Viewport vp;
+  vp_from_cmd(&vp, 0, 0, RDR_SCREEN_W, RDR_SCREEN_H);
+  int32_t peak = 0;
+  for (uint32_t frame = 0; frame < (uint32_t)SCRIPTED_FRAME_COUNT; ++frame) {
+    const struct Mat4fx* mvp = (const struct Mat4fx*)
+        g_scripted_mvp[frame % (uint32_t)SCRIPTED_FRAME_COUNT];
+    for (int i = 0; i < DEMO_TERRAIN_VERTS; ++i) {
+      const struct Vtx* sv = &g_debug_terrain_vtx[i];
+      struct Vec4fx clip;
+      geom_transform_clip(&clip, mvp, sv);
+      if (clip.w <= 0) {
+        continue;  // behind near plane; geom near-clips (not a u_iw source)
+      }
+      // Replicate geom_project's u_iw/v_iw math at FULL width (no int16 narrow)
+      // so an overflow is VISIBLE rather than wrapped away.
+      fx_invw const inv_w = fx_div(fx_from_int(1), clip.w);
+      int32_t const u_full = fx_to_int(fx_mul(fx_from_int(sv->uv[0]), inv_w));
+      int32_t const v_full = fx_to_int(fx_mul(fx_from_int(sv->uv[1]), inv_w));
+      int32_t const au = (u_full < 0) ? -u_full : u_full;
+      int32_t const av = (v_full < 0) ? -v_full : v_full;
+      if (au > peak) {
+        peak = au;
+      }
+      if (av > peak) {
+        peak = av;
+      }
+    }
+  }
+  fprintf(stderr, "[delta4] peak |u_iw/v_iw| = %d\n", peak);
+  EXPECT_LT(peak, 32768)
+      << "Δ4 FIRES: terrain u*inv_w overflows int16 TVtx.u_iw (peak=" << peak
+      << ") — escalate to Lead to widen TVtx.u_iw/v_iw int16->int32";
+}
+
+// ENV-WIRING PROOF: the terrain material binds the gutter'd atlas with the
+// P4-2 ENV combiner (TEXEL0 x ENV). Asserts the descriptor shape AND that the
+// combiner functionally applies the ENV tint per channel (recomputed with the
+// same N64 RDP combine math shade.cc uses).
+static void unpack565_8(uint16_t c, int* r, int* g, int* b) {
+  int const r5 = (c >> 11) & 0x1F;
+  int const g6 = (c >> 5) & 0x3F;
+  int const b5 = c & 0x1F;
+  *r = (r5 << 3) | (r5 >> 2);
+  *g = (g6 << 2) | (g6 >> 4);
+  *b = (b5 << 3) | (b5 >> 2);
+}
+// One channel of (A-B)*C+D, N64 RDP rounding/scale/clamp (mirror combine_chan).
+static int combine_chan_ref(int a, int b, int c, int d) {
+  int out = ((a - b) * c) + (d << 8) + 0x80;
+  out >>= 8;
+  if (out < 0) {
+    out = 0;
+  }
+  if (out > 255) {
+    out = 255;
+  }
+  return out;
+}
+TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
+  struct RenderState rs;
+  demo_terrain_material(&rs);
+  ASSERT_NE(rs.tex.data, (const void*)0);
+  EXPECT_EQ(rs.tex.format, (uint8_t)TEXFMT_RGBA5551);
+  EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_CUSTOM);
+  EXPECT_EQ(rs.combiner.c, (uint8_t)CC_ENVIRONMENT);
+  EXPECT_EQ(rs.cull, (uint8_t)CULL_BACK);
+
+  // Functional: TEXEL0 x ENV on a known non-black texel must equal the per-
+  // channel combine of (texel) and (env). Pick a mid green-ish 565 texel.
+  uint16_t const texel = rgb565(120, 200, 80);
+  uint8_t keep = 0;
+  uint16_t const got = shade_pixel(&rs, texel, 0xFFFF, &keep);
+  int tr;
+  int tg;
+  int tb;
+  unpack565_8(texel, &tr, &tg, &tb);
+  int er;
+  int eg;
+  int eb;
+  unpack565_8(rs.env_color, &er, &eg, &eb);
+  // a=texel, b=0, c=env, d=0  ->  out = clamp((texel*env + 0x80) >> 8).
+  uint16_t const want = rgb565((uint8_t)combine_chan_ref(tr, 0, er, 0),
+                               (uint8_t)combine_chan_ref(tg, 0, eg, 0),
+                               (uint8_t)combine_chan_ref(tb, 0, eb, 0));
+  EXPECT_EQ(got, want) << "terrain combiner is not TEXEL0 x ENV";
+}
+
+// TREE MATERIAL: faithful sprite descriptor (32x64 RGBA5551), MODULATE
+// (TEXEL x SHADE), double-sided billboard (CULL_NONE, N6).
+TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
+  struct RenderState rs;
+  demo_tree_material(&rs);
+  ASSERT_NE(rs.tex.data, (const void*)0);
+  EXPECT_EQ(rs.tex.w, (uint16_t)32);
+  EXPECT_EQ(rs.tex.h, (uint16_t)64);
+  EXPECT_EQ(rs.tex.format, (uint8_t)TEXFMT_RGBA5551);
+  EXPECT_EQ(rs.cull, (uint8_t)CULL_NONE);
+  EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_MODULATE);
+}
+
+// TERRAIN-SCENE GUARD: real-density TEXTURED terrain + trees produce VARIED
+// output, catching a one-blob / flat-fill / wrong-UV regression. (Pre-T1 this
+// guarded debug colors; now the atlas sample + ENV tint must still light many
+// hue buckets — a flat-fill regression or a collapsed UV map would not.)
+TEST(TerrainSceneGuard, RealDensityRendersTexturedTerrain) {
   struct DemoCamera cam;
   struct DemoScroll scroll;
   struct DemoTelemetry telem;
@@ -206,9 +322,11 @@ TEST(TerrainSceneGuard, RealDensityRendersDistinctDebugCells) {
       count_non_clear(g_frame.fb, RDR_SCREEN_W * RDR_SCREEN_H, clear);
   EXPECT_GT(drawn, 1000) << "terrain binned but barely drew — drawn=" << drawn;
 
-  // DEBUG-COLOR HISTOGRAM: count distinct coarse hue buckets among non-clear
-  // pixels. A correct per-cell-colored render lights up many buckets; a blinded
-  // uniform-gray render (or a single-color bug) would light up ~1.
+  // HUE HISTOGRAM: count distinct coarse hue buckets among non-clear pixels. A
+  // correct TEXTURED render (atlas sample x light-sage ENV + gray-gradient tree
+  // sprites) lights up many buckets; a flat-fill regression, a collapsed UV
+  // map, or an over-saturated ENV that washes out the atlas hue variety would
+  // collapse toward ~1.
   unsigned char seen[512];
   memset(seen, 0, sizeof seen);
   int distinct = 0;
@@ -223,8 +341,9 @@ TEST(TerrainSceneGuard, RealDensityRendersDistinctDebugCells) {
       ++distinct;
     }
   }
+  fprintf(stderr, "[hist] distinct hue buckets = %d\n", distinct);
   EXPECT_GE(distinct, 8)
-      << "too few distinct debug colors — one-blob render? distinct="
+      << "too few distinct hues — flat-fill / wrong-UV regression? distinct="
       << distinct;
 }
 
@@ -503,7 +622,7 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0x9ab0a0f9U)
+  EXPECT_EQ(digest, 0xa59eb386U)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 
