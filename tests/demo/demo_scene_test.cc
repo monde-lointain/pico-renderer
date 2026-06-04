@@ -266,6 +266,14 @@ TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
   EXPECT_EQ(rs.cull, (uint8_t)CULL_BACK);
   // T2: terrain samples bilinear (gutter'd atlas -> seam-correct).
   EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_THREE_POINT);
+  // T4a fog: terrain hazes to the N64 sage color over the field's far depth.
+  // Pin the params so an accidental edit trips HERE (legible), not just the
+  // opaque golden CRC.
+  EXPECT_EQ(rs.fog.enabled, (uint8_t)1);
+  EXPECT_EQ(rs.fog.near_z, (fx16_16)(40 << 16));
+  EXPECT_EQ(rs.fog.far_z, (fx16_16)(58 << 16));
+  EXPECT_LT(rs.fog.near_z, rs.fog.far_z);
+  EXPECT_EQ(rs.fog.color, rgb565(190, 219, 190));
 
   // Functional: TEXEL0 x ENV on a known non-black texel must equal the per-
   // channel combine of (texel) and (env). Pick a mid green-ish 565 texel.
@@ -305,6 +313,8 @@ TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
   EXPECT_NE(rs.alpha_cmp, (uint8_t)0)
       << "tree cutout pass must alpha-test (else the black billboard "
          "background is not discarded)";
+  EXPECT_EQ(rs.fog.enabled, (uint8_t)0)
+      << "trees are 1-cycle no-fog (N64 scenery.c); only terrain fogs";
 }
 
 // TERRAIN-SCENE GUARD: real-density TEXTURED terrain + trees produce VARIED
