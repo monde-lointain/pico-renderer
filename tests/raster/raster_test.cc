@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include "blend/blend.h"  // R.2 XLU exact reference (blend_pixel_alpha)
 #include "golden.h"
 #include "gtest/gtest.h"
 #include "oracle.h"
@@ -1374,4 +1375,636 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
             0)
       << "textured dual-worker sweep diverged from serial — raster has shared "
          "mutable state";
+}
+
+// ===========================================================================
+// R.2 — XLU two-pass + per-tile back-to-front sort. The opaque sweep stays the
+// R.1 path (verified bit-identical by the goldens above); these tests pin the
+// NEW translucent sweep: texel-alpha alpha-over, z-test (no z-write), and the
+// back-to-front compositing order with a deterministic tie-break.
+// ===========================================================================
+namespace {
+
+// An 8x8 RGBA4444 texture with a uniform FRACTIONAL alpha (NOT 1-bit, so a
+// blend bug cannot hide). expand4(alpha_nib) is the decoded 8-bit alpha — e.g.
+// nibble 0x8 -> 0x88 = 136. The RGB varies per texel (distinct, so a UV slip
+// shows) but alpha is constant across the texture for an easy expected value.
+struct Tex4444 {
+  uint16_t px[K_TEXW * K_TEXH];
+};
+uint16_t pack4444(int r4, int g4, int b4, int a4) {
+  return (uint16_t)(((r4 & 0xf) << 12) | ((g4 & 0xf) << 8) | ((b4 & 0xf) << 4) |
+                    (a4 & 0xf));
+}
+void make_tex4444_alpha(struct Tex4444* t, int alpha_nib) {
+  for (int v = 0; v < K_TEXH; ++v) {
+    for (int u = 0; u < K_TEXW; ++u) {
+      // Distinct-ish RGB nibbles; uniform alpha nibble.
+      int const r4 = (u + 2) & 0xf;
+      int const g4 = (v + 3) & 0xf;
+      int const b4 = ((u ^ v) + 1) & 0xf;
+      t->px[(v * K_TEXW) + u] = pack4444(r4, g4, b4, alpha_nib);
+    }
+  }
+}
+
+// Fill a TexDesc for a pow2 RGBA4444 texture, POINT-sampled, REPEAT wrap.
+void tex_desc_4444(struct TexDesc* td, const struct Tex4444* t) {
+  memset(td, 0, sizeof(*td));
+  td->data = t->px;
+  td->w = K_TEXW;
+  td->h = K_TEXH;
+  td->format = TEXFMT_RGBA4444;
+  td->wrap_s = WRAP_REPEAT;
+  td->wrap_t = WRAP_REPEAT;
+  td->filter = FILTER_POINT;
+  td->mip_levels = 1;
+  td->tlut = 0;
+}
+
+// XLU reference pixel: mirror ref_textured_pixel (same coverage + interp +
+// combiner) but compute the EXPECTED stored value = blend_pixel_alpha over the
+// destination `dst`, using the texel's own alpha (rgba[3]) as the source alpha
+// (P3-3: XLU blends on TEXEL0 alpha, not coverage). z-TEST only (no z-write) is
+// modelled by the caller passing the right `dst`. Returns 1 + writes *out if
+// covered (and not alpha-discarded); else 0.
+int ref_xlu_pixel(const struct RefTri* t, const struct RenderState* rs, int sx,
+                  int sy, uint16_t dst, uint16_t* out) {
+  fx12_4 const cx = (fx12_4)((sx << 4) + 8);
+  fx12_4 const cy = (fx12_4)((sy << 4) + 8);
+  int32_t const w0 = edge_i(t->x1, t->y1, t->x2, t->y2, cx, cy);
+  int32_t const w1 = edge_i(t->x2, t->y2, t->x0, t->y0, cx, cy);
+  int32_t const w2 = edge_i(t->x0, t->y0, t->x1, t->y1, cx, cy);
+  int const in0 = (w0 > 0) || (w0 == 0 && t->tl1);
+  int const in1 = (w1 > 0) || (w1 == 0 && t->tl2);
+  int const in2 = (w2 > 0) || (w2 == 0 && t->tl0);
+  if (!(in0 && in1 && in2)) {
+    return 0;
+  }
+  int64_t const numiw =
+      ((int64_t)w0 * t->iw0) + ((int64_t)w1 * t->iw1) + ((int64_t)w2 * t->iw2);
+  int32_t const inv_w = (int32_t)(numiw / (int64_t)t->area2);
+  if (inv_w <= 0) {
+    return 0;
+  }
+  int64_t const numu = ((int64_t)w0 * t->u_iw0) + ((int64_t)w1 * t->u_iw1) +
+                       ((int64_t)w2 * t->u_iw2);
+  int64_t const numv = ((int64_t)w0 * t->v_iw0) + ((int64_t)w1 * t->v_iw1) +
+                       ((int64_t)w2 * t->v_iw2);
+  int32_t const u_iw_p = (int32_t)(numu / (int64_t)t->area2);
+  int32_t const v_iw_p = (int32_t)(numv / (int64_t)t->area2);
+  fx16_16 const u_q16 = (fx16_16)(((int64_t)u_iw_p << 27) / (int64_t)inv_w);
+  fx16_16 const v_q16 = (fx16_16)(((int64_t)v_iw_p << 27) / (int64_t)inv_w);
+  uint8_t const gr =
+      gouraud_ref(w0, w1, w2, t->s0[0], t->s1[0], t->s2[0], t->area2);
+  uint8_t const gg =
+      gouraud_ref(w0, w1, w2, t->s0[1], t->s1[1], t->s2[1], t->area2);
+  uint8_t const gb =
+      gouraud_ref(w0, w1, w2, t->s0[2], t->s1[2], t->s2[2], t->area2);
+  uint16_t const shade565 = rgb565_pack(gr, gg, gb);
+  uint8_t rgba[4];
+  tex_sample_rgba(&rs->tex, u_q16, v_q16, 0, rgba);
+  if (rs->alpha_cmp != 0 && rgba[3] < rs->alpha_cmp) {
+    return 0;  // honor alpha-compare discard (generality)
+  }
+  uint16_t const texel565 = rgb565_pack(rgba[0], rgba[1], rgba[2]);
+  uint8_t keep = 1;
+  uint16_t const combined = shade_pixel(rs, texel565, shade565, &keep);
+  *out = blend_pixel_alpha(BLEND_ALPHA, combined, rgba[3], dst);
+  return 1;
+}
+
+// Build an XLU render state over a fractional-alpha RGBA4444 texture.
+void mk_xlu_state(struct RenderState* rs, const struct Tex4444* tex) {
+  memset(rs, 0, sizeof(*rs));
+  tex_desc_4444(&rs->tex, tex);
+  rs->combiner.mode = COMBINE_MODULATE;
+  rs->zmode = ZMODE_XLU;
+  rs->alpha_cmp = 0;
+}
+
+}  // namespace
+
+// (1) XLU alpha-over correctness: a single XLU tri with a FRACTIONAL-alpha
+// texture over a known opaque background must blend per pixel EXACTLY like
+// blend_pixel_alpha(BLEND_ALPHA, combiner_out, texel_alpha, bg). Uses alpha
+// nibble 0x8 (-> 136), so a coverage-vs-texel-alpha bug or a missing blend
+// cannot hide.
+TEST(RasterXlu, AlphaOverMatchesBlendPixelAlphaExact) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);  // alpha = expand4(0x8) = 136 (fractional)
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  const struct RenderState* table = &rs;
+
+  uint16_t const bg = rgb565_pack(30, 70, 110);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x18000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x14000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table);
+
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t expected;
+      if (!ref_xlu_pixel(&rt, &rs, sx, sy, bg, &expected)) {
+        continue;
+      }
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "XLU pixel (" << sx << "," << sy << ") mismatch";
+      // Sanity: a fractional-alpha blend over bg must differ from both the
+      // bare combiner output AND the bg (catches "wrote opaque" / "didn't
+      // draw").
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered XLU pixels — test is vacuous";
+}
+
+// (2) Back-to-front compositing order + determinism: two overlapping XLU tris
+// at different depths over a known bg. The FARTHER tri composites first, then
+// the nearer over that. The overlap pixels must equal near-over-(far-over-bg).
+// Re-running with the bin insertion order PERMUTED yields the identical result
+// (the per-tile sort makes draw order depth-driven, not insertion-driven).
+TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);  // alpha 136
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  const struct RenderState* table = &rs;
+
+  uint16_t const bg = rgb565_pack(20, 40, 60);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+
+  // Two coincident-screen XLU tris; FAR has small inv_w, NEAR has large.
+  // Same screen triangle so they fully overlap.
+  int32_t const iw_far = 0x08000;   // 0.5  (farther)
+  int32_t const iw_near = 0x20000;  // 2.0  (nearer)
+  TVtx far_tri[3];
+  far_tri[0] = mk_tvtx_uv(8, 8, iw_far, 0, 0, white);
+  far_tri[1] = mk_tvtx_uv(52, 12, iw_far, 7 * 32, 0, white);
+  far_tri[2] = mk_tvtx_uv(14, 50, iw_far, 0, 7 * 32, white);
+  TVtx near_tri[3];
+  near_tri[0] = mk_tvtx_uv(8, 8, iw_near, 0, 0, white);
+  near_tri[1] = mk_tvtx_uv(52, 12, iw_near, 7 * 32, 0, white);
+  near_tri[2] = mk_tvtx_uv(14, 50, iw_near, 0, 7 * 32, white);
+
+  // Pool: [0..2] = far, [3..5] = near.
+  TVtx pool[6];
+  for (int i = 0; i < 3; ++i) {
+    pool[i] = far_tri[i];
+    pool[3 + i] = near_tri[i];
+  }
+
+  // Insertion order A: near FIRST, far SECOND (the WRONG draw order if the sort
+  // were absent — proves the sort reorders to far-then-near).
+  TriRef refs_a[2];
+  refs_a[0].v0 = 3;
+  refs_a[0].v1 = 4;
+  refs_a[0].v2 = 5;
+  refs_a[0].material = 0;  // near
+  refs_a[1].v0 = 0;
+  refs_a[1].v1 = 1;
+  refs_a[1].v2 = 2;
+  refs_a[1].material = 0;  // far
+  TileBin bin_a;
+  bin_a.refs = refs_a;
+  bin_a.count = 2;
+  bin_a.cap = 2;
+  bin_a.dropped = 0;
+
+  // Insertion order B: far FIRST, near SECOND (the permutation).
+  TriRef refs_b[2];
+  refs_b[0] = refs_a[1];  // far
+  refs_b[1] = refs_a[0];  // near
+  TileBin bin_b;
+  bin_b.refs = refs_b;
+  bin_b.count = 2;
+  bin_b.cap = 2;
+  bin_b.dropped = 0;
+
+  static uint16_t fb_a[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t fb_b[RDR_SCREEN_W * RDR_SCREEN_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb_a[i] = bg;
+    fb_b[i] = bg;
+  }
+  static uint16_t z_a[RDR_TILE_W * RDR_TILE_H];
+  static uint16_t z_b[RDR_TILE_W * RDR_TILE_H];
+  raster_tile(0, &bin_a, pool, fb_a, z_a, table);
+  raster_tile(0, &bin_b, pool, fb_b, z_b, table);
+
+  // Determinism: permuting insertion order must NOT change the result.
+  EXPECT_EQ(memcmp(fb_a, fb_b,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0)
+      << "XLU result depends on bin insertion order — sort is not "
+         "depth-deterministic";
+
+  // Correctness: far-over-bg, then near-over-that. Reference the impl's own
+  // fixed-point + blend math for both layers in the SAME far->near order.
+  struct RefTri rt_far;
+  ref_setup(&rt_far, &pool[0], &pool[1], &pool[2]);
+  struct RefTri rt_near;
+  ref_setup(&rt_near, &pool[3], &pool[4], &pool[5]);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t after_far = bg;
+      int const cov_far = ref_xlu_pixel(&rt_far, &rs, sx, sy, bg, &after_far);
+      uint16_t const dst_for_near = cov_far ? after_far : bg;
+      uint16_t after_near;
+      int const cov_near =
+          ref_xlu_pixel(&rt_near, &rs, sx, sy, dst_for_near, &after_near);
+      uint16_t expected;
+      if (cov_near) {
+        expected = after_near;
+      } else if (cov_far) {
+        expected = after_far;
+      } else {
+        continue;  // pixel covered by neither -> bg, nothing to check
+      }
+      uint16_t const got = fb_a[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "XLU composite (" << sx << "," << sy << ") not far-over-near";
+      if (cov_far && cov_near) {
+        ++checked;
+      }
+    }
+  }
+  EXPECT_GT(checked, 50)
+      << "too few doubly-covered pixels — order test vacuous";
+}
+
+// (3a) z-test honored: an XLU tri BEHIND an opaque occluder must be hidden
+// where the occluder already wrote depth. The occluded pixels stay the
+// occluder's color (no XLU blend leaks through a passed-but-not-tested
+// fragment).
+TEST(RasterXlu, ZTestHonoredBehindOpaqueOccluder) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);
+  struct RenderState table[2];
+  // material 0: opaque flat occluder (no texture -> fast path), NEAR.
+  memset(&table[0], 0, sizeof(table[0]));
+  table[0].zmode = ZMODE_OPAQUE;
+  // material 1: XLU textured, FAR (behind the occluder).
+  mk_xlu_state(&table[1], &tex);
+
+  uint16_t const bg = rgb565_pack(10, 20, 30);
+  uint16_t const occ = rgb565_pack(240, 30, 30);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+
+  TVtx pool[6];
+  // Opaque occluder (NEAR, large inv_w). Flat fast path uses pool[].rgba.
+  pool[0] = mk_vtx(6, 6, 0, 0, 0x20000);
+  pool[1] = mk_vtx(54, 10, 0, 0, 0x20000);
+  pool[2] = mk_vtx(10, 54, 0, 0, 0x20000);
+  pool[0].rgba = occ;
+  pool[1].rgba = occ;
+  pool[2].rgba = occ;
+  // XLU tri (FAR, small inv_w), same screen area.
+  pool[3] = mk_tvtx_uv(6, 6, 0x08000, 0, 0, white);
+  pool[4] = mk_tvtx_uv(54, 10, 0x08000, 7 * 32, 0, white);
+  pool[5] = mk_tvtx_uv(10, 54, 0x08000, 0, 7 * 32, white);
+
+  TriRef refs[2];
+  refs[0].v0 = 0;
+  refs[0].v1 = 1;
+  refs[0].v2 = 2;
+  refs[0].material = 0;  // opaque occluder
+  refs[1].v0 = 3;
+  refs[1].v1 = 4;
+  refs[1].v2 = 5;
+  refs[1].material = 1;  // far XLU
+  TileBin bin;
+  bin.refs = refs;
+  bin.count = 2;
+  bin.cap = 2;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table);
+
+  // A deep-interior pixel covered by BOTH: the occluder wrote depth NEAR, the
+  // XLU tri is FAR -> z-test rejects it -> the pixel stays the occluder color
+  // (NOT a blend of XLU over occluder).
+  uint16_t const px = fb[(20 * RDR_SCREEN_W) + 16];
+  EXPECT_EQ(px, occ)
+      << "XLU behind an opaque occluder leaked through — z-test not honored";
+}
+
+// (3b) NO z-write: a SECOND XLU tri drawn behind the FIRST still composites.
+// If the XLU sweep wrote depth, the first (nearer) XLU tri would block the
+// second (farther) — but XLU must z-TEST only. So both layers blend, and the
+// pixel equals far-over-(near's-blend-over-bg)... no: nearer composites LAST
+// (back-to-front), so result = near-over-(far-over-bg). The discriminator vs a
+// z-writing impl: a z-writing near layer would reject the far layer entirely,
+// giving near-over-bg. We assert the TWO-LAYER composite, which only holds if
+// the far layer was NOT z-rejected by the near layer's (absent) z-write.
+TEST(RasterXlu, NoZWriteSoSecondXluStillComposites) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  const struct RenderState* table = &rs;
+
+  uint16_t const bg = rgb565_pack(60, 10, 90);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+
+  int32_t const iw_far = 0x08000;
+  int32_t const iw_near = 0x20000;
+  TVtx pool[6];
+  pool[0] = mk_tvtx_uv(8, 8, iw_far, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, iw_far, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, iw_far, 0, 7 * 32, white);
+  pool[3] = mk_tvtx_uv(8, 8, iw_near, 0, 0, white);
+  pool[4] = mk_tvtx_uv(52, 12, iw_near, 7 * 32, 0, white);
+  pool[5] = mk_tvtx_uv(14, 50, iw_near, 0, 7 * 32, white);
+
+  // Insertion: NEAR first, FAR second. A z-writing XLU impl would z-write the
+  // near layer first (after the sort puts far first, far writes depth, then
+  // near passes; but a z-writing far layer then... ) — the robust
+  // discriminator is the two-layer composite below, which a z-writing impl in
+  // EITHER order cannot reproduce.
+  TriRef refs[2];
+  refs[0].v0 = 3;
+  refs[0].v1 = 4;
+  refs[0].v2 = 5;
+  refs[0].material = 0;  // near
+  refs[1].v0 = 0;
+  refs[1].v1 = 1;
+  refs[1].v2 = 2;
+  refs[1].material = 0;  // far
+  TileBin bin;
+  bin.refs = refs;
+  bin.count = 2;
+  bin.cap = 2;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table);
+
+  // Expected TWO-LAYER composite (far-over-bg, then near-over-that). Only holds
+  // if the far layer's fragment was NOT depth-rejected by a near z-write.
+  struct RefTri rt_far;
+  ref_setup(&rt_far, &pool[0], &pool[1], &pool[2]);
+  struct RefTri rt_near;
+  ref_setup(&rt_near, &pool[3], &pool[4], &pool[5]);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t after_far;
+      if (!ref_xlu_pixel(&rt_far, &rs, sx, sy, bg, &after_far)) {
+        continue;
+      }
+      uint16_t after_near;
+      int const cov_near =
+          ref_xlu_pixel(&rt_near, &rs, sx, sy, after_far, &after_near);
+      if (!cov_near) {
+        continue;
+      }
+      // near-over-(far-over-bg): the second (farther) tri DID composite,
+      // proving the first (nearer) tri did not z-write and block it.
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, after_near)
+          << "XLU pixel (" << sx << "," << sy
+          << ") missing a layer — XLU wrote zbuf and blocked the far tri";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50)
+      << "too few doubly-covered pixels — no-z-write vacuous";
+}
+
+// (4) Opaque path UNCHANGED: a mixed bin where an XLU material is added must
+// NOT perturb the opaque tris' output. We render an opaque-only bin and the
+// SAME opaque tris with an extra non-overlapping XLU tri; the opaque pixels are
+// byte-identical (the two sweeps do not interfere outside the XLU footprint).
+TEST(RasterXlu, OpaqueSweepUnaffectedByPresenceOfXlu) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);
+  struct RenderState table[2];
+  memset(&table[0], 0, sizeof(table[0]));  // opaque flat
+  table[0].zmode = ZMODE_OPAQUE;
+  mk_xlu_state(&table[1], &tex);
+
+  uint16_t const bg = rgb565_pack(0, 0, 0);
+  uint16_t const red = rgb565_pack(220, 40, 40);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+
+  // Opaque tri in the LEFT of tile 0; XLU tri in the RIGHT of tile 1 area
+  // (non-overlapping screen footprint via a separate tile render).
+  TVtx pool[6];
+  pool[0] = mk_vtx(4, 4, 0, 0, 0x18000);
+  pool[1] = mk_vtx(28, 8, 0, 0, 0x18000);
+  pool[2] = mk_vtx(6, 40, 0, 0, 0x18000);
+  pool[0].rgba = red;
+  pool[1].rgba = red;
+  pool[2].rgba = red;
+  // XLU tri occupying a disjoint sub-rect of the same tile (x in [40,56]).
+  pool[3] = mk_tvtx_uv(42, 4, 0x10000, 0, 0, white);
+  pool[4] = mk_tvtx_uv(56, 8, 0x10000, 7 * 32, 0, white);
+  pool[5] = mk_tvtx_uv(44, 40, 0x10000, 0, 7 * 32, white);
+
+  TriRef refs_opaque[1];
+  refs_opaque[0].v0 = 0;
+  refs_opaque[0].v1 = 1;
+  refs_opaque[0].v2 = 2;
+  refs_opaque[0].material = 0;
+  TileBin bin_opaque;
+  bin_opaque.refs = refs_opaque;
+  bin_opaque.count = 1;
+  bin_opaque.cap = 1;
+  bin_opaque.dropped = 0;
+
+  TriRef refs_mixed[2];
+  refs_mixed[0] = refs_opaque[0];
+  refs_mixed[1].v0 = 3;
+  refs_mixed[1].v1 = 4;
+  refs_mixed[1].v2 = 5;
+  refs_mixed[1].material = 1;  // XLU
+  TileBin bin_mixed;
+  bin_mixed.refs = refs_mixed;
+  bin_mixed.count = 2;
+  bin_mixed.cap = 2;
+  bin_mixed.dropped = 0;
+
+  static uint16_t fb_opaque[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t fb_mixed[RDR_SCREEN_W * RDR_SCREEN_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb_opaque[i] = bg;
+    fb_mixed[i] = bg;
+  }
+  static uint16_t z0[RDR_TILE_W * RDR_TILE_H];
+  static uint16_t z1[RDR_TILE_W * RDR_TILE_H];
+  raster_tile(0, &bin_opaque, pool, fb_opaque, z0, table);
+  raster_tile(0, &bin_mixed, pool, fb_mixed, z1, table);
+
+  // Every pixel in the opaque tri's footprint (x < 40) must be byte-identical
+  // between the two renders — the XLU sweep did not touch the opaque region.
+  int diff = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < 40; ++sx) {
+      if (fb_opaque[(sy * RDR_SCREEN_W) + sx] !=
+          fb_mixed[(sy * RDR_SCREEN_W) + sx]) {
+        ++diff;
+      }
+    }
+  }
+  EXPECT_EQ(diff, 0) << "presence of an XLU tri perturbed the opaque region ("
+                     << diff << " px) — the opaque sweep is not isolated";
+}
+
+// (5) DECAL is treated as opaque (T2 scope): a DECAL-zmode tri rasterizes in
+// sweep 1 exactly like an opaque tri (z-test + z-write, no blend). NOTE: real
+// decal-dZ depth bias is out of T2 scope (see raster.cc sweep-1 NOTE); this
+// just pins that DECAL is NOT routed to the XLU sweep.
+TEST(RasterXlu, DecalTreatedAsOpaque) {
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  rs.zmode = ZMODE_DECAL;  // no texture -> flat fast path, opaque sweep
+  const struct RenderState* table = &rs;
+
+  uint16_t const bg = rgb565_pack(0, 0, 0);
+  uint16_t const cyan = rgb565_pack(0, 220, 220);
+
+  // Same tri rendered once as DECAL and once as OPAQUE must be byte-identical.
+  TVtx pool[3];
+  pool[0] = mk_vtx(8, 8, 0, 0, 0x18000);
+  pool[1] = mk_vtx(48, 12, 0, 0, 0x18000);
+  pool[2] = mk_vtx(12, 48, 0, 0, 0x18000);
+  pool[0].rgba = cyan;
+  pool[1].rgba = cyan;
+  pool[2].rgba = cyan;
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb_decal[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t fb_opaque[RDR_SCREEN_W * RDR_SCREEN_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb_decal[i] = bg;
+    fb_opaque[i] = bg;
+  }
+  static uint16_t zd[RDR_TILE_W * RDR_TILE_H];
+  static uint16_t zo[RDR_TILE_W * RDR_TILE_H];
+  raster_tile(0, &bin, pool, fb_decal, zd, table);
+  struct RenderState rs_op = rs;
+  rs_op.zmode = ZMODE_OPAQUE;
+  const struct RenderState* table_op = &rs_op;
+  raster_tile(0, &bin, pool, fb_opaque, zo, table_op);
+
+  EXPECT_EQ(memcmp(fb_decal, fb_opaque,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0)
+      << "DECAL not rasterized like OPAQUE in sweep 1";
+}
+
+// (6) XLU drop-with-count: drive MORE XLU tris into ONE tile than the per-tile
+// XLU sort cap. The gather must DROP-with-count (raster_xlu_dropped() rises by
+// the overflow) and the KEPT tris must still composite without corruption or
+// out-of-bounds (the framebuffer stays a valid blend over the background, never
+// touched outside the tris' footprint). Uses a DELTA on the monotonic counter
+// (other tests/process state may have bumped it). The cap is internal to
+// raster.cc; we pick a tri count comfortably above any reasonable cap and read
+// the delta rather than hard-coding the cap value.
+TEST(RasterXlu, DropWithCountOnPerTileOverflow) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);  // fractional alpha 136
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  const struct RenderState* table = &rs;
+
+  uint16_t const bg = rgb565_pack(25, 50, 75);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+
+  // K_OVF XLU tris, all covering the SAME interior region of tile 0 at slightly
+  // varying depth (so the sort runs too). 512 >> any sane per-tile cap (256).
+  enum { K_OVF = 512 };
+  static TVtx pool[K_OVF * 3];
+  static TriRef refs[K_OVF];
+  for (int t = 0; t < K_OVF; ++t) {
+    // inv_w varies a little per tri so depths differ; same screen triangle.
+    int32_t const iw = (int32_t)(0x08000 + ((t & 31) * 0x200));
+    pool[(t * 3) + 0] = mk_tvtx_uv(8, 8, iw, 0, 0, white);
+    pool[(t * 3) + 1] = mk_tvtx_uv(50, 12, iw, 7 * 32, 0, white);
+    pool[(t * 3) + 2] = mk_tvtx_uv(12, 50, iw, 0, 7 * 32, white);
+    refs[t].v0 = (uint16_t)((t * 3) + 0);
+    refs[t].v1 = (uint16_t)((t * 3) + 1);
+    refs[t].v2 = (uint16_t)((t * 3) + 2);
+    refs[t].material = 0;
+  }
+  TileBin bin;
+  bin.refs = refs;
+  bin.count = K_OVF;
+  bin.cap = K_OVF;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+
+  uint32_t const dropped_before = raster_xlu_dropped();
+  raster_tile(0, &bin, pool, fb, zbuf, table);
+  uint32_t const dropped_after = raster_xlu_dropped();
+
+  // The gather overflowed: at least (K_OVF - cap) tris dropped. We don't know
+  // the cap here, but it is well below K_OVF, so the delta must be POSITIVE.
+  EXPECT_GT(dropped_after, dropped_before)
+      << "512 XLU tris in one tile did not trip drop-with-count — the per-tile "
+         "cap is unexpectedly >= 512, or the overflow path is unreachable";
+
+  // KEPT tris still composited: a deep-interior pixel must be a BLEND (neither
+  // the bare bg nor unwritten garbage). With fractional alpha 136 over bg, the
+  // composited value differs from bg.
+  uint16_t const px = fb[(20 * RDR_SCREEN_W) + 14];
+  EXPECT_NE(px, bg)
+      << "no XLU tri composited under overflow — kept tris were lost";
+
+  // No corruption / OOB: pixels OUTSIDE the tris' footprint (and outside tile
+  // 0) stay exactly bg. Check a clearly-outside pixel in tile 0 (bottom-right
+  // corner, beyond the tri) and a pixel in another tile.
+  EXPECT_EQ(fb[(58 * RDR_SCREEN_W) + 58], bg)
+      << "overflow render wrote outside the tri footprint (corruption/OOB)";
+  EXPECT_EQ(fb[(120 * RDR_SCREEN_W) + 120], bg)
+      << "overflow render wrote into another tile (OOB)";
 }

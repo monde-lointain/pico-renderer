@@ -1,13 +1,16 @@
 // raster.cc — half-space edge-function rasterizer. Per-material: flat-fill fast
 // path (BIT-IDENTICAL to B.1-gamma) OR textured + Gouraud + combiner path
-// (R.1). Stream B.1-gamma + R.1. Orthodox C++: POD + free functions, C headers,
-// C-style casts, no STL/auto/lambda/templates/exceptions. See raster.h for
-// contract.
+// (R.1), then a two-pass split (R.2): an OPAQUE sweep (sweep 1, unchanged from
+// R.1) followed by a back-to-front-sorted TRANSLUCENT sweep (sweep 2, z-test
+// only + texel-alpha alpha-over). Stream B.1-gamma + R.1 + R.2. Orthodox C++:
+// POD + free functions, C headers, C-style casts, no STL/auto/lambda/templates/
+// exceptions. See raster.h for contract.
 #include "raster/raster.h"
 
 #include <stdint.h>
 #include <string.h>
 
+#include "blend/blend.h"      // blend_pixel_alpha (XLU texel-alpha alpha-over)
 #include "gfx/framebuffer.h"  // rgb565()
 #include "rdr/config.h"
 #include "shade/shade.h"  // shade_pixel (color combiner)
@@ -23,6 +26,40 @@ enum { RASTER_SUBPX = 4, RASTER_HALF = 8 };
 // 256. Reject anything not strictly larger than that (a sliver < 1 px area
 // carries no reliable winding / would blow up the 1/area reciprocal).
 enum { RASTER_AREA_EPS = 256 };
+
+// R.2 XLU per-tile sort scratch cap (the SIZING decision, re-surface trigger).
+// Sweep 2 gathers this tile's XLU TriRef BIN INDICES into a FIXED local
+// uint16_t array (2 B/entry), then STABLE-sorts them back-to-front. A FULL
+// per-tile cap (bins draw from RDR_BIN_POOL_REFS=2048; a hot tile can hold
+// hundreds of refs) at 2 B/entry would be ~4 KB — that BLOWS the RP2040 core1
+// stack (SDK default PICO_CORE1_STACK_SIZE = 0x800 = 2 KB, no project override;
+// the dual-core raster runs ON the core stacks). So cap the gather at a MODEST
+// 256 -> 256 * 2 B = 512 B on stack (comfortable; the rest of the chain is
+// TriSetup ~80 B + raster_one[_xlu] + dispatch frames, all well under 2 KB) and
+// DROP-WITH-COUNT beyond. The XLU footprint is the tree FOLIAGE (the scene's
+// only translucent geometry, ~252 tree tris TOTAL across the 16 screen-tiles at
+// terrain density), so 256 XLU tris in ONE 60x60 tile is far beyond realistic
+// foliage density -> the real scene never drops; a drop is a re-surface signal,
+// not steady state. (NOTE: the array holds only indices, NOT a key struct — an
+// int64-depth key struct would be 16 B-aligned = 4 KB at 256, the very overflow
+// this cap exists to avoid; the depth key is recomputed inline during the
+// sort.)
+enum { RASTER_XLU_TILE_CAP = 256 };
+
+// Drop-with-count for the XLU gather overflow (file-scope static, surfaced via
+// the accessor below). Encapsulated state reached only through module
+// functions (CLAUDE.md: file-scope static behind accessors == encapsulation).
+// It mirrors TileBin's drop POLICY (never corrupt; surface the count) but is
+// NOT a per-frame count like TileBin.dropped (which geom resets every frame):
+// this is a MONOTONIC "the per-tile XLU cap was ever exceeded since boot"
+// signal. There is no frame hook in the raster lane to reset it (and adding one
+// is out of scope), so a consumer reading it must take a DELTA, not an
+// absolute. NOTE: not atomic. The dual-core raster partitions tiles disjointly
+// across cores, but BOTH cores can bump this counter for their own tiles -> a
+// racy increment could lose a count. DEBUG telemetry only (never feeds the bit-
+// identical framebuffer path); the framebuffer output stays deterministic
+// regardless (each tile is drawn by exactly one worker; the drop is per-tile).
+static uint32_t s_xlu_dropped = 0;
 
 // Edge function in Q12.4 integer space: signed area of (a->b) x (a->p). > 0
 // means p is to the left of directed edge a->b (screen y-down). Coords are
@@ -398,6 +435,184 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
   }
 }
 
+// Rasterize ONE already-setup TRANSLUCENT (XLU) triangle (R.2, sweep 2). Shares
+// the opaque path's coverage + perspective-UV + Gouraud + combiner, but the
+// fragment store differs in TWO ways:
+//   - z-TEST only, NO z-write (so a later, FARTHER XLU fragment is not blocked
+//     by an earlier nearer one — the back-to-front sort owns ordering, not the
+//     depth buffer);
+//   - the store is texel-alpha alpha-over: fb = blend_pixel_alpha(BLEND_ALPHA,
+//     combiner_out, texel_alpha, fb) where texel_alpha = the sampled texel's
+//     own alpha (rgba[3]) — P3-3: XLU blends on TEXEL0 alpha, NOT coverage.
+// XLU materials are ALWAYS textured here (the flat fast path is opaque-only and
+// stays in sweep 1); a non-textured XLU material would write nothing, so we
+// gate on a valid texture and skip otherwise. `rs->alpha_cmp` is honored
+// (discard below threshold) for generality, though the tree XLU material does
+// not set it.
+// `zbuf` is const here: the XLU sweep z-TESTS but never WRITES depth (the no-
+// z-write invariant, enforced at the type level — a write would not compile).
+static void raster_one_xlu(const struct TriSetup* t,
+                           const struct RenderState* rs, int tile_px_x0,
+                           int tile_px_y0, uint16_t* fb, const uint16_t* zbuf) {
+  if (!rs_has_texture(rs)) {
+    return;  // XLU without a texture contributes nothing (flat path is opaque).
+  }
+  uint8_t sr[3];
+  uint8_t sg[3];
+  uint8_t sb[3];
+  unpack565(t->rgba0, &sr[0], &sg[0], &sb[0]);
+  unpack565(t->rgba1, &sr[1], &sg[1], &sb[1]);
+  unpack565(t->rgba2, &sr[2], &sg[2], &sb[2]);
+
+  // Triangle screen bounding box (pixels), intersected with the tile rect —
+  // identical to raster_one's setup.
+  fx12_4 minx_q = t->x0;
+  fx12_4 maxx_q = t->x0;
+  fx12_4 miny_q = t->y0;
+  fx12_4 maxy_q = t->y0;
+  if (t->x1 < minx_q) {
+    minx_q = t->x1;
+  }
+  if (t->x1 > maxx_q) {
+    maxx_q = t->x1;
+  }
+  if (t->x2 < minx_q) {
+    minx_q = t->x2;
+  }
+  if (t->x2 > maxx_q) {
+    maxx_q = t->x2;
+  }
+  if (t->y1 < miny_q) {
+    miny_q = t->y1;
+  }
+  if (t->y1 > maxy_q) {
+    maxy_q = t->y1;
+  }
+  if (t->y2 < miny_q) {
+    miny_q = t->y2;
+  }
+  if (t->y2 > maxy_q) {
+    maxy_q = t->y2;
+  }
+
+  int bb_minx = (int)(minx_q >> RASTER_SUBPX);
+  int bb_miny = (int)(miny_q >> RASTER_SUBPX);
+  int bb_maxx = (int)((maxx_q + 15) >> RASTER_SUBPX);
+  int bb_maxy = (int)((maxy_q + 15) >> RASTER_SUBPX);
+
+  int const tile_minx = tile_px_x0;
+  int const tile_miny = tile_px_y0;
+  int const tile_maxx = tile_px_x0 + RDR_TILE_W;  // exclusive
+  int const tile_maxy = tile_px_y0 + RDR_TILE_H;  // exclusive
+  bb_minx = clampi(bb_minx, tile_minx, tile_maxx);
+  bb_miny = clampi(bb_miny, tile_miny, tile_maxy);
+  bb_maxx = clampi(bb_maxx, tile_minx, tile_maxx);
+  bb_maxy = clampi(bb_maxy, tile_miny, tile_maxy);
+
+  for (int sy = bb_miny; sy < bb_maxy; ++sy) {
+    fx12_4 const cy = (fx12_4)((sy << RASTER_SUBPX) + RASTER_HALF);
+    for (int sx = bb_minx; sx < bb_maxx; ++sx) {
+      fx12_4 const cx = (fx12_4)((sx << RASTER_SUBPX) + RASTER_HALF);
+      int32_t const w0 = edge_eval(t->x1, t->y1, t->x2, t->y2, cx, cy);
+      int32_t const w1 = edge_eval(t->x2, t->y2, t->x0, t->y0, cx, cy);
+      int32_t const w2 = edge_eval(t->x0, t->y0, t->x1, t->y1, cx, cy);
+      int const in0 = (w0 > 0) || (w0 == 0 && t->tl1);
+      int const in1 = (w1 > 0) || (w1 == 0 && t->tl2);
+      int const in2 = (w2 > 0) || (w2 == 0 && t->tl0);
+      if (!(in0 && in1 && in2)) {
+        continue;
+      }
+      int64_t const num = ((int64_t)w0 * (int64_t)t->iw0) +
+                          ((int64_t)w1 * (int64_t)t->iw1) +
+                          ((int64_t)w2 * (int64_t)t->iw2);
+      int32_t const inv_w = (int32_t)(num / (int64_t)t->area2);
+
+      int const tile_x = sx - tile_px_x0;
+      int const tile_y = sy - tile_px_y0;
+      int const zi = (tile_y * RDR_TILE_W) + tile_x;
+      uint16_t const znew = depth_pack(inv_w);
+
+      // z-TEST against the opaque depth left by sweep 1 (NO z-write — see the
+      // function comment). Reject a fragment behind the stored opaque depth.
+      if (znew < zbuf[zi]) {
+        continue;
+      }
+
+      // Perspective-correct UV (same num/area2 form as the opaque path).
+      int64_t const num_u = ((int64_t)w0 * t->u_iw0) +
+                            ((int64_t)w1 * t->u_iw1) + ((int64_t)w2 * t->u_iw2);
+      int64_t const num_v = ((int64_t)w0 * t->v_iw0) +
+                            ((int64_t)w1 * t->v_iw1) + ((int64_t)w2 * t->v_iw2);
+      int32_t const u_iw_p = (int32_t)(num_u / (int64_t)t->area2);
+      int32_t const v_iw_p = (int32_t)(num_v / (int64_t)t->area2);
+      fx16_16 const u_q16 = perspective_texcoord_q16(u_iw_p, inv_w);
+      fx16_16 const v_q16 = perspective_texcoord_q16(v_iw_p, inv_w);
+
+      // Gouraud shade (affine; N64 RDP convention) — same as opaque.
+      uint8_t const gr = gouraud_chan(w0, w1, w2, (int)sr[0], (int)sr[1],
+                                      (int)sr[2], t->area2);
+      uint8_t const gg = gouraud_chan(w0, w1, w2, (int)sg[0], (int)sg[1],
+                                      (int)sg[2], t->area2);
+      uint8_t const gb = gouraud_chan(w0, w1, w2, (int)sb[0], (int)sb[1],
+                                      (int)sb[2], t->area2);
+      uint16_t const shade565 = rgb565(gr, gg, gb);
+
+      // XLU ALWAYS needs the texel's own alpha for the blend, so fetch full
+      // RGBA (not just the 565). Honor alpha-compare discard if configured.
+      uint8_t rgba[4];
+      tex_sample_rgba(&rs->tex, u_q16, v_q16, 0, rgba);
+      if (rs->alpha_cmp != 0 && rgba[3] < rs->alpha_cmp) {
+        continue;  // discard (no fb touch, and never wrote zbuf anyway)
+      }
+      uint16_t const texel565 = rgb565(rgba[0], rgba[1], rgba[2]);
+
+      uint8_t keep = 1;
+      uint16_t const combined = shade_pixel(rs, texel565, shade565, &keep);
+      if (!keep) {
+        continue;  // forward-compat combiner alpha-compare.
+      }
+      // Texel-alpha alpha-over the current framebuffer pixel. NO z-write.
+      int const fbi = (sy * RDR_SCREEN_W) + sx;
+      fb[fbi] = blend_pixel_alpha(BLEND_ALPHA, combined, rgba[3], fb[fbi]);
+    }
+  }
+}
+
+// Per-tri back-to-front depth key: the sum of the 3 verts' inv_w (ASCENDING
+// inv_w == farthest first). int64 because the sum of three Q16.16 values can
+// exceed int32. inv_w is winding-swap-invariant under sum, so the PRE-setup
+// verts give the same key as the post-setup ones.
+static int64_t xlu_depth_key(const struct TVtx* pool,
+                             const struct TriRef* ref) {
+  return (int64_t)pool[ref->v0].inv_w + (int64_t)pool[ref->v1].inv_w +
+         (int64_t)pool[ref->v2].inv_w;
+}
+
+// STABLE insertion sort of the gathered XLU bin-index array `idx[0..n)`
+// ascending by depth key (farthest first). Stability is load-bearing:
+// equal-depth tris keep their GATHER order (== bin order, since gather is in
+// bin order) — exactly the deterministic tie-break the dual==serial
+// bit-identical invariant relies on. (std::stable_sort/qsort-with-index would
+// do the same; a hand-written insertion sort keeps it Orthodox,
+// allocation-free, and avoids the int64-key comparator-return overflow trap. n
+// <= RASTER_XLU_TILE_CAP=256, so the O(n^2) worst case is bounded and tiny vs
+// the per-pixel raster cost.)
+static void xlu_sort_stable(uint16_t* idx, uint32_t n, const struct TVtx* pool,
+                            const struct TileBin* bin) {
+  for (uint32_t i = 1; i < n; ++i) {
+    uint16_t const cur = idx[i];
+    int64_t const cur_key = xlu_depth_key(pool, &bin->refs[cur]);
+    uint32_t j = i;
+    // Shift strictly-greater-key elements right; STOP on >= so equal keys keep
+    // their earlier (smaller-index) position -> stable.
+    while (j > 0 && xlu_depth_key(pool, &bin->refs[idx[j - 1]]) > cur_key) {
+      idx[j] = idx[j - 1];
+      --j;
+    }
+    idx[j] = cur;
+  }
+}
+
 void raster_tile_noclear(int tile, const struct TileBin* bin,
                          const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf,
                          const struct RenderState* rstate_table) {
@@ -409,8 +624,36 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
   int const tile_px_x0 = (tile % tiles_per_row) * RDR_TILE_W;
   int const tile_px_y0 = (tile / tiles_per_row) * RDR_TILE_H;
 
+  // SWEEP 1 — OPAQUE. Rasterize every NON-XLU ref EXACTLY as R.1 did (z-test +
+  // z-write). ZMODE_OPAQUE and ZMODE_DECAL both come here; DECAL is treated as
+  // opaque for now. NOTE: real decal depth-bias (decal-dZ co-planar offset) is
+  // OUT OF T2 SCOPE — not implemented here; DECAL just routes to the opaque
+  // sweep. This sweep is byte-identical to the pre-R.2 single loop for any
+  // opaque-only bin (the hard regression gate).
+  // Gather just the BIN INDICES of XLU refs (2 B each) into a fixed local
+  // array. 256 * 2 B = 512 B on the stack — comfortable on the 2 KB RP2040
+  // core1 stack (see RASTER_XLU_TILE_CAP). Overflow drops-with-count.
+  uint16_t xlu_idx[RASTER_XLU_TILE_CAP];
+  static_assert(sizeof(xlu_idx) <= 512,
+                "XLU sort scratch must stay <= 512 B (RP2040 core1 stack is "
+                "2 KB; a larger frame risks on-device overflow, invisible to "
+                "host CI)");
+  uint32_t xlu_n = 0;
   for (uint32_t i = 0; i < bin->count; ++i) {
     const struct TriRef* ref = &bin->refs[i];
+    if (rstate_table[ref->material].zmode == ZMODE_XLU) {
+      // Defer to sweep 2: record the bin index IN BIN ORDER (the gather order
+      // == array position is the deterministic tie-break for the stable sort).
+      // Drop-with-count on overflow (mirrors TileBin's drop POLICY; never
+      // corrupt).
+      if (xlu_n < (uint32_t)RASTER_XLU_TILE_CAP) {
+        xlu_idx[xlu_n] = (uint16_t)i;
+        ++xlu_n;
+      } else {
+        ++s_xlu_dropped;
+      }
+      continue;
+    }
     struct TriSetup t;
     int const rc =
         tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
@@ -422,7 +665,36 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
     const struct RenderState* rs = &rstate_table[ref->material];
     raster_one(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf);
   }
+
+  // SWEEP 2 — TRANSLUCENT. STABLE-sort the gathered XLU indices BACK-TO-FRONT
+  // (ascending inv_w = farthest first); equal-depth tris keep bin order. Then
+  // composite each over the framebuffer (z-test against sweep-1 depth, NO
+  // z-write, texel-alpha alpha-over). Each tile is drawn by exactly ONE worker,
+  // so a deterministic (stable) sort makes serial == 2-worker bit-identical.
+  if (xlu_n > 1) {
+    xlu_sort_stable(xlu_idx, xlu_n, pool, bin);
+  }
+  for (uint32_t k = 0; k < xlu_n; ++k) {
+    const struct TriRef* ref = &bin->refs[xlu_idx[k]];
+    struct TriSetup t;
+    int const rc =
+        tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
+    if (rc != RDR_OK) {
+      continue;  // degenerate -> rejected, no fill
+    }
+    const struct RenderState* rs = &rstate_table[ref->material];
+    raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf);
+  }
 }
+
+// Debug telemetry: MONOTONIC total of XLU tris dropped (any per-tile gather >
+// RASTER_XLU_TILE_CAP) since process start — NOT a per-frame count and never
+// reset (no frame hook in this lane). Consumers take a DELTA (before/after),
+// not an absolute. NEVER feeds the framebuffer path (drops degrade the
+// translucent layer gracefully without corruption); a rising value is a
+// re-surface signal that the per-tile XLU cap needs raising (or a Φ frame.h
+// scratch). See RASTER_XLU_TILE_CAP. Not atomic across cores (debug only).
+uint32_t raster_xlu_dropped(void) { return s_xlu_dropped; }
 
 void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
                  uint16_t* fb, uint16_t* zbuf,
