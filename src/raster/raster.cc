@@ -13,6 +13,7 @@
 #include "aa/aa.h"            // AA_COV_FULL, aa_enabled, aa_resolve_tile
 #include "blend/blend.h"      // blend_pixel_alpha (XLU texel-alpha alpha-over)
 #include "gfx/framebuffer.h"  // rgb565()
+#include "prof/prof.h"  // T5: PROF_RASTER_TILE + FINE sweep blocks (no-op when off)
 #include "rdr/config.h"
 #include "shade/shade.h"  // shade_pixel (color combiner)
 #include "tex/tex.h"      // tex_sample / tex_sample_rgba
@@ -881,31 +882,37 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
                 "2 KB; a larger frame risks on-device overflow, invisible to "
                 "host CI)");
   uint32_t xlu_n = 0;
-  for (uint32_t i = 0; i < bin->count; ++i) {
-    const struct TriRef* ref = &bin->refs[i];
-    if (rstate_table[ref->material].zmode == ZMODE_XLU) {
-      // Defer to sweep 2: record the bin index IN BIN ORDER (the gather order
-      // == array position is the deterministic tie-break for the stable sort).
-      // Drop-with-count on overflow (mirrors TileBin's drop POLICY; never
-      // corrupt).
-      if (xlu_n < (uint32_t)RASTER_XLU_TILE_CAP) {
-        xlu_idx[xlu_n] = (uint16_t)i;
-        ++xlu_n;
-      } else {
-        ++s_xlu_dropped;
+  {
+    // T5: COARSE (time_us_64), not FINE — the worst near-camera tile's opaque
+    // fill exceeds SysTick's ~67ms span (measured on-target: wrap=1). 1us
+    // resolution is ample for a ~25ms sweep.
+    PROF_BLOCK(PROF_SWEEP_OPAQUE);
+    for (uint32_t i = 0; i < bin->count; ++i) {
+      const struct TriRef* ref = &bin->refs[i];
+      if (rstate_table[ref->material].zmode == ZMODE_XLU) {
+        // Defer to sweep 2: record the bin index IN BIN ORDER (the gather order
+        // == array position is the deterministic tie-break for the stable
+        // sort). Drop-with-count on overflow (mirrors TileBin's drop POLICY;
+        // never corrupt).
+        if (xlu_n < (uint32_t)RASTER_XLU_TILE_CAP) {
+          xlu_idx[xlu_n] = (uint16_t)i;
+          ++xlu_n;
+        } else {
+          ++s_xlu_dropped;
+        }
+        continue;
       }
-      continue;
+      struct TriSetup t;
+      int const rc =
+          tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
+      if (rc != RDR_OK) {
+        continue;  // degenerate -> rejected, no fill
+      }
+      // TriRef.material indexes the interned render-state table; it selects the
+      // per-pixel path (flat fast path vs textured/Gouraud/combiner).
+      const struct RenderState* rs = &rstate_table[ref->material];
+      raster_one(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
     }
-    struct TriSetup t;
-    int const rc =
-        tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
-    if (rc != RDR_OK) {
-      continue;  // degenerate -> rejected, no fill
-    }
-    // TriRef.material indexes the interned render-state table; it selects the
-    // per-pixel path (flat fast path vs textured/Gouraud/combiner).
-    const struct RenderState* rs = &rstate_table[ref->material];
-    raster_one(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
   }
 
   // SWEEP 2 — TRANSLUCENT. STABLE-sort the gathered XLU indices BACK-TO-FRONT
@@ -913,19 +920,23 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
   // composite each over the framebuffer (z-test against sweep-1 depth, NO
   // z-write, texel-alpha alpha-over). Each tile is drawn by exactly ONE worker,
   // so a deterministic (stable) sort makes serial == 2-worker bit-identical.
-  if (xlu_n > 1) {
-    xlu_sort_stable(xlu_idx, xlu_n, pool, bin);
-  }
-  for (uint32_t k = 0; k < xlu_n; ++k) {
-    const struct TriRef* ref = &bin->refs[xlu_idx[k]];
-    struct TriSetup t;
-    int const rc =
-        tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
-    if (rc != RDR_OK) {
-      continue;  // degenerate -> rejected, no fill
+  {
+    PROF_BLOCK_FINE(
+        PROF_SWEEP_XLU);  // T5: sweep 2 — sort + translucent composite
+    if (xlu_n > 1) {
+      xlu_sort_stable(xlu_idx, xlu_n, pool, bin);
     }
-    const struct RenderState* rs = &rstate_table[ref->material];
-    raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
+    for (uint32_t k = 0; k < xlu_n; ++k) {
+      const struct TriRef* ref = &bin->refs[xlu_idx[k]];
+      struct TriSetup t;
+      int const rc =
+          tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
+      if (rc != RDR_OK) {
+        continue;  // degenerate -> rejected, no fill
+      }
+      const struct RenderState* rs = &rstate_table[ref->material];
+      raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
+    }
   }
 }
 
@@ -944,6 +955,7 @@ void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
   if (zbuf == 0) {
     return;
   }
+  PROF_BLOCK(PROF_RASTER_TILE);  // T5: whole-tile span (both cores) — COARSE/us
   // R.3-AA: coverage is active only when a scratch is supplied AND the runtime
   // enable is set. When inactive, every coverage step below is skipped -> the
   // rasterizer (and the framebuffer) is BYTE-IDENTICAL to the pre-AA renderer
@@ -972,6 +984,9 @@ void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
     int const tiles_per_row = RDR_SCREEN_W / RDR_TILE_W;
     int const tile_px_x0 = (tile % tiles_per_row) * RDR_TILE_W;
     int const tile_px_y0 = (tile / tiles_per_row) * RDR_TILE_H;
-    aa_resolve_tile(fb, cov_active, tile_px_x0, tile_px_y0);
+    {
+      PROF_BLOCK_FINE(PROF_AA_RESOLVE);  // T5: coverage resolve (FINE/SysTick)
+      aa_resolve_tile(fb, cov_active, tile_px_x0, tile_px_y0);
+    }
   }
 }

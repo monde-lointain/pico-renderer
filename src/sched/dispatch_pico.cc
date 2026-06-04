@@ -27,6 +27,7 @@
 #include "geom/geom.h"  // GEOM_NUM_TILES
 #include "hardware/sync.h"
 #include "pico/multicore.h"
+#include "prof/prof.h"  // T5: core1 SysTick enable + RASTER_DISPATCH scaffold
 #include "rdr/frame.h"
 #include "sched/dispatch.h"
 #include "sched/drain.h"
@@ -70,12 +71,24 @@ static void dispatch_run(struct Frame* f, int core) {
 // core1 entry: park on the FIFO, run a drain pass on each GO token, signal
 // DONE, re-park. Runs forever (the firmware never tears core1 down).
 static void dispatch_core1_main(void) {
+  // T5: enable SysTick on core1 (per-core BANKED) before any FINE sweep timer
+  // reads run here. core0 enables its own in main() after plat_init.
+  prof_systick_enable();
   for (;;) {
     uint32_t const tok = multicore_fifo_pop_blocking();
     if (tok != (uint32_t)DISPATCH_TOKEN_GO) {
       continue;
     }
-    dispatch_run(s_frame, 1);
+    // T5: core1's RASTER_DISPATCH scaffold establishes RASTER_TILE's parent on
+    // core1. It must live HERE, not in the SHARED dispatch_run (which core0
+    // also runs — core0 would then enter RASTER_DISPATCH twice ->
+    // self-recursion on one anchor). The dtor's parent-subtract lands on
+    // PROF_NONE (the orphan bucket, discarded at merge); only core0's
+    // RASTER_DISPATCH is reported.
+    {
+      PROF_BLOCK(PROF_RASTER_DISPATCH);
+      dispatch_run(s_frame, 1);
+    }
     multicore_fifo_push_blocking((uint32_t)DISPATCH_TOKEN_DONE);
   }
 }

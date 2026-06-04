@@ -19,6 +19,7 @@
 #include "demo/demo_scene.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"
+#include "prof/prof.h"  // T5: granular intra-frame profiler (no-op when PROFILER=0)
 #include "rdr/frame.h"  // struct Frame, RDR_NUM_RASTER_WORKERS
 #include "rdr/rdr.h"
 
@@ -64,6 +65,9 @@ static struct Framebuffer s_present_fb;
 
 int main(void) {
   plat_init();
+  prof_init();  // T5: cache clk_sys Hz AFTER plat_init's 250MHz overclock
+  prof_systick_enable();  // T5: enable SysTick on core0 (per-core banked; core1
+                          // enables its own in dispatch_core1_main)
 
   s_frame.fb = s_present_fb.px;
   s_frame.width = SCREEN_W;
@@ -81,19 +85,42 @@ int main(void) {
     struct Input in;
     bool const alive = plat_poll_input(&in);
 
+    // T5: zero the per-core anchors BEFORE t0 (core1 is parked between frames,
+    // so g_prof[1] is quiescent here) — keeps the cheap reset out of PROF_ROOT.
+    prof_frame_begin();
     uint32_t const t0 = plat_millis();
     struct DemoTelemetry telem;
-    demo_terrain_build(s_cmd, DEMO_TERRAIN_CMD_CAP, &s_cam, &s_scroll, &telem);
-    rdr_begin_frame(&s_frame);
-    // T3a/T3b: fill the 2D sky-blit list AFTER begin_frame (which reset
-    // blit_count) and BEFORE end_frame runs the blits as the full-frame
-    // background: blits[0]=scrolling panorama, blits[1]=cloud band (when the
-    // pose shows sky). Deterministic on the scripted path (committed sky table)
-    // so device fb_crc == host reference.
-    demo_fill_blits(&s_frame, &s_cam);
-    rdr_submit(&s_frame, s_cmd);
-    rdr_end_frame(&s_frame);
-    plat_present(&s_present_fb);
+    {
+      // PROF_ROOT brackets EXACTLY build..present (== the frame_ms span;
+      // fb_crc32 below is outside it, as frame_ms already excludes it). Its
+      // exclusive time = the unwrapped glue (begin_frame + fill_blits + loop).
+      PROF_BLOCK(PROF_ROOT);
+      {
+        PROF_BLOCK(PROF_CMDGEN);  // single-core front-end scene build
+        demo_terrain_build(s_cmd, DEMO_TERRAIN_CMD_CAP, &s_cam, &s_scroll,
+                           &telem);
+      }
+      rdr_begin_frame(&s_frame);
+      // T3a/T3b: fill the 2D sky-blit list AFTER begin_frame (which reset
+      // blit_count) and BEFORE end_frame runs the blits as the full-frame
+      // background: blits[0]=scrolling panorama, blits[1]=cloud band (when the
+      // pose shows sky). Deterministic on the scripted path (committed sky
+      // table) so device fb_crc == host reference.
+      demo_fill_blits(&s_frame, &s_cam);
+      {
+        PROF_BLOCK(
+            PROF_GEOM);  // rdr_submit -> sched_geom -> geom_run (geom-only)
+        rdr_submit(&s_frame, s_cmd);
+      }
+      // PROF_CLEAR_BLIT + PROF_RASTER_DISPATCH live INSIDE rdr_end_frame (the
+      // clear + 2D blits + sched_rasterize are one call — see rdr.cc).
+      rdr_end_frame(&s_frame);
+      {
+        PROF_BLOCK(
+            PROF_PRESENT);  // serial scanout / upload tax (a watermark lever)
+        plat_present(&s_present_fb);
+      }
+    }
     uint32_t const t1 = plat_millis();
 
     uint32_t const fb_crc = fb_crc32(s_present_fb.px, SCREEN_W * SCREEN_H);
@@ -117,6 +144,12 @@ int main(void) {
         (unsigned)s_frame.blit_count, (unsigned)s_cam.mode,
         (unsigned)DEMO_RASTER_WORKERS, (unsigned)fb_crc);
 
+    // T5: fold this frame's per-core anchors into the run accumulator and emit
+    // a periodic snapshot every PROF_DUMP_EVERY frames. Runs AFTER the frame=
+    // log (and after t1), so the multi-line USB burst does not inflate the
+    // window.
+    prof_frame_end(frame, (uint32_t)(t1 - t0));
+
     // Advance the DETERMINISTIC per-frame path by integer deltas (no float).
     demo_camera_advance(&s_cam, in.held, in.pressed);
     demo_scroll_advance(&s_scroll);
@@ -129,6 +162,7 @@ int main(void) {
       break;
     }
   }
+  prof_report_final();  // T5: final averaged prof block at the bounded exit
   plat_log("RESULT=PASS\n");
   return 0;
 }

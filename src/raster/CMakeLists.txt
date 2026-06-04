@@ -15,7 +15,10 @@ target_link_libraries(Renderer_raster
     # R.3-AA: the coverage WRITE + the end-of-tile resolve compose Renderer::Aa
     # (aa_enabled / aa_resolve_tile / AA_COV_FULL); PRIVATE — none is in
     # raster.h's interface (the nullable cov param is just a uint8_t*).
+    # T5: PROF_RASTER_TILE (coarse) + per-sweep FINE blocks (SWEEP_OPAQUE/
+    # SWEEP_XLU/AA_RESOLVE) instrument the back-end hot path. prof.h is .cc-only
+    # -> PRIVATE; PROFILER=0 (golden/CI default) -> macros expand to ((void)0).
     PRIVATE Renderer::Tex Renderer::Shade Renderer::Blend renderer::gfx
-            Renderer::Aa)
+            Renderer::Aa Renderer::Prof)
 orthodoxy_enforce(Renderer_raster)
 pico_tidy_enable(Renderer_raster)

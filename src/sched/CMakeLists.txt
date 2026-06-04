@@ -11,7 +11,10 @@ target_sources(Renderer_sched PRIVATE sched.cc)
 target_include_directories(Renderer_sched PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(Renderer_sched
     PUBLIC renderer::sanitizers
-    PRIVATE Renderer::Geom Renderer::Raster)
+    # T5: dispatch_pico.cc carries core1's SysTick enable + core1's
+    # PROF_RASTER_DISPATCH scaffold block. prof.h is .cc-only -> PRIVATE;
+    # PROFILER=0 -> vanishes (sched.cc / dispatch_host.cc reference nothing).
+    PRIVATE Renderer::Geom Renderer::Raster Renderer::Prof)
 
 if(PLATFORM STREQUAL "picosystem")
   target_sources(Renderer_sched PRIVATE dispatch_pico.cc)

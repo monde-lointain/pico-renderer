@@ -58,6 +58,12 @@ include(cmake/Orthodoxy.cmake)
 include(cmake/Sanitizers.cmake)
 target_link_libraries(project_warnings INTERFACE renderer::sanitizers)
 
+# ---- Profiler (granular intra-frame timers, opt-in via RENDERER_PROFILER) ----
+# Defines the always-present renderer::prof_config interface (PROFILER=1 only
+# when ON). Unconditional (both platforms): OFF by default so golden/CI builds
+# stay bit-identical; the pico-prof preset flips it ON for on-target probing.
+include(cmake/Profiler.cmake)
+
 # ---- Pico inline clang-tidy (arm-none-eabi, opt-in via RENDERER_PICO_TIDY) ----
 # Defines pico_tidy_enable(); the subsystem libs call it on BOTH platforms (no-op on
 # host / normal pico builds), so the include is unconditional — outside the sdl/pico

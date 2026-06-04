@@ -39,6 +39,16 @@
       }
     },
     {
+      "name": "pico-prof",
+      "displayName": "PicoSystem + granular profiler (RP2040, on-target probe)",
+      "inherits": "pico",
+      "binaryDir": "${sourceDir}/build-pico-prof",
+      "cacheVariables": {
+        "RENDERER_PROFILER": "ON",
+        "RENDERER_DEMO_FRAMES": "480"
+      }
+    },
+    {
       "name": "host-asan",
       "displayName": "PC + ASan/UBSan (clang-22, Debug)",
       "binaryDir": "${sourceDir}/build-asan",
@@ -65,6 +75,10 @@
     {
       "name": "pico-tidy",
       "configurePreset": "pico-tidy"
+    },
+    {
+      "name": "pico-prof",
+      "configurePreset": "pico-prof"
     },
     {
       "name": "host-asan",
