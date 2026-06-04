@@ -1936,3 +1936,75 @@ TEST(RasterXlu, DecalTreatedAsOpaque) {
             0)
       << "DECAL not rasterized like OPAQUE in sweep 1";
 }
+
+// (6) XLU drop-with-count: drive MORE XLU tris into ONE tile than the per-tile
+// XLU sort cap. The gather must DROP-with-count (raster_xlu_dropped() rises by
+// the overflow) and the KEPT tris must still composite without corruption or
+// out-of-bounds (the framebuffer stays a valid blend over the background, never
+// touched outside the tris' footprint). Uses a DELTA on the monotonic counter
+// (other tests/process state may have bumped it). The cap is internal to
+// raster.cc; we pick a tri count comfortably above any reasonable cap and read
+// the delta rather than hard-coding the cap value.
+TEST(RasterXlu, DropWithCountOnPerTileOverflow) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);  // fractional alpha 136
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  const struct RenderState* table = &rs;
+
+  uint16_t const bg = rgb565_pack(25, 50, 75);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+
+  // K_OVF XLU tris, all covering the SAME interior region of tile 0 at slightly
+  // varying depth (so the sort runs too). 512 >> any sane per-tile cap (256).
+  enum { K_OVF = 512 };
+  static TVtx pool[K_OVF * 3];
+  static TriRef refs[K_OVF];
+  for (int t = 0; t < K_OVF; ++t) {
+    // inv_w varies a little per tri so depths differ; same screen triangle.
+    int32_t const iw = (int32_t)(0x08000 + ((t & 31) * 0x200));
+    pool[(t * 3) + 0] = mk_tvtx_uv(8, 8, iw, 0, 0, white);
+    pool[(t * 3) + 1] = mk_tvtx_uv(50, 12, iw, 7 * 32, 0, white);
+    pool[(t * 3) + 2] = mk_tvtx_uv(12, 50, iw, 0, 7 * 32, white);
+    refs[t].v0 = (uint16_t)((t * 3) + 0);
+    refs[t].v1 = (uint16_t)((t * 3) + 1);
+    refs[t].v2 = (uint16_t)((t * 3) + 2);
+    refs[t].material = 0;
+  }
+  TileBin bin;
+  bin.refs = refs;
+  bin.count = K_OVF;
+  bin.cap = K_OVF;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+
+  uint32_t const dropped_before = raster_xlu_dropped();
+  raster_tile(0, &bin, pool, fb, zbuf, table);
+  uint32_t const dropped_after = raster_xlu_dropped();
+
+  // The gather overflowed: at least (K_OVF - cap) tris dropped. We don't know
+  // the cap here, but it is well below K_OVF, so the delta must be POSITIVE.
+  EXPECT_GT(dropped_after, dropped_before)
+      << "512 XLU tris in one tile did not trip drop-with-count — the per-tile "
+         "cap is unexpectedly >= 512, or the overflow path is unreachable";
+
+  // KEPT tris still composited: a deep-interior pixel must be a BLEND (neither
+  // the bare bg nor unwritten garbage). With fractional alpha 136 over bg, the
+  // composited value differs from bg.
+  uint16_t const px = fb[(20 * RDR_SCREEN_W) + 14];
+  EXPECT_NE(px, bg)
+      << "no XLU tri composited under overflow — kept tris were lost";
+
+  // No corruption / OOB: pixels OUTSIDE the tris' footprint (and outside tile
+  // 0) stay exactly bg. Check a clearly-outside pixel in tile 0 (bottom-right
+  // corner, beyond the tri) and a pixel in another tile.
+  EXPECT_EQ(fb[(58 * RDR_SCREEN_W) + 58], bg)
+      << "overflow render wrote outside the tri footprint (corruption/OOB)";
+  EXPECT_EQ(fb[(120 * RDR_SCREEN_W) + 120], bg)
+      << "overflow render wrote into another tile (OOB)";
+}

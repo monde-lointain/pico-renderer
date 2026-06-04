@@ -82,11 +82,14 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
                          const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf,
                          const struct RenderState* rstate_table);
 
-// R.2 DEBUG telemetry: total XLU triangles dropped because a single tile's
-// translucent gather exceeded the fixed per-tile XLU sort cap (drop-with-count,
-// mirroring TileBin.dropped — never corrupt, surface the count). NEVER feeds
-// the framebuffer path; a nonzero value is a re-surface signal that the per-
-// tile XLU cap needs raising. Not atomic across raster workers (debug only).
+// R.2 DEBUG telemetry: MONOTONIC count of XLU triangles dropped because some
+// tile's translucent gather exceeded the fixed per-tile XLU sort cap. Mirrors
+// TileBin.dropped's drop-POLICY (never corrupt, surface the count) but is NOT a
+// per-frame count — TileBin.dropped is reset each frame by geom; this counter
+// is process-lifetime and never reset (no frame hook in the raster lane). Read
+// it as a DELTA (before/after a render), not an absolute. NEVER feeds the
+// framebuffer path; a rising value is a re-surface signal that the per-tile XLU
+// cap needs raising. Not atomic across raster workers (debug only).
 uint32_t raster_xlu_dropped(void);
 
 #endif  // RDR_RASTER_H
