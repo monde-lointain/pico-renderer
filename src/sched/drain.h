@@ -17,8 +17,13 @@
 #include "rdr/frame.h"
 
 static inline void sched_drain_tile(struct Frame* f, int worker, int tile) {
+  // R.3-AA coordinated 1-line seam: pass the worker's private coverage scratch
+  // (f->cov[worker], same per-worker independence as zbuf). raster_tile gates
+  // on aa_enabled() internally, so when AA is OFF (default) this is byte-
+  // identical to the pre-AA drain — the coverage path is fully skipped and the
+  // resolve does not run.
   raster_tile(tile, &f->geom.tiles[tile], f->geom.tverts, f->fb,
-              f->zbuf[worker], &f->rstate_table[0]);
+              f->zbuf[worker], &f->rstate_table[0], f->cov[worker]);
 }
 
 #endif  // RDR_SCHED_DRAIN_H

@@ -17,7 +17,8 @@ pico_tidy_enable(Renderer_demo_scene)
 if(PLATFORM STREQUAL "picosystem")
   add_executable(renderer_demo main.cc)
   target_link_libraries(renderer_demo PRIVATE
-    Renderer::rdr Renderer::DemoScene renderer::gfx renderer::platform_pico)
+    Renderer::rdr Renderer::DemoScene Renderer::Aa renderer::gfx
+    renderer::platform_pico)
   target_include_directories(renderer_demo PRIVATE ${CMAKE_SOURCE_DIR}/src)
   pico_set_linker_script(renderer_demo
     ${CMAKE_SOURCE_DIR}/src/platform/memmap_picosystem.ld)
@@ -28,7 +29,7 @@ if(PLATFORM STREQUAL "picosystem")
 else()
   add_executable(renderer_demo main.cc)
   target_link_libraries(renderer_demo PRIVATE
-    Renderer::rdr Renderer::DemoScene renderer::gfx
+    Renderer::rdr Renderer::DemoScene Renderer::Aa renderer::gfx
     renderer::platform_sdl project_warnings)
   target_include_directories(renderer_demo PRIVATE ${CMAKE_SOURCE_DIR}/src)
 endif()

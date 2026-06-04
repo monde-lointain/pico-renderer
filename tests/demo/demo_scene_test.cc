@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aa/aa.h"                 // aa_set_enabled (T4a: match device AA-on)
 #include "demo/camera_path_gen.h"  // committed scripted V*P + sky table (float-free)
 #include "demo/debug_terrain_gen.h"  // committed FLASH-CONST placeholder geometry
 #include "fixed/fixed.h"             // Vec4fx, fx_* (Δ4 u_iw overflow probe)
@@ -158,6 +159,11 @@ static int hue_bucket(uint16_t px) {
 static void render_terrain(const struct DemoCamera* cam,
                            const struct DemoScroll* scroll,
                            struct DemoTelemetry* telem) {
+  // T4a: the device demo runs with coverage AA ON (main.cc), so every host
+  // full-frame render must match — enable it here (idempotent runtime flag) so
+  // the fb_crc golden + on-target reference are computed AA-on. Terrain fog is
+  // material-driven (demo_terrain_material), so it needs no toggle here.
+  aa_set_enabled(1);
   struct Command cmds[DEMO_TERRAIN_CMD_CAP];
   uint32_t const n =
       demo_terrain_build(cmds, DEMO_TERRAIN_CMD_CAP, cam, scroll, telem);
@@ -260,6 +266,14 @@ TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
   EXPECT_EQ(rs.cull, (uint8_t)CULL_BACK);
   // T2: terrain samples bilinear (gutter'd atlas -> seam-correct).
   EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_THREE_POINT);
+  // T4a fog: terrain hazes to the N64 sage color over the field's far depth.
+  // Pin the params so an accidental edit trips HERE (legible), not just the
+  // opaque golden CRC.
+  EXPECT_EQ(rs.fog.enabled, (uint8_t)1);
+  EXPECT_EQ(rs.fog.near_z, (fx16_16)(40 << 16));
+  EXPECT_EQ(rs.fog.far_z, (fx16_16)(58 << 16));
+  EXPECT_LT(rs.fog.near_z, rs.fog.far_z);
+  EXPECT_EQ(rs.fog.color, rgb565(190, 219, 190));
 
   // Functional: TEXEL0 x ENV on a known non-black texel must equal the per-
   // channel combine of (texel) and (env). Pick a mid green-ish 565 texel.
@@ -299,6 +313,8 @@ TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
   EXPECT_NE(rs.alpha_cmp, (uint8_t)0)
       << "tree cutout pass must alpha-test (else the black billboard "
          "background is not discarded)";
+  EXPECT_EQ(rs.fog.enabled, (uint8_t)0)
+      << "trees are 1-cycle no-fog (N64 scenery.c); only terrain fogs";
 }
 
 // TERRAIN-SCENE GUARD: real-density TEXTURED terrain + trees produce VARIED
@@ -896,7 +912,7 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0x39b7dd60U)
+  EXPECT_EQ(digest, 0xa87dac5bU)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 

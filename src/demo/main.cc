@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "aa/aa.h"  // aa_set_enabled (T4a: coverage AA on)
 #include "demo/demo_scene.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"
@@ -70,6 +71,8 @@ int main(void) {
 
   demo_camera_init(&s_cam);
   demo_scroll_init(&s_scroll);
+  aa_set_enabled(1);  // T4a: coverage AA on for the demo (terrain fog too, set
+                      // in the terrain material). Runtime flag (default OFF).
 
   uint32_t frame = 0;
   for (;;) {

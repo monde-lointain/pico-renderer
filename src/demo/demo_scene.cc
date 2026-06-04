@@ -470,6 +470,19 @@ void demo_terrain_material(struct RenderState* out) {
   out->cull = (uint8_t)CULL_BACK;
   out->alpha_cmp = 0;
   out->lit = 0;
+  // T4a fog (N64 terrain.c TERR_FOG_*: color {190,219,190}). Z-SPACE
+  // ADAPTATION: the N64 fogs the far ~2.6% of the perspective Z-buffer
+  // (gSPFogPosition 974..1100 on the [0,1000]-normalized screen-Z); our
+  // geom_fog keys off LINEAR clip.w (== view-z, proj w-row m[11]=1) — a
+  // documented R.3-fog adaptation, not the N64 perspective-Z curve. So near/far
+  // are tuned in the MEASURED terrain view-z range [~0, 59.3 pre-scaled units]
+  // to reproduce the N64 INTENT: distant terrain hazes to the sage fog color,
+  // foreground stays clear. near=40 (fog begins), far=58 (saturates near the
+  // field's back edge). fx16_16 = units<<16.
+  out->fog.enabled = 1;
+  out->fog.near_z = (fx16_16)(40 << 16);
+  out->fog.far_z = (fx16_16)(58 << 16);
+  out->fog.color = rgb565(190, 219, 190);
 }
 
 void demo_tree_material(struct RenderState* out) {

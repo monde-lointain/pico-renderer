@@ -98,7 +98,7 @@ void render_tile0_to_rgb(const TileBin* bin, const TVtx* pool, uint8_t* rgb_out,
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, bin, pool, fb, zbuf, no_texture_table());
+  raster_tile(0, bin, pool, fb, zbuf, no_texture_table(), 0);
   for (int y = 0; y < RDR_TILE_H; ++y) {
     for (int x = 0; x < RDR_TILE_W; ++x) {
       uint16_t const px = fb[(y * RDR_SCREEN_W) + x];
@@ -337,7 +337,7 @@ TEST(Raster, ClipsToTileBounds) {
   OneTri o;
   one_tri(&o, mk_vtx(40, 5, 0, 0, 0x10000), mk_vtx(100, 30, 0, 0, 0x10000),
           mk_vtx(40, 55, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
   // No pixel with screen x >= RDR_TILE_W should be written by tile 0.
   int leaked = 0;
   for (int y = 0; y < RDR_SCREEN_H; ++y) {
@@ -404,7 +404,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   bin.count = 2;
   bin.cap = 2;
   bin.dropped = 0;
-  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0);
 
   // A pixel inside the triangle must be the NEAR color (red), not far (blue).
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
@@ -420,7 +420,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   refs[1].v0 = 0;
   refs[1].v1 = 1;
   refs[1].v2 = 2;  // far second
-  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0);
   uint16_t const px2 = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px2, c_near);
 }
@@ -445,7 +445,7 @@ TEST(Raster, NonZeroTileMapsToScreenRect) {
   one_tri(&o, mk_vtx(x0 + 10, y0 + 8, 0, 0, 0x10000),
           mk_vtx(x0 + 45, y0 + 12, 0, 0, 0x10000),
           mk_vtx(x0 + 20, y0 + 48, 0, 0, 0x10000));
-  raster_tile(tile, &o.bin, o.pool, fb, zbuf, no_texture_table());
+  raster_tile(tile, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
 
   // Oracle reference at the same absolute screen coords (full-screen image).
   uint8_t fr;
@@ -495,7 +495,7 @@ TEST(Raster, ClearsZScratchOnEntry) {
   OneTri o;
   one_tri(&o, mk_vtx(10, 8, 0, 0, 0x10000), mk_vtx(45, 12, 0, 0, 0x10000),
           mk_vtx(20, 48, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px, K_FLAT565) << "Z scratch not cleared: stale depth blocked fill";
 }
@@ -861,7 +861,7 @@ TEST(RasterTextured, MatchesTexSampleAndShadeExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -938,7 +938,7 @@ TEST(RasterTextured, ReversedWindingTexturedSwapsAllAttrsInLockstep) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // ref_setup mirrors tri_setup's swap; ref_textured_pixel mirrors the inner
   // loop. Bit-exact equality at every covered pixel proves the impl swapped all
@@ -1002,7 +1002,7 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, &rs);
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
 
   // Float reference per covered pixel. Mirror oracle_fill_tri's winding-
   // normalize + top-left rule, then float-interpolate.
@@ -1237,7 +1237,7 @@ TEST(RasterTextured, AlphaCutoutDiscardsAndSkipsZbuf) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // Sample a clearly-left (opaque) interior pixel and a clearly-right
   // (transparent) interior pixel — both well inside the triangle (x+y << 56 so
@@ -1364,11 +1364,11 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
   bin.dropped = 0;
 
   for (int tile = 0; tile < num_tiles; ++tile) {
-    raster_tile(tile, &bin, pool, fb_serial, z0, table);
+    raster_tile(tile, &bin, pool, fb_serial, z0, table, 0);
   }
   for (int tile = 0; tile < num_tiles; ++tile) {
     uint16_t* const z = (tile & 1) ? z1 : z0;
-    raster_tile(tile, &bin, pool, fb_par, z, table);
+    raster_tile(tile, &bin, pool, fb_par, z, table, 0);
   }
   EXPECT_EQ(memcmp(fb_serial, fb_par,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -1520,7 +1520,7 @@ TEST(RasterXlu, AlphaOverMatchesBlendPixelAlphaExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -1613,8 +1613,8 @@ TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
   }
   static uint16_t z_a[RDR_TILE_W * RDR_TILE_H];
   static uint16_t z_b[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin_a, pool, fb_a, z_a, table);
-  raster_tile(0, &bin_b, pool, fb_b, z_b, table);
+  raster_tile(0, &bin_a, pool, fb_a, z_a, table, 0);
+  raster_tile(0, &bin_b, pool, fb_b, z_b, table, 0);
 
   // Determinism: permuting insertion order must NOT change the result.
   EXPECT_EQ(memcmp(fb_a, fb_b,
@@ -1709,7 +1709,7 @@ TEST(RasterXlu, ZTestHonoredBehindOpaqueOccluder) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // A deep-interior pixel covered by BOTH: the occluder wrote depth NEAR, the
   // XLU tri is FAR -> z-test rejects it -> the pixel stays the occluder color
@@ -1772,7 +1772,7 @@ TEST(RasterXlu, NoZWriteSoSecondXluStillComposites) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // Expected TWO-LAYER composite (far-over-bg, then near-over-that). Only holds
   // if the far layer's fragment was NOT depth-rejected by a near z-write.
@@ -1867,8 +1867,8 @@ TEST(RasterXlu, OpaqueSweepUnaffectedByPresenceOfXlu) {
   }
   static uint16_t z0[RDR_TILE_W * RDR_TILE_H];
   static uint16_t z1[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin_opaque, pool, fb_opaque, z0, table);
-  raster_tile(0, &bin_mixed, pool, fb_mixed, z1, table);
+  raster_tile(0, &bin_opaque, pool, fb_opaque, z0, table, 0);
+  raster_tile(0, &bin_mixed, pool, fb_mixed, z1, table, 0);
 
   // Every pixel in the opaque tri's footprint (x < 40) must be byte-identical
   // between the two renders — the XLU sweep did not touch the opaque region.
@@ -1925,11 +1925,11 @@ TEST(RasterXlu, DecalTreatedAsOpaque) {
   }
   static uint16_t zd[RDR_TILE_W * RDR_TILE_H];
   static uint16_t zo[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin, pool, fb_decal, zd, table);
+  raster_tile(0, &bin, pool, fb_decal, zd, table, 0);
   struct RenderState rs_op = rs;
   rs_op.zmode = ZMODE_OPAQUE;
   const struct RenderState* table_op = &rs_op;
-  raster_tile(0, &bin, pool, fb_opaque, zo, table_op);
+  raster_tile(0, &bin, pool, fb_opaque, zo, table_op, 0);
 
   EXPECT_EQ(memcmp(fb_decal, fb_opaque,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -1984,7 +1984,7 @@ TEST(RasterXlu, DropWithCountOnPerTileOverflow) {
   }
 
   uint32_t const dropped_before = raster_xlu_dropped();
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
   uint32_t const dropped_after = raster_xlu_dropped();
 
   // The gather overflowed: at least (K_OVF - cap) tris dropped. We don't know
@@ -2007,4 +2007,850 @@ TEST(RasterXlu, DropWithCountOnPerTileOverflow) {
       << "overflow render wrote outside the tri footprint (corruption/OOB)";
   EXPECT_EQ(fb[(120 * RDR_SCREEN_W) + 120], bg)
       << "overflow render wrote into another tile (OOB)";
+}
+
+// ===========================================================================
+// R.3 FOG — per-pixel affine fog over the textured + flat paths.
+// ===========================================================================
+namespace {
+
+// Per-vertex fog factor [0,255], mirroring how geom births TVtx.fog. Set on a
+// TVtx built by mk_vtx / mk_tvtx_uv (which zero fog by default).
+void set_fog3(TVtx* p, uint8_t f0, uint8_t f1, uint8_t f2) {
+  p[0].fog = f0;
+  p[1].fog = f1;
+  p[2].fog = f2;
+}
+
+// Winding-aware fog reorder: ref_setup swaps v1<->v2 when initial area2 < 0, so
+// the reference fog triple must follow the SAME order to interpolate correctly.
+void ref_fog_order(const TVtx* pool, uint8_t* g0, uint8_t* g1, uint8_t* g2) {
+  *g0 = pool[0].fog;
+  *g1 = pool[1].fog;
+  *g2 = pool[2].fog;
+  int32_t const a =
+      edge_i(pool[0].x, pool[0].y, pool[1].x, pool[1].y, pool[2].x, pool[2].y);
+  if (a < 0) {
+    uint8_t const t = *g1;
+    *g1 = *g2;
+    *g2 = t;
+  }
+}
+
+// Bit-exact reference for the fogged textured pixel: the unfogged combiner
+// output (ref_textured_pixel) lerped toward fog_color by the affine per-pixel
+// fog factor (gouraud_ref over the winding-ordered fog triple) via fog_lerp —
+// the SAME integer path raster_one runs. Returns 1 + writes *out if covered.
+int ref_fogged_pixel(const struct RefTri* t, const struct RenderState* rs,
+                     uint8_t fg0, uint8_t fg1, uint8_t fg2, int sx, int sy,
+                     uint16_t* out) {
+  uint16_t base;
+  if (!ref_textured_pixel(t, rs, sx, sy, &base)) {
+    return 0;
+  }
+  fx12_4 const cx = (fx12_4)((sx << 4) + 8);
+  fx12_4 const cy = (fx12_4)((sy << 4) + 8);
+  int32_t const w0 = edge_i(t->x1, t->y1, t->x2, t->y2, cx, cy);
+  int32_t const w1 = edge_i(t->x2, t->y2, t->x0, t->y0, cx, cy);
+  int32_t const w2 = edge_i(t->x0, t->y0, t->x1, t->y1, cx, cy);
+  uint8_t const fogf =
+      gouraud_ref(w0, w1, w2, (int)fg0, (int)fg1, (int)fg2, t->area2);
+  *out = fog_lerp(base, rs->fog.color, fogf);
+  return 1;
+}
+
+// Bit-exact reference for the FLAT fast-path fogged pixel: the flat provoking
+// color `flat565` lerped toward fog_color by the affine per-pixel fog factor
+// (gouraud_ref over the winding-ordered fog triple) — the SAME integer path
+// raster_one's !textured branch runs (no combiner, base = t->color). Coverage +
+// top-left rule mirror ref_textured_pixel. Returns 1 + writes *out if covered.
+int ref_flat_fogged_pixel(const struct RefTri* t, uint16_t flat565,
+                          uint16_t fog_color, uint8_t fg0, uint8_t fg1,
+                          uint8_t fg2, int sx, int sy, uint16_t* out) {
+  fx12_4 const cx = (fx12_4)((sx << 4) + 8);
+  fx12_4 const cy = (fx12_4)((sy << 4) + 8);
+  int32_t const w0 = edge_i(t->x1, t->y1, t->x2, t->y2, cx, cy);
+  int32_t const w1 = edge_i(t->x2, t->y2, t->x0, t->y0, cx, cy);
+  int32_t const w2 = edge_i(t->x0, t->y0, t->x1, t->y1, cx, cy);
+  int const in0 = (w0 > 0) || (w0 == 0 && t->tl1);
+  int const in1 = (w1 > 0) || (w1 == 0 && t->tl2);
+  int const in2 = (w2 > 0) || (w2 == 0 && t->tl0);
+  if (!(in0 && in1 && in2)) {
+    return 0;
+  }
+  uint8_t const fogf =
+      gouraud_ref(w0, w1, w2, (int)fg0, (int)fg1, (int)fg2, t->area2);
+  *out = fog_lerp(flat565, fog_color, fogf);
+  return 1;
+}
+
+const uint16_t K_FOG565 = (uint16_t)((31U << 11) | (50U << 5) | 5U);
+
+}  // namespace
+
+// Bit-exact wiring: textured + Gouraud + MODULATE, fog ENABLED with a
+// per-vertex fog GRADIENT (0/128/255). Every covered pixel must EXACTLY equal
+// the unfogged combiner output lerped toward fog_color by the affine fog factor
+// — proves the per-pixel fog interp + fog_lerp + lockstep swap are wired
+// correctly.
+TEST(RasterFog, TexturedFogMatchesReferenceExact) {
+  struct Tex565 tex;
+  make_tex565(&tex);
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  tex_desc_565(&rs.tex, &tex);
+  rs.combiner.mode = COMBINE_MODULATE;
+  rs.alpha_cmp = 0;
+  rs.fog.enabled = 1;
+  rs.fog.color = K_FOG565;
+  const struct RenderState* table = &rs;
+
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x20000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x08000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  set_fog3(pool, 0, 128, 255);  // distinct per-vertex fog gradient
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  uint8_t fg0;
+  uint8_t fg1;
+  uint8_t fg2;
+  ref_fog_order(pool, &fg0, &fg1, &fg2);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t expected;
+      if (!ref_fogged_pixel(&rt, &rs, fg0, fg1, fg2, sx, sy, &expected)) {
+        continue;
+      }
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "fogged pixel (" << sx << "," << sy << ") mismatch";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+}
+
+// Float-oracle tolerance: a LOW-FREQUENCY (smooth) texture + a fog GRADIENT,
+// the rendered pixel de-565'd must match oracle_fog_lerp(combiner_color,
+// fog_color, fogf/255) within a couple 565 quanta (a 1-texel slip stays tiny;
+// R.1 lesson).
+TEST(RasterFog, TexturedFogMatchesFloatOracle) {
+  struct Tex565 tex;
+  make_tex565_smooth(&tex);
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  tex_desc_565(&rs.tex, &tex);
+  rs.combiner.mode = COMBINE_MODULATE;
+  rs.alpha_cmp = 0;
+  rs.fog.enabled = 1;
+  rs.fog.color = K_FOG565;
+
+  uint16_t const shade = rgb565_pack(200, 200, 200);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x20000, 0, 0, shade);
+  pool[1] = mk_tvtx_uv(52, 12, 0x08000, 7 * 32, 0, shade);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, shade);
+  set_fog3(pool, 16, 130, 240);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
+
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  uint8_t fg0;
+  uint8_t fg1;
+  uint8_t fg2;
+  ref_fog_order(pool, &fg0, &fg1, &fg2);
+  uint8_t fogr;
+  uint8_t fogg;
+  uint8_t fogb;
+  oracle_unpack565(K_FOG565, &fogr, &fogg, &fogb);
+  uint8_t const fog_rgb[3] = {fogr, fogg, fogb};
+
+  int checked = 0;
+  int worst = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t combiner_only;
+      if (!ref_textured_pixel(&rt, &rs, sx, sy, &combiner_only)) {
+        continue;
+      }
+      // Affine fog factor exactly as the impl interpolates it.
+      fx12_4 const cx = (fx12_4)((sx << 4) + 8);
+      fx12_4 const cy = (fx12_4)((sy << 4) + 8);
+      int32_t const w0 = edge_i(rt.x1, rt.y1, rt.x2, rt.y2, cx, cy);
+      int32_t const w1 = edge_i(rt.x2, rt.y2, rt.x0, rt.y0, cx, cy);
+      int32_t const w2 = edge_i(rt.x0, rt.y0, rt.x1, rt.y1, cx, cy);
+      uint8_t const fogf =
+          gouraud_ref(w0, w1, w2, (int)fg0, (int)fg1, (int)fg2, rt.area2);
+      uint8_t cr;
+      uint8_t cg;
+      uint8_t cb;
+      oracle_unpack565(combiner_only, &cr, &cg, &cb);
+      uint8_t const in_rgb[3] = {cr, cg, cb};
+      uint8_t expect_rgb[3];
+      ASSERT_EQ(
+          oracle_fog_lerp(in_rgb, fog_rgb, (float)fogf / 255.0F, expect_rgb),
+          0);
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      uint8_t gr;
+      uint8_t gg;
+      uint8_t gb;
+      oracle_unpack565(got, &gr, &gg, &gb);
+      int const dr = abs((int)gr - (int)expect_rgb[0]);
+      int const dg = abs((int)gg - (int)expect_rgb[1]);
+      int const db = abs((int)gb - (int)expect_rgb[2]);
+      if (dr > worst) {
+        worst = dr;
+      }
+      if (dg > worst) {
+        worst = dg;
+      }
+      if (db > worst) {
+        worst = db;
+      }
+      // 565 quantum is 8 (R/B) or 4 (G) in 8-bit; allow a couple quanta for the
+      // 565 round-trip + the trunc-vs-round in the impl's u8 path.
+      ASSERT_LE(dr, 16) << "fog R off at (" << sx << "," << sy << ")";
+      ASSERT_LE(dg, 16) << "fog G off at (" << sx << "," << sy << ")";
+      ASSERT_LE(db, 16) << "fog B off at (" << sx << "," << sy << ")";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+  EXPECT_LE(worst, 16) << "worst-channel fog error exceeded tolerance";
+}
+
+// Monotonicity: with a per-vertex fog gradient, the pixel NEAR the fog==0
+// vertex must be close to the unfogged combiner color, while the pixel NEAR the
+// fog==255 vertex must be close to the fog_color (more fog farther). Uses a
+// flat white texture so the combiner color is ~constant and the change is all
+// fog.
+TEST(RasterFog, MoreFogTowardFarVertex) {
+  struct Tex565 tex;
+  make_tex565_smooth(&tex);
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  tex_desc_565(&rs.tex, &tex);
+  rs.combiner.mode = COMBINE_MODULATE;
+  rs.alpha_cmp = 0;
+  rs.fog.enabled = 1;
+  rs.fog.color = K_FOG565;
+
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  set_fog3(pool, 0, 0, 255);  // v0/v1 unfogged, v2 fully fogged
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
+
+  uint8_t fogr;
+  uint8_t fogg;
+  uint8_t fogb;
+  oracle_unpack565(K_FOG565, &fogr, &fogg, &fogb);
+
+  // Pixel near v0 (fog 0): close to white (combiner ~= texel ~= white).
+  uint16_t const near0 = fb[(10 * RDR_SCREEN_W) + 12];
+  uint8_t n0r;
+  uint8_t n0g;
+  uint8_t n0b;
+  oracle_unpack565(near0, &n0r, &n0g, &n0b);
+  // Pixel near v2 (fog 255): close to fog_color.
+  uint16_t const near2 = fb[(46 * RDR_SCREEN_W) + 15];
+  uint8_t n2r;
+  uint8_t n2g;
+  uint8_t n2b;
+  oracle_unpack565(near2, &n2r, &n2g, &n2b);
+
+  // Near the unfogged vertex, the green/blue channels are still near full
+  // (white), well above the fog_color's tiny G/B; near the fully-fogged vertex
+  // they collapse toward fog_color (which is mostly red). So fog increases the
+  // distance from white toward fog_color along the gradient.
+  int const dist0 = abs((int)n0g - (int)fogg) + abs((int)n0b - (int)fogb);
+  int const dist2 = abs((int)n2g - (int)fogg) + abs((int)n2b - (int)fogb);
+  EXPECT_GT(dist0, dist2)
+      << "fog did not increase toward the far (fog==255) vertex";
+}
+
+// XLU + FOG bit-exact: the translucent sweep must fog the combiner color BEFORE
+// the texel-alpha alpha-over. Expected = blend_pixel_alpha(BLEND_ALPHA,
+// fog_lerp(combiner, fog_color, fogf), texel_alpha, bg). Proves fog is applied
+// pre-blend on the XLU path (faithful: a distant translucent fragment fogs then
+// composites).
+TEST(RasterFog, XluFogAppliedBeforeAlphaOver) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);  // fractional alpha 136
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  rs.fog.enabled = 1;
+  rs.fog.color = K_FOG565;
+  const struct RenderState* table = &rs;
+
+  uint16_t const bg = rgb565_pack(30, 70, 110);
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x18000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x14000, 0, 7 * 32, white);
+  set_fog3(pool, 20, 140, 230);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  uint8_t fg0;
+  uint8_t fg1;
+  uint8_t fg2;
+  ref_fog_order(pool, &fg0, &fg1, &fg2);
+  int checked = 0;
+  int blended = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      // Unfogged combiner color (no blend yet): reuse ref_textured_pixel which
+      // returns shade_pixel(combiner) for the covered pixel.
+      uint16_t combiner_only;
+      if (!ref_textured_pixel(&rt, &rs, sx, sy, &combiner_only)) {
+        continue;
+      }
+      fx12_4 const cx = (fx12_4)((sx << 4) + 8);
+      fx12_4 const cy = (fx12_4)((sy << 4) + 8);
+      int32_t const w0 = edge_i(rt.x1, rt.y1, rt.x2, rt.y2, cx, cy);
+      int32_t const w1 = edge_i(rt.x2, rt.y2, rt.x0, rt.y0, cx, cy);
+      int32_t const w2 = edge_i(rt.x0, rt.y0, rt.x1, rt.y1, cx, cy);
+      uint8_t const fogf =
+          gouraud_ref(w0, w1, w2, (int)fg0, (int)fg1, (int)fg2, rt.area2);
+      uint16_t const fogged = fog_lerp(combiner_only, K_FOG565, fogf);
+      // texel alpha is the constant 136 of this 4444 texture.
+      uint8_t rgba[4];
+      int64_t const numiw = ((int64_t)w0 * rt.iw0) + ((int64_t)w1 * rt.iw1) +
+                            ((int64_t)w2 * rt.iw2);
+      int32_t const inv_w = (int32_t)(numiw / (int64_t)rt.area2);
+      int64_t const numu = ((int64_t)w0 * rt.u_iw0) + ((int64_t)w1 * rt.u_iw1) +
+                           ((int64_t)w2 * rt.u_iw2);
+      int64_t const numv = ((int64_t)w0 * rt.v_iw0) + ((int64_t)w1 * rt.v_iw1) +
+                           ((int64_t)w2 * rt.v_iw2);
+      int32_t const u_iw_p = (int32_t)(numu / (int64_t)rt.area2);
+      int32_t const v_iw_p = (int32_t)(numv / (int64_t)rt.area2);
+      fx16_16 const u_q16 = (fx16_16)(((int64_t)u_iw_p << 27) / (int64_t)inv_w);
+      fx16_16 const v_q16 = (fx16_16)(((int64_t)v_iw_p << 27) / (int64_t)inv_w);
+      tex_sample_rgba(&rs.tex, u_q16, v_q16, 0, rgba);
+      uint16_t const expected =
+          blend_pixel_alpha(BLEND_ALPHA, fogged, rgba[3], bg);
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "XLU+fog pixel (" << sx << "," << sy << ") mismatch";
+      if (got != bg) {
+        ++blended;
+      }
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+  EXPECT_GT(blended, 50) << "XLU+fog did not composite (no blend over bg)";
+}
+
+// Bit-exact wiring of the FLAT fast path under fog (symmetric with
+// TexturedFogMatchesReferenceExact): a NO-TEXTURE fog-enabled tri with a
+// per-vertex fog GRADIENT (0/128/255). The flat path (raster.cc !textured
+// branch) has no combiner — its base is the provoking color t->color — so every
+// covered pixel must EXACTLY equal fog_lerp(flat, fog_color,
+// affine_fog_factor). Pins the flat fog path bit-exactly (the mixed-scene CRC
+// only covers it indirectly). The provoking color is the FLAT color of v0
+// (pre-swap), constant across the tri, so the only per-pixel variation is the
+// fog factor.
+TEST(RasterFog, FlatFogMatchesReferenceExact) {
+  // No texture -> flat fast path. Fog enabled toward K_FOG565.
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  rs.fog.enabled = 1;
+  rs.fog.color = K_FOG565;
+  const struct RenderState* table = &rs;
+
+  // Distinct per-vertex fog (0/128/255); all three carry the SAME flat color so
+  // t->color (provoking v0) is unambiguous and the reference base is exact.
+  uint16_t const flat = rgb565_pack(40, 180, 220);
+  TVtx pool[3];
+  pool[0] = mk_vtx(8, 8, 0, 0, 0x10000);
+  pool[1] = mk_vtx(52, 12, 0, 0, 0x10000);
+  pool[2] = mk_vtx(14, 50, 0, 0, 0x10000);
+  for (int k = 0; k < 3; ++k) {
+    pool[k].rgba = flat;  // mk_vtx defaults to K_FLAT565; override to `flat`
+  }
+  set_fog3(pool, 0, 128, 255);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+
+  struct RefTri rt;
+  ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
+  uint8_t fg0;
+  uint8_t fg1;
+  uint8_t fg2;
+  ref_fog_order(pool, &fg0, &fg1, &fg2);
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint16_t expected;
+      if (!ref_flat_fogged_pixel(&rt, flat, K_FOG565, fg0, fg1, fg2, sx, sy,
+                                 &expected)) {
+        continue;
+      }
+      uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
+      ASSERT_EQ(got, expected)
+          << "flat fogged pixel (" << sx << "," << sy << ") mismatch";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+}
+
+// ===========================================================================
+// R.3-AA coverage WRITE tests. The rasterizer writes an analytic coverage byte
+// at each winning OPAQUE fragment when AA is enabled AND a cov scratch is
+// supplied. We verify: interior -> AA_COV_FULL(255); a pixel-centre on an edge
+// -> ~128 (0.5); untouched/outside -> the FULL clear value; AA-off / null-cov
+// leaves cov untouched; and per-pixel parity vs the float oracle_coverage on
+// clean edge pixels.
+// ===========================================================================
+#include "aa/aa.h"  // aa_set_enabled, AA_COV_FULL
+
+namespace {
+
+// Float edge function matching raster.cc edge_eval (Q12.4 inputs as float).
+double edge_f(double ax, double ay, double bx, double by, double px,
+              double py) {
+  return ((bx - ax) * (py - ay)) - ((by - ay) * (px - ax));
+}
+double edge_len_q124(double ax, double ay, double bx, double by) {
+  double const dx = bx - ax;
+  double const dy = by - ay;
+  return sqrt((dx * dx) + (dy * dy));
+}
+
+// AA-on render of one tri (tile 0) into a caller cov buffer (cleared to FULL by
+// raster_tile). fb cleared to black. Verts must already be positive-area in
+// screen y-down so the rasterizer does NOT winding-swap (keeps the edge mapping
+// w0=edge(v1,v2), w1=edge(v2,v0), w2=edge(v0,v1) predictable for the oracle).
+void render_cov(const OneTri* o, uint8_t* cov_out) {
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  aa_set_enabled(1);
+  raster_tile(0, &o->bin, o->pool, fb, zbuf, no_texture_table(), cov_out);
+  aa_set_enabled(0);
+}
+
+}  // namespace
+
+// AA OFF: cov scratch must be left UNTOUCHED (the golden-neutral gate at the
+// write site — even when a cov pointer is supplied, AA-off skips it entirely).
+TEST(RasterCoverage, DisabledLeavesCovUntouched) {
+  OneTri o;
+  one_tri(&o, mk_vtx(8, 8, 0, 0, 0x10000), mk_vtx(50, 12, 0, 0, 0x10000),
+          mk_vtx(20, 50, 0, 0, 0x10000));
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  memset(cov, 0x5A, sizeof(cov));  // sentinel
+  aa_set_enabled(0);
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), cov);
+  for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
+    ASSERT_EQ(cov[i], 0x5A) << "AA-off must not touch cov (i=" << i << ")";
+  }
+}
+
+// AA ON: a deep interior pixel saturates to AA_COV_FULL; a pixel no fragment
+// covers stays at the FULL clear value (so the resolve treats it as interior).
+TEST(RasterCoverage, InteriorFullAndUntouchedFull) {
+  // Large triangle so its centre region is many px from every edge -> 255.
+  OneTri o;
+  one_tri(&o, mk_vtx(4, 4, 0, 0, 0x10000), mk_vtx(56, 8, 0, 0, 0x10000),
+          mk_vtx(10, 56, 0, 0, 0x10000));
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+  // A clearly-interior pixel (centroid-ish).
+  int const cx = (4 + 56 + 10) / 3;
+  int const cy = (4 + 8 + 56) / 3;
+  EXPECT_EQ(cov[(cy * RDR_TILE_W) + cx], AA_COV_FULL)
+      << "deep interior must saturate to full coverage";
+  // A pixel far outside the triangle (top-right corner of the tile) was never
+  // written -> stays at the FULL clear value.
+  EXPECT_EQ(cov[(2 * RDR_TILE_W) + (RDR_TILE_W - 2)], AA_COV_FULL);
+}
+
+// AA ON: a pixel whose centre lies EXACTLY on an edge gets ~half coverage
+// (d=0 -> cov = 0.5 -> byte 128). We place a vertical LEFT edge through the
+// column-6 pixel CENTRES: a centre is at x*16+8 in Q12.4, so an edge x-coord of
+// 6*16+8 (px 6 + 0.5) makes the column-6 centres sit exactly on the edge ->
+// perpendicular distance 0 -> coverage 0.5. The other two edges are far at
+// mid-height, so this edge is the min.
+TEST(RasterCoverage, EdgePixelHalfCoverage) {
+  OneTri o;
+  // v0=(6,6)+0.5px, v1=(6,54)+0.5px: a vertical left edge at x = 6.5 px running
+  // down; v2=(34,30) puts the interior to the right. sub_x=8 = +0.5 px (Q12.4).
+  one_tri(&o, mk_vtx(6, 6, 8, 0, 0x10000), mk_vtx(6, 54, 8, 0, 0x10000),
+          mk_vtx(34, 30, 0, 0, 0x10000));
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+  // Row y=30 (mid-height, top/bottom verts far). The column-6 pixel centre is
+  // ON the edge -> coverage byte ~128 (the +0.5 bias maps d=0 to 0.5).
+  int const y = 30;
+  uint8_t const cv = cov[(y * RDR_TILE_W) + 6];
+  EXPECT_NEAR((int)cv, 128, 4) << "centre-on-edge pixel must read ~half cover";
+  // Deeper in (x=10) the same row is interior -> full coverage.
+  EXPECT_EQ(cov[(y * RDR_TILE_W) + 10], AA_COV_FULL);
+}
+
+// AA ON: per-pixel parity vs the float oracle_coverage on a clean triangle.
+// For every covered pixel we recompute the float edge distances (same edge_eval
+// + gradient normalisation as raster.cc) and assert the integer coverage byte
+// equals round(255*oracle) within a small tolerance (fixed-point rounding).
+TEST(RasterCoverage, ParityWithFloatOracle) {
+  OneTri o;
+  // Clean, low-frequency geometry, positive area in y-down (no winding swap).
+  one_tri(&o, mk_vtx(8, 6, 0, 0, 0x10000), mk_vtx(52, 14, 0, 0, 0x10000),
+          mk_vtx(16, 50, 0, 0, 0x10000));
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+
+  // Vertex Q12.4 coords (tile 0 -> tile-local == screen for tile 0).
+  double const x0 = (double)o.pool[0].x;
+  double const y0 = (double)o.pool[0].y;
+  double const x1 = (double)o.pool[1].x;
+  double const y1 = (double)o.pool[1].y;
+  double const x2 = (double)o.pool[2].x;
+  double const y2 = (double)o.pool[2].y;
+  // Per-edge length (Q12.4 units), matched to w0/w1/w2.
+  double const len0 = edge_len_q124(x1, y1, x2, y2);  // w0 = edge(v1,v2)
+  double const len1 = edge_len_q124(x2, y2, x0, y0);  // w1 = edge(v2,v0)
+  double const len2 = edge_len_q124(x0, y0, x1, y1);  // w2 = edge(v0,v1)
+
+  int checked = 0;
+  int max_abs = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint8_t const cv = cov[(sy * RDR_TILE_W) + sx];
+      if (cv == AA_COV_FULL) {
+        continue;  // interior / untouched — parity is on partial edge pixels.
+      }
+      // Pixel-centre in Q12.4 (matches raster: (sx<<4)+8).
+      double const px = (double)((sx << 4) + 8);
+      double const py = (double)((sy << 4) + 8);
+      double const w0 = edge_f(x1, y1, x2, y2, px, py);
+      double const w1 = edge_f(x2, y2, x0, y0, px, py);
+      double const w2 = edge_f(x0, y0, x1, y1, px, py);
+      // d_i (pixels) = w_i / (16 * len_i).
+      double const d0 = w0 / (16.0 * len0);
+      double const d1 = w1 / (16.0 * len1);
+      double const d2 = w2 / (16.0 * len2);
+      float ocov = 0.0F;
+      ASSERT_EQ(oracle_coverage((float)d0, (float)d1, (float)d2, &ocov), 0);
+      int const expect = (int)lround((double)ocov * 255.0);
+      int const diff = (int)cv - expect;
+      int const adiff = diff < 0 ? -diff : diff;
+      if (adiff > max_abs) {
+        max_abs = adiff;
+      }
+      // Tolerance: byte rounding + the +128 fixed-point bias vs the 0.5*255
+      // float scaling differ by at most a couple LSBs.
+      ASSERT_LE(adiff, 3) << "coverage parity at (" << sx << "," << sy
+                          << ") cv=" << (int)cv << " oracle=" << expect;
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 10) << "too few partial edge pixels — test is weak";
+}
+
+// AA ON, NEGATIVE-initial-area tri (triggers tri_setup's v1<->v2 winding swap).
+// This is the ONLY check that distinguishes a post-swap recip (correct: the
+// per-edge gradient reciprocals must be computed from the FINAL, swapped verts)
+// from a pre-swap recip (the classic skew bug — would still pass every
+// positive-area parity test). We feed reversed winding, reconstruct the SAME
+// post-swap ordering raster.cc produces (swap v1<->v2 to positive area), and
+// assert cov-byte parity vs oracle_coverage computed on those FINAL edges.
+TEST(RasterCoverage, ParityWithFloatOracleReversedWinding) {
+  OneTri o;
+  // A NEGATIVE-initial-area tri with DELIBERATELY ASYMMETRIC edge lengths so a
+  // pre-swap recip would mis-pair the per-edge gradient: under the v1<->v2
+  // swap, slot r1 (edge v2->v0) and slot r2 (edge v0->v1) exchange lengths (~52
+  // px vs ~17 px here), so a pre-swap recip pairs the 17 px reciprocal with the
+  // 52 px edge (~3x skew) -> cov parity blows past the +/-3 tolerance. (A
+  // symmetric tri would hide it: r0's edge length is swap-invariant and a
+  // near-isoceles r1/r2 makes the mis-pairing invisible.)
+  one_tri(&o, mk_vtx(8, 28, 0, 0, 0x10000), mk_vtx(20, 40, 0, 0, 0x10000),
+          mk_vtx(56, 8, 0, 0, 0x10000));
+  // Sanity: the INPUT really is negative initial area (so the swap path runs).
+  double const ix0 = (double)o.pool[0].x;
+  double const iy0 = (double)o.pool[0].y;
+  double const ix1 = (double)o.pool[1].x;
+  double const iy1 = (double)o.pool[1].y;
+  double const ix2 = (double)o.pool[2].x;
+  double const iy2 = (double)o.pool[2].y;
+  double const init_area2 = edge_f(ix0, iy0, ix1, iy1, ix2, iy2);
+  ASSERT_LT(init_area2, 0.0)
+      << "test setup wrong — input must be negative-area to exercise the swap";
+
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+
+  // Reconstruct the FINAL (post-swap) vertex order: tri_setup swaps v1<->v2 on
+  // negative area, leaving v0 fixed. cov_byte uses these final edges.
+  double const x0 = ix0;
+  double const y0 = iy0;
+  double const x1 = ix2;  // swapped
+  double const y1 = iy2;
+  double const x2 = ix1;
+  double const y2 = iy1;
+  double const len0 = edge_len_q124(x1, y1, x2, y2);  // w0 = edge(v1,v2)
+  double const len1 = edge_len_q124(x2, y2, x0, y0);  // w1 = edge(v2,v0)
+  double const len2 = edge_len_q124(x0, y0, x1, y1);  // w2 = edge(v0,v1)
+
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint8_t const cv = cov[(sy * RDR_TILE_W) + sx];
+      if (cv == AA_COV_FULL) {
+        continue;
+      }
+      double const px = (double)((sx << 4) + 8);
+      double const py = (double)((sy << 4) + 8);
+      double const w0 = edge_f(x1, y1, x2, y2, px, py);
+      double const w1 = edge_f(x2, y2, x0, y0, px, py);
+      double const w2 = edge_f(x0, y0, x1, y1, px, py);
+      double const d0 = w0 / (16.0 * len0);
+      double const d1 = w1 / (16.0 * len1);
+      double const d2 = w2 / (16.0 * len2);
+      float ocov = 0.0F;
+      ASSERT_EQ(oracle_coverage((float)d0, (float)d1, (float)d2, &ocov), 0);
+      int const expect = (int)lround((double)ocov * 255.0);
+      int const diff = (int)cv - expect;
+      int const adiff = diff < 0 ? -diff : diff;
+      ASSERT_LE(adiff, 3) << "reversed-winding coverage parity at (" << sx
+                          << "," << sy << ") cv=" << (int)cv
+                          << " oracle=" << expect
+                          << " — recip likely computed PRE-swap (skew bug)";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 10) << "too few partial edge pixels — test is weak";
+}
+
+// AA ON, TEXTURED-opaque path: the winning textured fragment writes coverage
+// (raster.cc:587) the SAME way the flat path does (cov_byte over the final
+// edges). nit #2: value-check it (the determinism CRC alone never pinned the
+// value). Parity vs oracle_coverage on the partial edge pixels.
+TEST(RasterCoverage, TexturedOpaqueParityWithOracle) {
+  struct Tex565 tex;
+  make_tex565(&tex);
+  struct RenderState rs;
+  memset(&rs, 0, sizeof(rs));
+  tex_desc_565(&rs.tex, &tex);
+  rs.combiner.mode = COMBINE_MODULATE;
+  rs.alpha_cmp = 0;
+  const struct RenderState* table = &rs;
+
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  // Positive-area, low-frequency; distinct inv_w (perspective) — coverage is
+  // path-independent so the textured write must match the same oracle.
+  pool[0] = mk_tvtx_uv(8, 6, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 14, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(16, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  aa_set_enabled(1);
+  raster_tile(0, &bin, pool, fb, zbuf, table, cov);
+  aa_set_enabled(0);
+
+  double const x0 = (double)pool[0].x;
+  double const y0 = (double)pool[0].y;
+  double const x1 = (double)pool[1].x;
+  double const y1 = (double)pool[1].y;
+  double const x2 = (double)pool[2].x;
+  double const y2 = (double)pool[2].y;
+  double const len0 = edge_len_q124(x1, y1, x2, y2);
+  double const len1 = edge_len_q124(x2, y2, x0, y0);
+  double const len2 = edge_len_q124(x0, y0, x1, y1);
+
+  int checked = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint8_t const cv = cov[(sy * RDR_TILE_W) + sx];
+      if (cv == AA_COV_FULL) {
+        continue;
+      }
+      double const px = (double)((sx << 4) + 8);
+      double const py = (double)((sy << 4) + 8);
+      double const w0 = edge_f(x1, y1, x2, y2, px, py);
+      double const w1 = edge_f(x2, y2, x0, y0, px, py);
+      double const w2 = edge_f(x0, y0, x1, y1, px, py);
+      double const d0 = w0 / (16.0 * len0);
+      double const d1 = w1 / (16.0 * len1);
+      double const d2 = w2 / (16.0 * len2);
+      float ocov = 0.0F;
+      ASSERT_EQ(oracle_coverage((float)d0, (float)d1, (float)d2, &ocov), 0);
+      int const expect = (int)lround((double)ocov * 255.0);
+      int const diff = (int)cv - expect;
+      int const adiff = diff < 0 ? -diff : diff;
+      ASSERT_LE(adiff, 3) << "textured coverage parity at (" << sx << "," << sy
+                          << ") cv=" << (int)cv << " oracle=" << expect;
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 10) << "too few partial edge pixels — test is weak";
+}
+
+// AA ON, XLU path: a covered translucent fragment STAMPS cov==AA_COV_FULL
+// (raster.cc:747 — AA ignores translucent geometry, plan v1). nit #2:
+// value-check an XLU-covered pixel reads full coverage (so the resolve treats
+// it as interior, never edge-blending over the alpha-over result).
+TEST(RasterCoverage, XluFragmentStampsFullCoverage) {
+  struct Tex4444 tex;
+  make_tex4444_alpha(&tex, 0x8);  // fractional alpha so the XLU fragment writes
+  struct RenderState rs;
+  mk_xlu_state(&rs, &tex);
+  const struct RenderState* table = &rs;
+
+  uint16_t const white = rgb565_pack(255, 255, 255);
+  TVtx pool[3];
+  pool[0] = mk_tvtx_uv(8, 8, 0x10000, 0, 0, white);
+  pool[1] = mk_tvtx_uv(52, 12, 0x10000, 7 * 32, 0, white);
+  pool[2] = mk_tvtx_uv(14, 50, 0x10000, 0, 7 * 32, white);
+  TriRef ref;
+  ref.v0 = 0;
+  ref.v1 = 1;
+  ref.v2 = 2;
+  ref.material = 0;
+  TileBin bin;
+  bin.refs = &ref;
+  bin.count = 1;
+  bin.cap = 1;
+  bin.dropped = 0;
+
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  uint16_t const bg = rgb565_pack(30, 70, 110);
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = bg;
+  }
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  aa_set_enabled(1);
+  raster_tile(0, &bin, pool, fb, zbuf, table, cov);
+  aa_set_enabled(0);
+
+  // Find a pixel the XLU fragment actually touched (fb changed from bg), assert
+  // its coverage is FULL (255). Anti-vacuity: require we found one.
+  int found = 0;
+  for (int sy = 0; sy < RDR_TILE_H && !found; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W && !found; ++sx) {
+      if (fb[(sy * RDR_SCREEN_W) + sx] != bg) {
+        EXPECT_EQ(cov[(sy * RDR_TILE_W) + sx], AA_COV_FULL)
+            << "XLU-covered pixel (" << sx << "," << sy
+            << ") must stamp full coverage (AA ignores XLU)";
+        found = 1;
+      }
+    }
+  }
+  EXPECT_EQ(found, 1) << "no XLU fragment blended — test is vacuous";
 }

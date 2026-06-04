@@ -77,8 +77,21 @@ uint16_t geom_shade_vertex(const struct Vtx* v, const struct LightState* ls,
 
 // ---- fog -------------------------------------------------------------------
 // Fog factor in Q16.16 [0..1]: 0 at/<=near_z, 1 at/>=far_z, linear between.
-// `z` is view-space-ish depth proxy (here: clip-space w, monotone in depth).
+// `z` is the camera-space view-z depth proxy (Q9, R.3-fog): clip.w. Under the
+// renderer's +z-forward perspective convention (projection w-row m[11]=1 =>
+// clip.w = +view_z; see src/demo/demo_scene.cc), clip.w IS the eye-space depth,
+// positive and monotonically increasing with distance — the N64 G_FOG depth and
+// the units FogState.near_z/far_z are expressed in. The Lead bakes the demo's
+// near/far in this same (clip.w / view-z) space at T4 integration.
 fx16_16 geom_fog_factor(const struct FogState* fog, fx16_16 z);
+
+// Per-vertex fog factor as the TVtx.fog uint8 [0,255] the raster back end
+// interpolates + applies (0 = no fog, 255 = full fog_color). Returns 0 when fog
+// is disabled (fog->enabled == 0) so a disabled material births fog == 0 and
+// the raster fog step no-ops (bit-identical to no-fog). `z` is the camera-space
+// view-z depth proxy (clip.w; see geom_fog_factor). Integer-only + truncating
+// (P3-5: bit-identical host<->device).
+uint8_t geom_fog_u8(const struct FogState* fog, fx16_16 z);
 
 // ---- backface cull ---------------------------------------------------------
 // Signed screen-space area*2 of the triangle (edge function of the three

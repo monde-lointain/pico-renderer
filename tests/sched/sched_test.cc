@@ -82,7 +82,7 @@ void raster_serial(uint16_t* fb) {
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, g_z0,
-                &g_frame.rstate_table[0]);
+                &g_frame.rstate_table[0], 0);
   }
 }
 
@@ -98,7 +98,7 @@ void raster_two_workers_interleaved(uint16_t* fb, uint16_t* z0, uint16_t* z1) {
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     uint16_t* const z = (tile & 1) ? z1 : z0;
     raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, z,
-                &g_frame.rstate_table[0]);
+                &g_frame.rstate_table[0], 0);
   }
 }
 
@@ -123,7 +123,7 @@ void raster_shared_zbuf_race(uint16_t* fb, uint16_t* zshared) {
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     raster_tile_noclear(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts,
-                        fb, zshared, &g_frame.rstate_table[0]);
+                        fb, zshared, &g_frame.rstate_table[0], 0);
   }
 }
 
@@ -346,11 +346,11 @@ TEST(SchedXluDeterminism, MixedSceneSerialEqualsTwoWorker) {
     g_fb_par[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table, 0);
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     uint16_t* const z = (tile & 1) ? g_z1 : g_z0;
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_xlu_table);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_xlu_table, 0);
   }
 
   uint32_t const crc_serial =
@@ -377,18 +377,223 @@ TEST(SchedXluDeterminism, XluActuallyBlends) {
     g_fb_par[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table, 0);
   }
   // Force the XLU material opaque and re-render into g_fb_par.
   struct RenderState all_opaque[3];
   memcpy(all_opaque, g_xlu_table, sizeof(all_opaque));
   all_opaque[2].zmode = ZMODE_OPAQUE;
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, all_opaque);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, all_opaque, 0);
   }
   EXPECT_NE(memcmp(g_fb_serial, g_fb_par,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
             0)
       << "XLU-as-XLU matched XLU-as-opaque — the translucent sweep did not "
          "blend, the determinism test would be vacuous";
+}
+
+// ===========================================================================
+// R.3 FOG determinism gate: fog is per-pixel, derived ONLY from per-vertex
+// TVtx.fog (immutable in the pool) + the read-only rstate_table fog state, so a
+// fog-enabled scene MUST stay bit-identical between the serial and 2-worker
+// sweeps (each tile drawn by exactly one worker; no shared mutable state). The
+// demo runs fog OFF, so this builds a fog-enabled scene by hand: the SAME mixed
+// opaque+XLU geometry as the XLU gate, now with fog enabled on every material
+// and a per-vertex fog gradient set on the pool.
+// ===========================================================================
+namespace {
+
+// Constant-expression 565 pack of (248,200,40) (avoid a non-constexpr call in a
+// file-scope initializer): (248&0xF8)<<8 | (200&0xFC)<<3 | (40>>3).
+const uint16_t K_FOGCOL565 = (uint16_t)((248U << 8) | (200U << 3) | (40U >> 3));
+
+// Fog-enabled copy of the mixed material table (opaque flat, opaque flat, XLU
+// textured), each with fog enabled toward K_FOGCOL565.
+struct RenderState g_fog_table[3];
+void make_fog_table(void) {
+  make_xlu_table();  // fills g_xlu_table
+  memcpy(g_fog_table, g_xlu_table, sizeof(g_fog_table));
+  for (int i = 0; i < 3; ++i) {
+    g_fog_table[i].fog.enabled = 1;
+    g_fog_table[i].fog.color = K_FOGCOL565;
+    g_fog_table[i].fog.near_z = 0;
+    g_fog_table[i].fog.far_z = (fx16_16)(4 << 16);
+  }
+}
+
+// Build the mixed scene then stamp a per-vertex fog GRADIENT onto every pooled
+// vertex (a function of its screen x so neighbouring tiles see distinct factors
+// -> the interp is exercised across tile seams). build_xlu_scene must run
+// first.
+void set_scene_fog_gradient(void) {
+  for (int i = 0; i < K_XNTRI * 3; ++i) {
+    int const px = (int)(g_xlu_pool[i].x >> 4);
+    int f = (px * 255) / RDR_SCREEN_W;
+    if (f < 0) {
+      f = 0;
+    }
+    if (f > 255) {
+      f = 255;
+    }
+    g_xlu_pool[i].fog = (uint8_t)f;
+  }
+}
+
+}  // namespace
+
+// serial == 2-worker, for a FOG-ENABLED mixed scene. Fog reads only immutable
+// per-vertex TVtx.fog + read-only rstate, so the per-tile-independent invariant
+// holds with fog exactly as without it.
+TEST(SchedFogDeterminism, FogSceneSerialEqualsTwoWorker) {
+  struct TileBin bin;
+  build_xlu_scene(&bin);
+  make_fog_table();
+  set_scene_fog_gradient();
+
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    g_fb_serial[i] = 0;
+    g_fb_par[i] = 0;
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table, 0);
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    uint16_t* const z = (tile & 1) ? g_z1 : g_z0;
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_fog_table, 0);
+  }
+
+  uint32_t const crc_serial =
+      crc32_fb(g_fb_serial, RDR_SCREEN_W * RDR_SCREEN_H);
+  uint32_t const crc_par = crc32_fb(g_fb_par, RDR_SCREEN_W * RDR_SCREEN_H);
+  EXPECT_EQ(crc_serial, crc_par)
+      << "fog mixed-scene dual-core invariant VIOLATED: serial crc=0x"
+      << std::hex << crc_serial << " 2-worker crc=0x" << crc_par;
+  EXPECT_EQ(memcmp(g_fb_serial, g_fb_par,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0);
+}
+
+// TEETH: fog must actually have CHANGED pixels (otherwise the determinism test
+// is vacuous). Re-render the SAME scene with fog DISABLED; the fog scene MUST
+// differ (fog-on != fog-off). (This proves only that the fog step is live; the
+// bit-identical-no-fog claim for the DISABLED path rests on the unchanged host
+// goldens + gate, not on this inequality.)
+TEST(SchedFogDeterminism, FogActuallyChangesPixels) {
+  struct TileBin bin;
+  build_xlu_scene(&bin);
+  make_fog_table();
+  set_scene_fog_gradient();
+
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    g_fb_serial[i] = 0;
+    g_fb_par[i] = 0;
+  }
+  // Fog ON.
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table, 0);
+  }
+  // Fog OFF (same table, fog disabled) into g_fb_par.
+  struct RenderState fog_off[3];
+  memcpy(fog_off, g_fog_table, sizeof(fog_off));
+  for (int i = 0; i < 3; ++i) {
+    fog_off[i].fog.enabled = 0;
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, fog_off, 0);
+  }
+  EXPECT_NE(memcmp(g_fb_serial, g_fb_par,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0)
+      << "fog-on matched fog-off — the fog step did not change any pixel, the "
+         "determinism test would be vacuous";
+}
+
+// ===========================================================================
+// R.3-AA determinism gate. The coverage WRITE is per-worker (cov is per-worker
+// scratch, like zbuf) and the resolve is WITHIN-TILE + border-clamped (reads
+// only this tile's FB), so the dual-core sweep with AA ON MUST stay bit-
+// identical to the serial sweep — the same invariant zbuf has. We render the
+// real demo scene two ways with AA enabled and compare CRC32 / raw bytes. We
+// also prove AA actually altered the output (vs AA off) so the test has teeth.
+// ===========================================================================
+#include "aa/aa.h"  // aa_set_enabled, aa_enabled
+
+namespace {
+
+// Per-worker coverage scratch for the AA-on dual==serial proof (mirrors g_z0/
+// g_z1). BSS, not stack (RP2040 stack discipline; also keeps this file's stack
+// frame small).
+uint8_t g_cov0[RDR_TILE_W * RDR_TILE_H];
+uint8_t g_cov1[RDR_TILE_W * RDR_TILE_H];
+uint16_t g_fb_aa_serial[RDR_SCREEN_W * RDR_SCREEN_H];
+uint16_t g_fb_aa_par[RDR_SCREEN_W * RDR_SCREEN_H];
+
+// Serial sweep with AA coverage written to one worker's scratch + resolved.
+void raster_serial_aa(uint16_t* fb) {
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, g_z0,
+                &g_frame.rstate_table[0], g_cov0);
+  }
+}
+
+// 2-worker interleaved with AA: each worker has its OWN cov + zbuf scratch.
+void raster_two_workers_aa(uint16_t* fb) {
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
+    uint16_t* const z = (tile & 1) ? g_z1 : g_z0;
+    uint8_t* const cv = (tile & 1) ? g_cov1 : g_cov0;
+    raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, z,
+                &g_frame.rstate_table[0], cv);
+  }
+}
+
+}  // namespace
+
+// AA ON: serial == 2-worker, bit-for-bit (the hard determinism invariant).
+TEST(SchedDeterminismAa, SerialEqualsTwoWorkerWithAaEnabled) {
+  build_scene_geom();
+  aa_set_enabled(1);
+  ASSERT_EQ(aa_enabled(), 1);
+
+  raster_serial_aa(g_fb_aa_serial);
+  raster_two_workers_aa(g_fb_aa_par);
+  aa_set_enabled(0);
+
+  uint32_t const crc_serial =
+      crc32_fb(g_fb_aa_serial, RDR_SCREEN_W * RDR_SCREEN_H);
+  uint32_t const crc_par = crc32_fb(g_fb_aa_par, RDR_SCREEN_W * RDR_SCREEN_H);
+  EXPECT_EQ(crc_serial, crc_par)
+      << "AA-on dual-core invariant VIOLATED: serial crc=0x" << std::hex
+      << crc_serial << " 2-worker crc=0x" << crc_par
+      << " — per-worker coverage + within-tile resolve is not "
+         "order-independent";
+  EXPECT_EQ(memcmp(g_fb_aa_serial, g_fb_aa_par,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0);
+}
+
+// TEETH: AA-on output must DIFFER from AA-off (otherwise the resolve is a no-op
+// and the determinism test above proves nothing about the AA path). The real
+// scene has plenty of silhouette edges -> the resolve changes pixels.
+TEST(SchedDeterminismAa, AaChangesOutputVsDisabled) {
+  build_scene_geom();
+
+  aa_set_enabled(0);
+  raster_serial(g_fb_serial);  // AA off (cov path skipped entirely)
+
+  aa_set_enabled(1);
+  raster_serial_aa(g_fb_aa_serial);
+  aa_set_enabled(0);
+
+  EXPECT_NE(memcmp(g_fb_serial, g_fb_aa_serial,
+                   (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
+            0)
+      << "AA-on matched AA-off — the resolve changed no pixel; the AA "
+         "determinism proof would be vacuous";
 }
