@@ -122,7 +122,17 @@ struct LightState {
 
 struct RenderState {
   struct TexDesc tex;
+  // Δ2 (R.4 2-cycle detail multitexture): the 2nd/detail texture, sampled as
+  // TEXEL1. data==null => single-texture (cycle stays ONE) -> bit-identical to
+  // pre-Δ2. Additive: no positional RenderState initializers exist (all
+  // memset+assign), and material interning is a value-compare, so this layout
+  // grow is churn-free. The N64 terrain detail is a 32x32 I8 tiled into TEXEL1.
+  struct TexDesc tex1;
   struct CombinerState combiner;
+  // Δ2: cycle-2 combiner, applied iff cycle==COMBINE_TWO_CYCLE. Cycle 1 runs
+  // `combiner`, cycle 2 runs `combiner2` with CC_COMBINED feed-forward (shade.h
+  // shade_pixel2).
+  struct CombinerState combiner2;
   struct FogState fog;
   struct LightState lights;
   uint16_t prim_color, env_color;
@@ -131,6 +141,12 @@ struct RenderState {
   uint8_t alpha_cmp;  // 0 = off, else threshold
   uint8_t texgen;     // 0=off, 1=hilite, 2=env
   uint8_t lit;        // 0 = pre-lit RGBA, 1 = normal+lighting
+  // Δ2: enum CombineCycle (defined in shade.h beside CombineMode); 0 ==
+  // COMBINE_ONE_CYCLE (default -> single combiner, the pre-Δ2 path).
+  uint8_t cycle;
+  // Δ2: TEXEL1/detail UV = base UV << detail_shift (tiles the small detail
+  // texture at a higher frequency than the base). 0 = same UV as the base.
+  uint8_t detail_shift;
 };
 
 // ---- command stream (tagged union) -----------------------------------------
