@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "aa/aa.h"            // AA_COV_FULL, aa_enabled, aa_resolve_tile
 #include "blend/blend.h"      // blend_pixel_alpha (XLU texel-alpha alpha-over)
 #include "gfx/framebuffer.h"  // rgb565()
 #include "rdr/config.h"
@@ -26,6 +27,103 @@ enum { RASTER_SUBPX = 4, RASTER_HALF = 8 };
 // 256. Reject anything not strictly larger than that (a sliver < 1 px area
 // carries no reliable winding / would blow up the 1/area reciprocal).
 enum { RASTER_AREA_EPS = 256 };
+
+// ---- R.3-AA analytic coverage (the WRITE) ---------------------------------
+// DERIVATION (mirror of the R.1 UV-derivation comment style; integer-only ->
+// host<->device bit-identical, P3-5):
+//   The edge function w_i = edge_eval(a,b,p) is the signed cross product of two
+//   Q12.4 vectors -> Q24.8. It equals 2*area of the (a,b,p) sub-triangle, so
+//   the SIGNED perpendicular distance (in PIXELS) of p to edge a->b is
+//     d_i = w_i / (2 * area_unit / len_px)  =  w_i / (256 * len_px),
+//   because |grad w| w.r.t. a Q12.4 position step is the edge length and the
+//   Q24.8 scale is 256. With len_px = len_q124 / 16 (the edge length measured
+//   in Q12.4 units divided back to pixels):
+//     d_i (pixels) = w_i / (256 * len_q124 / 16) = w_i / (16 * len_q124).
+//   Coverage = clamp(0.5 + min(d0,d1,d2), 0, 1) (oracle_coverage). As a byte,
+//   FULL(255) = covered, 128 ~ a centre exactly on an edge (0.5):
+//     cov255 = clamp(128 + round(256 * d_min), 0, 255),
+//   and  256 * d_i = 256 * w_i / (16 * len_q124) = 16 * w_i / len_q124.
+//   To avoid a per-pixel divide we PRECOMPUTE per edge (constant over the tri)
+//   a reciprocal  recip_i = round(2^AA_RECIP_SHIFT / len_q124)  in tri_setup,
+//   then per pixel:
+//     d256_i = (16 * (int64)w_i * recip_i + ROUND) >> AA_RECIP_SHIFT  (=
+//     256*d_i) cov255 = clamp(128 + d256_min, 0, 255).
+//   len_q124 = isqrt(dx*dx + dy*dy), dx/dy the edge's Q12.4 deltas (<= ~3840 ->
+//   product <= ~3e7 -> int32 isqrt is exact). 16*w*recip fits int64
+//   comfortably. AA_RECIP_SHIFT=22: 2^22/len has ~22 bits of headroom even for
+//   a 1px edge (len_q124~16 -> recip ~262144); precision near the edge (small
+//   w) is the only regime that matters since interiors saturate to 255.
+enum { AA_RECIP_SHIFT = 22 };
+
+// Integer sqrt (floor) of a non-negative int32 via Newton-free bit search. Used
+// once per edge in tri_setup (not per pixel) so cost is irrelevant; exact for
+// the bounded edge-length-squared input.
+static int32_t isqrt_i32(int32_t v) {
+  if (v <= 0) {
+    return 0;
+  }
+  int32_t bit = 1 << 30;
+  while (bit > v) {
+    bit >>= 2;
+  }
+  int32_t res = 0;
+  while (bit != 0) {
+    if (v >= res + bit) {
+      v -= res + bit;
+      res = (res >> 1) + bit;
+    } else {
+      res >>= 1;
+    }
+    bit >>= 2;
+  }
+  return res;
+}
+
+// Per-edge gradient-magnitude reciprocal recip = round(2^AA_RECIP_SHIFT /
+// len_q124), len_q124 = |edge| in Q12.4 units. Degenerate (len 0) edges already
+// imply a degenerate tri (rejected at setup); guard returns 0 -> that edge
+// contributes d=0 conservatively (cannot happen for an accepted tri).
+static int32_t edge_recip(fx12_4 ax, fx12_4 ay, fx12_4 bx, fx12_4 by) {
+  int32_t const dx = (int32_t)bx - (int32_t)ax;
+  int32_t const dy = (int32_t)by - (int32_t)ay;
+  int32_t const len = isqrt_i32((dx * dx) + (dy * dy));
+  if (len <= 0) {
+    return 0;
+  }
+  return (int32_t)(((int64_t)1 << AA_RECIP_SHIFT) / (int64_t)len);
+}
+
+// Analytic coverage byte at a pixel from the 3 edge functions (Q24.8) and the
+// precomputed per-edge reciprocals. cov255 = clamp(128 + 256*min(d_i), 0, 255).
+// Integer-only (P3-5 parity). ROUND = half an AA_RECIP_SHIFT step.
+static uint8_t cov_byte(int32_t w0, int32_t w1, int32_t w2, int32_t r0,
+                        int32_t r1, int32_t r2) {
+  int64_t const round = (int64_t)1 << (AA_RECIP_SHIFT - 1);
+  int32_t const d0 =
+      (int32_t)((((int64_t)16 * (int64_t)w0 * (int64_t)r0) + round) >>
+                AA_RECIP_SHIFT);
+  int32_t const d1 =
+      (int32_t)((((int64_t)16 * (int64_t)w1 * (int64_t)r1) + round) >>
+                AA_RECIP_SHIFT);
+  int32_t const d2 =
+      (int32_t)((((int64_t)16 * (int64_t)w2 * (int64_t)r2) + round) >>
+                AA_RECIP_SHIFT);
+  int32_t dmin = d0;
+  if (d1 < dmin) {
+    dmin = d1;
+  }
+  if (d2 < dmin) {
+    dmin = d2;
+  }
+  int32_t cov = 128 + dmin;
+  if (cov < 0) {
+    cov = 0;
+  }
+  if (cov > 255) {
+    cov = 255;
+  }
+  return (uint8_t)cov;
+}
 
 // R.2 XLU per-tile sort scratch cap (the SIZING decision, re-surface trigger).
 // Sweep 2 gathers this tile's XLU TriRef BIN INDICES into a FIXED local
@@ -117,7 +215,12 @@ struct TriSetup {
   uint8_t fog0, fog1, fog2;
   int32_t area2;      // 2*signed area (Q24.8), > 0 after normalize
   int tl0, tl1, tl2;  // top-left flags for edges v0->v1, v1->v2, v2->v0
-  uint16_t color;     // flat fill (provoking vertex v0)
+  // R.3-AA: per-edge gradient-magnitude reciprocal (round(2^AA_RECIP_SHIFT /
+  // edge_len_q124)), matched to w0/w1/w2: r0 <-> edge v1->v2 (w0), r1 <-> edge
+  // v2->v0 (w1), r2 <-> edge v0->v1 (w2). Computed once here (constant per
+  // tri); only read in the coverage WRITE path (AA on).
+  int32_t r0, r1, r2;
+  uint16_t color;  // flat fill (provoking vertex v0)
 };
 
 // Unpack an RGB565 color to 8-bit RGB (matches gfx/framebuffer.h rgb565 layout:
@@ -228,6 +331,11 @@ static int tri_setup(struct TriSetup* t, const struct TVtx* a,
   t->tl0 = edge_is_top_left(x0, y0, x1, y1);
   t->tl1 = edge_is_top_left(x1, y1, x2, y2);
   t->tl2 = edge_is_top_left(x2, y2, x0, y0);
+  // R.3-AA per-edge gradient reciprocals (constant per tri), matched to the
+  // edge each w_i evaluates: w0=edge(v1,v2), w1=edge(v2,v0), w2=edge(v0,v1).
+  t->r0 = edge_recip(x1, y1, x2, y2);
+  t->r1 = edge_recip(x2, y2, x0, y0);
+  t->r2 = edge_recip(x0, y0, x1, y1);
   t->color = a->rgba;  // flat fast path: provoking vertex (v0), pre-swap
   return RDR_OK;
 }
@@ -296,7 +404,7 @@ static uint8_t gouraud_chan(int32_t w0, int32_t w1, int32_t w2, int c0, int c1,
 // pre-R.1 rasterizer) or textured + Gouraud + combiner (valid texture).
 static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
                        int tile_px_x0, int tile_px_y0, uint16_t* fb,
-                       uint16_t* zbuf) {
+                       uint16_t* zbuf, uint8_t* cov) {
   int const textured = rs_has_texture(rs);
   // Pre-unpack the three shade colors once (textured path only; the fast path
   // never touches them so it stays bit-identical).
@@ -403,6 +511,12 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
           out = fog_lerp(out, rs->fog.color, fogf);
         }
         fb[(sy * RDR_SCREEN_W) + sx] = out;
+        // R.3-AA: analytic coverage of the WINNING fragment (same point as the
+        // fb store). `cov` is null / left untouched when AA is off -> the flat
+        // fast path stays BYTE-IDENTICAL to the pre-AA renderer.
+        if (cov != 0) {
+          cov[zi] = cov_byte(w0, w1, w2, t->r0, t->r1, t->r2);
+        }
         continue;
       }
 
@@ -467,6 +581,11 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       }
       zbuf[zi] = znew;
       fb[(sy * RDR_SCREEN_W) + sx] = out;
+      // R.3-AA coverage of the winning textured fragment (after z-pass + keep,
+      // same point as the fb store). Skipped when AA is off (null `cov`).
+      if (cov != 0) {
+        cov[zi] = cov_byte(w0, w1, w2, t->r0, t->r1, t->r2);
+      }
     }
   }
 }
@@ -489,7 +608,8 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
 // z-write invariant, enforced at the type level — a write would not compile).
 static void raster_one_xlu(const struct TriSetup* t,
                            const struct RenderState* rs, int tile_px_x0,
-                           int tile_px_y0, uint16_t* fb, const uint16_t* zbuf) {
+                           int tile_px_y0, uint16_t* fb, const uint16_t* zbuf,
+                           uint8_t* cov) {
   if (!rs_has_texture(rs)) {
     return;  // XLU without a texture contributes nothing (flat path is opaque).
   }
@@ -620,6 +740,12 @@ static void raster_one_xlu(const struct TriSetup* t,
       // Texel-alpha alpha-over the current framebuffer pixel. NO z-write.
       int const fbi = (sy * RDR_SCREEN_W) + sx;
       fb[fbi] = blend_pixel_alpha(BLEND_ALPHA, combined, rgba[3], fb[fbi]);
+      // R.3-AA: AA ignores translucent geometry (plan v1) -> stamp FULL
+      // coverage so the resolve treats a blended XLU pixel as interior (no
+      // edge re-blend on top of the alpha-over). Skipped when AA is off.
+      if (cov != 0) {
+        cov[(tile_y * RDR_TILE_W) + tile_x] = AA_COV_FULL;
+      }
     }
   }
 }
@@ -661,10 +787,15 @@ static void xlu_sort_stable(uint16_t* idx, uint32_t n, const struct TVtx* pool,
 
 void raster_tile_noclear(int tile, const struct TileBin* bin,
                          const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf,
-                         const struct RenderState* rstate_table) {
+                         const struct RenderState* rstate_table, uint8_t* cov) {
   if (bin == 0 || pool == 0 || fb == 0 || zbuf == 0 || rstate_table == 0) {
     return;
   }
+  // R.3-AA: the coverage WRITE is gated on an active scratch AND the runtime
+  // enable. A null `cov` here means coverage is OFF for this sweep (so the
+  // rasterizer is byte-identical to pre-AA); pass the same `cov_active` down so
+  // raster_one/raster_one_xlu skip the coverage path entirely otherwise.
+  uint8_t* const cov_active = (cov != 0 && aa_enabled() != 0) ? cov : 0;
   // Tile grid is row-major; compute this tile's top-left screen pixel.
   int const tiles_per_row = RDR_SCREEN_W / RDR_TILE_W;
   int const tile_px_x0 = (tile % tiles_per_row) * RDR_TILE_W;
@@ -709,7 +840,7 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
     // TriRef.material indexes the interned render-state table; it selects the
     // per-pixel path (flat fast path vs textured/Gouraud/combiner).
     const struct RenderState* rs = &rstate_table[ref->material];
-    raster_one(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf);
+    raster_one(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
   }
 
   // SWEEP 2 — TRANSLUCENT. STABLE-sort the gathered XLU indices BACK-TO-FRONT
@@ -729,7 +860,7 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
       continue;  // degenerate -> rejected, no fill
     }
     const struct RenderState* rs = &rstate_table[ref->material];
-    raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf);
+    raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
   }
 }
 
@@ -744,10 +875,15 @@ uint32_t raster_xlu_dropped(void) { return s_xlu_dropped; }
 
 void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
                  uint16_t* fb, uint16_t* zbuf,
-                 const struct RenderState* rstate_table) {
+                 const struct RenderState* rstate_table, uint8_t* cov) {
   if (zbuf == 0) {
     return;
   }
+  // R.3-AA: coverage is active only when a scratch is supplied AND the runtime
+  // enable is set. When inactive, every coverage step below is skipped -> the
+  // rasterizer (and the framebuffer) is BYTE-IDENTICAL to the pre-AA renderer
+  // (the golden-neutral gate).
+  uint8_t* const cov_active = (cov != 0 && aa_enabled() != 0) ? cov : 0;
   // Per-tile Z clear (spec: clear Z scratch at the start of each tile), then
   // rasterize. The clear + draw are split so a depth-hazard demonstration
   // (tests/sched: two workers sharing one un-recleared scratch) can drive the
@@ -755,5 +891,22 @@ void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
   for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
     zbuf[i] = RASTER_Z_CLEAR;
   }
-  raster_tile_noclear(tile, bin, pool, fb, zbuf, rstate_table);
+  // R.3-AA: clear the coverage scratch to FULL on entry (like zbuf), so a pixel
+  // no fragment touches reads as interior -> the resolve leaves it untouched.
+  if (cov_active != 0) {
+    for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
+      cov_active[i] = AA_COV_FULL;
+    }
+  }
+  raster_tile_noclear(tile, bin, pool, fb, zbuf, rstate_table, cov_active);
+  // R.3-AA: within-tile, edge-gated, border-clamped resolve. Reads only this
+  // tile's pixels (no cross-tile / cross-core FB access) -> the dual-core sweep
+  // stays bit-identical to serial. aa_resolve_tile no-ops if AA is off, but we
+  // already gate on cov_active so it only runs when coverage was written.
+  if (cov_active != 0) {
+    int const tiles_per_row = RDR_SCREEN_W / RDR_TILE_W;
+    int const tile_px_x0 = (tile % tiles_per_row) * RDR_TILE_W;
+    int const tile_px_y0 = (tile / tiles_per_row) * RDR_TILE_H;
+    aa_resolve_tile(fb, cov_active, tile_px_x0, tile_px_y0);
+  }
 }

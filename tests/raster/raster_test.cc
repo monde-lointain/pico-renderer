@@ -98,7 +98,7 @@ void render_tile0_to_rgb(const TileBin* bin, const TVtx* pool, uint8_t* rgb_out,
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, bin, pool, fb, zbuf, no_texture_table());
+  raster_tile(0, bin, pool, fb, zbuf, no_texture_table(), 0);
   for (int y = 0; y < RDR_TILE_H; ++y) {
     for (int x = 0; x < RDR_TILE_W; ++x) {
       uint16_t const px = fb[(y * RDR_SCREEN_W) + x];
@@ -337,7 +337,7 @@ TEST(Raster, ClipsToTileBounds) {
   OneTri o;
   one_tri(&o, mk_vtx(40, 5, 0, 0, 0x10000), mk_vtx(100, 30, 0, 0, 0x10000),
           mk_vtx(40, 55, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
   // No pixel with screen x >= RDR_TILE_W should be written by tile 0.
   int leaked = 0;
   for (int y = 0; y < RDR_SCREEN_H; ++y) {
@@ -404,7 +404,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   bin.count = 2;
   bin.cap = 2;
   bin.dropped = 0;
-  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0);
 
   // A pixel inside the triangle must be the NEAR color (red), not far (blue).
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
@@ -420,7 +420,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   refs[1].v0 = 0;
   refs[1].v1 = 1;
   refs[1].v2 = 2;  // far second
-  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0);
   uint16_t const px2 = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px2, c_near);
 }
@@ -445,7 +445,7 @@ TEST(Raster, NonZeroTileMapsToScreenRect) {
   one_tri(&o, mk_vtx(x0 + 10, y0 + 8, 0, 0, 0x10000),
           mk_vtx(x0 + 45, y0 + 12, 0, 0, 0x10000),
           mk_vtx(x0 + 20, y0 + 48, 0, 0, 0x10000));
-  raster_tile(tile, &o.bin, o.pool, fb, zbuf, no_texture_table());
+  raster_tile(tile, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
 
   // Oracle reference at the same absolute screen coords (full-screen image).
   uint8_t fr;
@@ -495,7 +495,7 @@ TEST(Raster, ClearsZScratchOnEntry) {
   OneTri o;
   one_tri(&o, mk_vtx(10, 8, 0, 0, 0x10000), mk_vtx(45, 12, 0, 0, 0x10000),
           mk_vtx(20, 48, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table());
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px, K_FLAT565) << "Z scratch not cleared: stale depth blocked fill";
 }
@@ -861,7 +861,7 @@ TEST(RasterTextured, MatchesTexSampleAndShadeExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -938,7 +938,7 @@ TEST(RasterTextured, ReversedWindingTexturedSwapsAllAttrsInLockstep) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // ref_setup mirrors tri_setup's swap; ref_textured_pixel mirrors the inner
   // loop. Bit-exact equality at every covered pixel proves the impl swapped all
@@ -1002,7 +1002,7 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, &rs);
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
 
   // Float reference per covered pixel. Mirror oracle_fill_tri's winding-
   // normalize + top-left rule, then float-interpolate.
@@ -1237,7 +1237,7 @@ TEST(RasterTextured, AlphaCutoutDiscardsAndSkipsZbuf) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // Sample a clearly-left (opaque) interior pixel and a clearly-right
   // (transparent) interior pixel — both well inside the triangle (x+y << 56 so
@@ -1364,11 +1364,11 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
   bin.dropped = 0;
 
   for (int tile = 0; tile < num_tiles; ++tile) {
-    raster_tile(tile, &bin, pool, fb_serial, z0, table);
+    raster_tile(tile, &bin, pool, fb_serial, z0, table, 0);
   }
   for (int tile = 0; tile < num_tiles; ++tile) {
     uint16_t* const z = (tile & 1) ? z1 : z0;
-    raster_tile(tile, &bin, pool, fb_par, z, table);
+    raster_tile(tile, &bin, pool, fb_par, z, table, 0);
   }
   EXPECT_EQ(memcmp(fb_serial, fb_par,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -1520,7 +1520,7 @@ TEST(RasterXlu, AlphaOverMatchesBlendPixelAlphaExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -1613,8 +1613,8 @@ TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
   }
   static uint16_t z_a[RDR_TILE_W * RDR_TILE_H];
   static uint16_t z_b[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin_a, pool, fb_a, z_a, table);
-  raster_tile(0, &bin_b, pool, fb_b, z_b, table);
+  raster_tile(0, &bin_a, pool, fb_a, z_a, table, 0);
+  raster_tile(0, &bin_b, pool, fb_b, z_b, table, 0);
 
   // Determinism: permuting insertion order must NOT change the result.
   EXPECT_EQ(memcmp(fb_a, fb_b,
@@ -1709,7 +1709,7 @@ TEST(RasterXlu, ZTestHonoredBehindOpaqueOccluder) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // A deep-interior pixel covered by BOTH: the occluder wrote depth NEAR, the
   // XLU tri is FAR -> z-test rejects it -> the pixel stays the occluder color
@@ -1772,7 +1772,7 @@ TEST(RasterXlu, NoZWriteSoSecondXluStillComposites) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   // Expected TWO-LAYER composite (far-over-bg, then near-over-that). Only holds
   // if the far layer's fragment was NOT depth-rejected by a near z-write.
@@ -1867,8 +1867,8 @@ TEST(RasterXlu, OpaqueSweepUnaffectedByPresenceOfXlu) {
   }
   static uint16_t z0[RDR_TILE_W * RDR_TILE_H];
   static uint16_t z1[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin_opaque, pool, fb_opaque, z0, table);
-  raster_tile(0, &bin_mixed, pool, fb_mixed, z1, table);
+  raster_tile(0, &bin_opaque, pool, fb_opaque, z0, table, 0);
+  raster_tile(0, &bin_mixed, pool, fb_mixed, z1, table, 0);
 
   // Every pixel in the opaque tri's footprint (x < 40) must be byte-identical
   // between the two renders — the XLU sweep did not touch the opaque region.
@@ -1925,11 +1925,11 @@ TEST(RasterXlu, DecalTreatedAsOpaque) {
   }
   static uint16_t zd[RDR_TILE_W * RDR_TILE_H];
   static uint16_t zo[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin, pool, fb_decal, zd, table);
+  raster_tile(0, &bin, pool, fb_decal, zd, table, 0);
   struct RenderState rs_op = rs;
   rs_op.zmode = ZMODE_OPAQUE;
   const struct RenderState* table_op = &rs_op;
-  raster_tile(0, &bin, pool, fb_opaque, zo, table_op);
+  raster_tile(0, &bin, pool, fb_opaque, zo, table_op, 0);
 
   EXPECT_EQ(memcmp(fb_decal, fb_opaque,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -1984,7 +1984,7 @@ TEST(RasterXlu, DropWithCountOnPerTileOverflow) {
   }
 
   uint32_t const dropped_before = raster_xlu_dropped();
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
   uint32_t const dropped_after = raster_xlu_dropped();
 
   // The gather overflowed: at least (K_OVF - cap) tris dropped. We don't know
@@ -2127,7 +2127,7 @@ TEST(RasterFog, TexturedFogMatchesReferenceExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2188,7 +2188,7 @@ TEST(RasterFog, TexturedFogMatchesFloatOracle) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, &rs);
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2294,7 +2294,7 @@ TEST(RasterFog, MoreFogTowardFarVertex) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, &rs);
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
 
   uint8_t fogr;
   uint8_t fogg;
@@ -2361,7 +2361,7 @@ TEST(RasterFog, XluFogAppliedBeforeAlphaOver) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2460,7 +2460,7 @@ TEST(RasterFog, FlatFogMatchesReferenceExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2483,4 +2483,166 @@ TEST(RasterFog, FlatFogMatchesReferenceExact) {
     }
   }
   EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+}
+
+// ===========================================================================
+// R.3-AA coverage WRITE tests. The rasterizer writes an analytic coverage byte
+// at each winning OPAQUE fragment when AA is enabled AND a cov scratch is
+// supplied. We verify: interior -> AA_COV_FULL(255); a pixel-centre on an edge
+// -> ~128 (0.5); untouched/outside -> the FULL clear value; AA-off / null-cov
+// leaves cov untouched; and per-pixel parity vs the float oracle_coverage on
+// clean edge pixels.
+// ===========================================================================
+#include "aa/aa.h"  // aa_set_enabled, AA_COV_FULL
+
+namespace {
+
+// Float edge function matching raster.cc edge_eval (Q12.4 inputs as float).
+double edge_f(double ax, double ay, double bx, double by, double px,
+              double py) {
+  return ((bx - ax) * (py - ay)) - ((by - ay) * (px - ax));
+}
+double edge_len_q124(double ax, double ay, double bx, double by) {
+  double const dx = bx - ax;
+  double const dy = by - ay;
+  return sqrt((dx * dx) + (dy * dy));
+}
+
+// AA-on render of one tri (tile 0) into a caller cov buffer (cleared to FULL by
+// raster_tile). fb cleared to black. Verts must already be positive-area in
+// screen y-down so the rasterizer does NOT winding-swap (keeps the edge mapping
+// w0=edge(v1,v2), w1=edge(v2,v0), w2=edge(v0,v1) predictable for the oracle).
+void render_cov(const OneTri* o, uint8_t* cov_out) {
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  aa_set_enabled(1);
+  raster_tile(0, &o->bin, o->pool, fb, zbuf, no_texture_table(), cov_out);
+  aa_set_enabled(0);
+}
+
+}  // namespace
+
+// AA OFF: cov scratch must be left UNTOUCHED (the golden-neutral gate at the
+// write site — even when a cov pointer is supplied, AA-off skips it entirely).
+TEST(RasterCoverage, DisabledLeavesCovUntouched) {
+  OneTri o;
+  one_tri(&o, mk_vtx(8, 8, 0, 0, 0x10000), mk_vtx(50, 12, 0, 0, 0x10000),
+          mk_vtx(20, 50, 0, 0, 0x10000));
+  static uint16_t fb[RDR_SCREEN_W * RDR_SCREEN_H];
+  static uint16_t zbuf[RDR_TILE_W * RDR_TILE_H];
+  for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
+    fb[i] = 0;
+  }
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  memset(cov, 0x5A, sizeof(cov));  // sentinel
+  aa_set_enabled(0);
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), cov);
+  for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
+    ASSERT_EQ(cov[i], 0x5A) << "AA-off must not touch cov (i=" << i << ")";
+  }
+}
+
+// AA ON: a deep interior pixel saturates to AA_COV_FULL; a pixel no fragment
+// covers stays at the FULL clear value (so the resolve treats it as interior).
+TEST(RasterCoverage, InteriorFullAndUntouchedFull) {
+  // Large triangle so its centre region is many px from every edge -> 255.
+  OneTri o;
+  one_tri(&o, mk_vtx(4, 4, 0, 0, 0x10000), mk_vtx(56, 8, 0, 0, 0x10000),
+          mk_vtx(10, 56, 0, 0, 0x10000));
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+  // A clearly-interior pixel (centroid-ish).
+  int const cx = (4 + 56 + 10) / 3;
+  int const cy = (4 + 8 + 56) / 3;
+  EXPECT_EQ(cov[(cy * RDR_TILE_W) + cx], AA_COV_FULL)
+      << "deep interior must saturate to full coverage";
+  // A pixel far outside the triangle (top-right corner of the tile) was never
+  // written -> stays at the FULL clear value.
+  EXPECT_EQ(cov[(2 * RDR_TILE_W) + (RDR_TILE_W - 2)], AA_COV_FULL);
+}
+
+// AA ON: a pixel whose centre lies EXACTLY on an edge gets ~half coverage
+// (d=0 -> cov = 0.5 -> byte 128). We place a vertical LEFT edge through the
+// column-6 pixel CENTRES: a centre is at x*16+8 in Q12.4, so an edge x-coord of
+// 6*16+8 (px 6 + 0.5) makes the column-6 centres sit exactly on the edge ->
+// perpendicular distance 0 -> coverage 0.5. The other two edges are far at
+// mid-height, so this edge is the min.
+TEST(RasterCoverage, EdgePixelHalfCoverage) {
+  OneTri o;
+  // v0=(6,6)+0.5px, v1=(6,54)+0.5px: a vertical left edge at x = 6.5 px running
+  // down; v2=(34,30) puts the interior to the right. sub_x=8 = +0.5 px (Q12.4).
+  one_tri(&o, mk_vtx(6, 6, 8, 0, 0x10000), mk_vtx(6, 54, 8, 0, 0x10000),
+          mk_vtx(34, 30, 0, 0, 0x10000));
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+  // Row y=30 (mid-height, top/bottom verts far). The column-6 pixel centre is
+  // ON the edge -> coverage byte ~128 (the +0.5 bias maps d=0 to 0.5).
+  int const y = 30;
+  uint8_t const cv = cov[(y * RDR_TILE_W) + 6];
+  EXPECT_NEAR((int)cv, 128, 4) << "centre-on-edge pixel must read ~half cover";
+  // Deeper in (x=10) the same row is interior -> full coverage.
+  EXPECT_EQ(cov[(y * RDR_TILE_W) + 10], AA_COV_FULL);
+}
+
+// AA ON: per-pixel parity vs the float oracle_coverage on a clean triangle.
+// For every covered pixel we recompute the float edge distances (same edge_eval
+// + gradient normalisation as raster.cc) and assert the integer coverage byte
+// equals round(255*oracle) within a small tolerance (fixed-point rounding).
+TEST(RasterCoverage, ParityWithFloatOracle) {
+  OneTri o;
+  // Clean, low-frequency geometry, positive area in y-down (no winding swap).
+  one_tri(&o, mk_vtx(8, 6, 0, 0, 0x10000), mk_vtx(52, 14, 0, 0, 0x10000),
+          mk_vtx(16, 50, 0, 0, 0x10000));
+  uint8_t cov[RDR_TILE_W * RDR_TILE_H];
+  render_cov(&o, cov);
+
+  // Vertex Q12.4 coords (tile 0 -> tile-local == screen for tile 0).
+  double const x0 = (double)o.pool[0].x;
+  double const y0 = (double)o.pool[0].y;
+  double const x1 = (double)o.pool[1].x;
+  double const y1 = (double)o.pool[1].y;
+  double const x2 = (double)o.pool[2].x;
+  double const y2 = (double)o.pool[2].y;
+  // Per-edge length (Q12.4 units), matched to w0/w1/w2.
+  double const len0 = edge_len_q124(x1, y1, x2, y2);  // w0 = edge(v1,v2)
+  double const len1 = edge_len_q124(x2, y2, x0, y0);  // w1 = edge(v2,v0)
+  double const len2 = edge_len_q124(x0, y0, x1, y1);  // w2 = edge(v0,v1)
+
+  int checked = 0;
+  int max_abs = 0;
+  for (int sy = 0; sy < RDR_TILE_H; ++sy) {
+    for (int sx = 0; sx < RDR_TILE_W; ++sx) {
+      uint8_t const cv = cov[(sy * RDR_TILE_W) + sx];
+      if (cv == AA_COV_FULL) {
+        continue;  // interior / untouched — parity is on partial edge pixels.
+      }
+      // Pixel-centre in Q12.4 (matches raster: (sx<<4)+8).
+      double const px = (double)((sx << 4) + 8);
+      double const py = (double)((sy << 4) + 8);
+      double const w0 = edge_f(x1, y1, x2, y2, px, py);
+      double const w1 = edge_f(x2, y2, x0, y0, px, py);
+      double const w2 = edge_f(x0, y0, x1, y1, px, py);
+      // d_i (pixels) = w_i / (16 * len_i).
+      double const d0 = w0 / (16.0 * len0);
+      double const d1 = w1 / (16.0 * len1);
+      double const d2 = w2 / (16.0 * len2);
+      float ocov = 0.0F;
+      ASSERT_EQ(oracle_coverage((float)d0, (float)d1, (float)d2, &ocov), 0);
+      int const expect = (int)lround((double)ocov * 255.0);
+      int const diff = (int)cv - expect;
+      int const adiff = diff < 0 ? -diff : diff;
+      if (adiff > max_abs) {
+        max_abs = adiff;
+      }
+      // Tolerance: byte rounding + the +128 fixed-point bias vs the 0.5*255
+      // float scaling differ by at most a couple LSBs.
+      ASSERT_LE(adiff, 3) << "coverage parity at (" << sx << "," << sy
+                          << ") cv=" << (int)cv << " oracle=" << expect;
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 10) << "too few partial edge pixels — test is weak";
 }
