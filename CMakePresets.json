@@ -49,6 +49,15 @@
       }
     },
     {
+      "name": "pico-prof-tidy",
+      "displayName": "PicoSystem + inline clang-tidy + profiler ON (arm-none-eabi)",
+      "inherits": "pico-tidy",
+      "binaryDir": "${sourceDir}/build-pico-prof-tidy",
+      "cacheVariables": {
+        "RENDERER_PROFILER": "ON"
+      }
+    },
+    {
       "name": "host-asan",
       "displayName": "PC + ASan/UBSan (clang-22, Debug)",
       "binaryDir": "${sourceDir}/build-asan",
@@ -79,6 +88,10 @@
     {
       "name": "pico-prof",
       "configurePreset": "pico-prof"
+    },
+    {
+      "name": "pico-prof-tidy",
+      "configurePreset": "pico-prof-tidy"
     },
     {
       "name": "host-asan",

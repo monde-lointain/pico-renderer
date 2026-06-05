@@ -79,6 +79,12 @@ format-patch:
 
 # clang-tidy is host-only and needs a built host tree (SDL3 generates headers at
 # build time) plus its compile DB. Always operate on build-host regardless of PRESET.
+#
+# D2-01 (false-green): the build step and the tidy step MUST NOT share a shell where
+# the recipe's exit could reflect the (passing) build instead of the (failing) tidy.
+# Each line is its own shell (no .ONESHELL), so the tidy line is the recipe's exit;
+# the `&&` inside the tidy line additionally guarantees a clean build is REQUIRED
+# before tidy and never masks tidy's exit even if these were ever collapsed.
 tidy: | build-host/CMakeCache.txt
 	$(Q)cmake --build build-host -j$(JOBS)
 	$(Q)cmake --build build-host --target tidy
@@ -86,6 +92,7 @@ tidy: | build-host/CMakeCache.txt
 # clang-tidy over the pico build (arm-none-eabi), run inline by CMake during the
 # build. Needs the ARM toolchain + pico-sdk + clang-tidy. Findings fail the build.
 # Separate build dir (build-pico-tidy) keeps the .uf2 build (build-pico) clean.
+# Inline tidy is part of the compile, so the build's own exit reflects findings.
 tidy-pico: | build-pico-tidy/CMakeCache.txt
 	$(Q)cmake --build build-pico-tidy -j$(JOBS)
 
