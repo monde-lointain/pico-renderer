@@ -165,13 +165,15 @@ enum { RASTER_XLU_TILE_CAP = 256 };
 // regardless (each tile is drawn by exactly one worker; the drop is per-tile).
 static uint32_t s_xlu_dropped = 0;
 
-#if PROFILER
-// T5 overdraw probe (PROFILER-only): per-WORKER, per-tile, per-pixel count of
-// XLU fragments that pass the z-test, reset per tile. Used to transition-count
-// distinct touched pixels (0->1) and pixels reaching depth>=2 (1->2) so the
-// report can derive mean XLU overdraw (= frags/distinct) — the go/no-go gate
-// for L6's front-to-back machinery. Per-core to avoid the cross-core race;
-// ~7.2KB, pico-prof build ONLY (PROFILER=0 erases it -> golden bit-identical).
+#if PROFILER && PROF_OVERDRAW
+// T5 overdraw probe (PROFILER + PROF_OVERDRAW only): per-WORKER, per-tile,
+// per-pixel count of XLU fragments that pass the z-test, reset per tile. Used
+// to transition-count distinct touched pixels (0->1) and pixels reaching
+// depth>=2 (1->2) so the report can derive mean XLU overdraw (=
+// frags/distinct). Gated behind PROF_OVERDRAW (default OFF) because this ~7.2KB
+// per-worker array does not fit alongside L6's accumulators in the PROFILER=ON
+// pico build; overdraw is already characterized (6.12x), so it is opt-in.
+// PROFILER=0 erases it too -> golden bit-identical.
 static uint8_t g_prof_xlu_depth[PROF_NUM_CORES][RDR_TILE_W * RDR_TILE_H];
 #endif
 
@@ -843,7 +845,7 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
       if (znew < zbuf[zi]) {
         continue;
       }
-#if PROFILER
+#if PROFILER && PROF_OVERDRAW
       // Overdraw probe: a z-passing XLU fragment. Transition-count the
       // per-pixel depth so the report derives mean overdraw (frags/distinct) +
       // the depth>=2 fraction — the L6 go/no-go gate. (Placed after the z-test,
@@ -1079,7 +1081,7 @@ void __not_in_flash_func(raster_tile_noclear)(
   uint32_t const w_acc = (uint32_t)worker & (uint32_t)(RASTER_NUM_WORKERS - 1);
   uint16_t* const c_acc = g_xlu_c_acc[w_acc];
   uint8_t* const acc_alpha = g_xlu_acc_alpha[w_acc];
-#if PROFILER
+#if PROFILER && PROF_OVERDRAW
   // Overdraw probe: reset THIS worker's per-pixel XLU depth for this tile,
   // OUTSIDE the timed sweep_xlu block (so the memset doesn't perturb the
   // measurement). Per-core slice; the XLU sweep below counts into it.

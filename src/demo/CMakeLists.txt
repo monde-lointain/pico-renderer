@@ -20,6 +20,15 @@ if(PLATFORM STREQUAL "picosystem")
     Renderer::rdr Renderer::DemoScene Renderer::Aa renderer::gfx
     renderer::platform_pico Renderer::Prof)
   target_include_directories(renderer_demo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  # Shrink the crt0 heap from its 2KB default to 512B. The renderer itself is an
+  # entirely fixed-buffer design, but the pico SDK's startup/libc reserves a
+  # small heap for early init, so it cannot be zeroed (a heap=0 + malloc-trap
+  # build hung the device pre-USB — the SDK init allocates before TinyUSB comes
+  # up, with no console to report it). 512B keeps init's headroom while
+  # reclaiming 1.5KB — enough for the PROFILER=ON build (L6's ~21.6KB XLU
+  # accumulators) to fit RAM. crt0.S reads this at assembly. On-target boot-
+  # confirmed.
+  target_compile_definitions(renderer_demo PRIVATE PICO_HEAP_SIZE=512)
   pico_set_linker_script(renderer_demo
     ${CMAKE_SOURCE_DIR}/src/platform/memmap_picosystem.ld)
   pico_enable_stdio_usb(renderer_demo 1)

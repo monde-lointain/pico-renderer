@@ -75,6 +75,16 @@ enum ProfTimer { PROF_T_COARSE = 0, PROF_T_FINE = 1 };
 #define PROF_NUM_CORES 1
 #endif
 
+// PROF_OVERDRAW (default OFF, even when PROFILER=1). The per-pixel XLU overdraw
+// probe needs a ~7.2KB per-worker depth array (raster.cc g_prof_xlu_depth) that
+// does NOT fit alongside L6's accumulators in the PROFILER=ON pico build (it
+// overflowed RAM by ~6.3KB). The overdraw is already characterized (6.12x mean,
+// 100% depth>=2); the always-on profiler needs only the sweep TIMING, which
+// fits. Build -DPROF_OVERDRAW=1 to re-measure overdraw on a build with room.
+#ifndef PROF_OVERDRAW
+#define PROF_OVERDRAW 0
+#endif
+
 // POD anchor (Casey's exclusive/inclusive accumulators). `excl_ns` is SIGNED:
 // a child's dtor does parent.excl -= child before the parent's own dtor does
 // self.excl += self, so it transiently goes negative — correct at frame end.
