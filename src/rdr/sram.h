@@ -27,6 +27,13 @@
 #ifndef RDR_SRAM_H
 #define RDR_SRAM_H
 
+// These macros DELIBERATELY mirror the pico-sdk's exact public names
+// __not_in_flash[_func] (sections.h) so the SAME source compiles on host and
+// device; the SDK itself defines them with these reserved/lower-case names.
+// clang-tidy's reserved-identifier / macro-naming / macro-usage checks are
+// therefore suppressed for this sanctioned shim block (renaming would defeat
+// the purpose — the names must match the SDK's).
+// NOLINTBEGIN(bugprone-reserved-identifier,readability-identifier-naming,cppcoreguidelines-macro-usage)
 #ifdef __arm__
 // Equivalent to the pico-sdk sections.h definition; uses standard C token-
 // pasting instead of __STRING so no cdefs.h dependency is needed.
@@ -34,7 +41,6 @@
 #define __not_in_flash(group) __attribute__((section(".time_critical." group)))
 #endif
 #ifndef __not_in_flash_func
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define __not_in_flash_func(func_name) \
   __attribute__((section(".time_critical." #func_name))) func_name
 #endif
@@ -46,5 +52,6 @@
 #define __not_in_flash_func(x) x
 #endif
 #endif
+// NOLINTEND(bugprone-reserved-identifier,readability-identifier-naming,cppcoreguidelines-macro-usage)
 
 #endif  // RDR_SRAM_H
