@@ -26,6 +26,7 @@
 #include "tex/tex.h"
 
 #include "gfx/framebuffer.h"  // rgb565()
+#include "rdr/sram.h"  // __not_in_flash_func (SRAM placement; no-op on host)
 
 // True iff dim is a power of two (nonzero, single bit set). The REPEAT/MIRROR
 // samplers mask-wrap (coord & (dim-1)) / reflect via log2_pow2(dim), which is
@@ -230,8 +231,9 @@ static void three_point_rgba(const struct TexDesc* t, int s, int tt, int sfrac,
   }
 }
 
-void tex_sample_rgba(const struct TexDesc* t, fx16_16 u, fx16_16 v, int lod,
-                     uint8_t out_rgba[4]) {
+void __not_in_flash_func(tex_sample_rgba)(const struct TexDesc* t, fx16_16 u,
+                                          fx16_16 v, int lod,
+                                          uint8_t out_rgba[4]) {
   (void)lod;  // v1: single mip level
   out_rgba[0] = out_rgba[1] = out_rgba[2] = out_rgba[3] = 0;
   if (t == (const struct TexDesc*)0 || t->data == (const void*)0 || t->w == 0 ||
@@ -253,7 +255,8 @@ void tex_sample_rgba(const struct TexDesc* t, fx16_16 u, fx16_16 v, int lod,
   point_rgba(t, s, tt, out_rgba);
 }
 
-uint16_t tex_sample(const struct TexDesc* t, fx16_16 u, fx16_16 v, int lod) {
+uint16_t __not_in_flash_func(tex_sample)(const struct TexDesc* t, fx16_16 u,
+                                         fx16_16 v, int lod) {
   if (t == (const struct TexDesc*)0 || t->data == (const void*)0 || t->w == 0 ||
       t->h == 0) {
     return 0;

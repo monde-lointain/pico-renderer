@@ -6,6 +6,7 @@
 #include "shade/shade.h"
 
 #include "gfx/framebuffer.h"  // rgb565()
+#include "rdr/sram.h"  // __not_in_flash_func (SRAM placement; no-op on host)
 
 // 565 -> 8-bit per channel, bit-replication (matches oracle_unpack565 /
 // gfx/framebuffer.h layout: R[15:11] G[10:5] B[4:0]).
@@ -64,8 +65,9 @@ static void select_input(uint8_t id, const struct RenderState* st,
   }
 }
 
-uint16_t shade_pixel(const struct RenderState* st, uint16_t texel,
-                     uint16_t shade, uint8_t* keep) {
+uint16_t __not_in_flash_func(shade_pixel)(const struct RenderState* st,
+                                          uint16_t texel, uint16_t shade,
+                                          uint8_t* keep) {
   uint8_t t[3];
   uint8_t s[3];
   unpack565(texel, &t[0], &t[1], &t[2]);
@@ -201,8 +203,9 @@ static void run_cycle(const struct CombinerState* cs,
   out[2] = combine_chan(ab, bb, cb, db);
 }
 
-uint16_t shade_pixel2(const struct RenderState* st, uint16_t texel0,
-                      uint16_t texel1, uint16_t shade, uint8_t* keep) {
+uint16_t __not_in_flash_func(shade_pixel2)(const struct RenderState* st,
+                                           uint16_t texel0, uint16_t texel1,
+                                           uint16_t shade, uint8_t* keep) {
   uint8_t t0[3];
   uint8_t t1[3];
   uint8_t s[3];

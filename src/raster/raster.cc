@@ -15,6 +15,7 @@
 #include "gfx/framebuffer.h"  // rgb565()
 #include "prof/prof.h"  // T5: PROF_RASTER_TILE + FINE sweep blocks (no-op when off)
 #include "rdr/config.h"
+#include "rdr/sram.h"     // __not_in_flash_func (SRAM placement; no-op on host)
 #include "shade/shade.h"  // shade_pixel (color combiner)
 #include "tex/tex.h"      // tex_sample / tex_sample_rgba
 
@@ -919,9 +920,9 @@ static void xlu_sort_stable(uint16_t* idx, uint32_t n, const struct TVtx* pool,
   }
 }
 
-void raster_tile_noclear(int tile, const struct TileBin* bin,
-                         const struct TVtx* pool, uint16_t* fb, uint16_t* zbuf,
-                         const struct RenderState* rstate_table, uint8_t* cov) {
+void __not_in_flash_func(raster_tile_noclear)(
+    int tile, const struct TileBin* bin, const struct TVtx* pool, uint16_t* fb,
+    uint16_t* zbuf, const struct RenderState* rstate_table, uint8_t* cov) {
   if (bin == 0 || pool == 0 || fb == 0 || zbuf == 0 || rstate_table == 0) {
     return;
   }
@@ -1053,9 +1054,11 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
 // scratch). See RASTER_XLU_TILE_CAP. Not atomic across cores (debug only).
 uint32_t raster_xlu_dropped(void) { return s_xlu_dropped; }
 
-void raster_tile(int tile, const struct TileBin* bin, const struct TVtx* pool,
-                 uint16_t* fb, uint16_t* zbuf,
-                 const struct RenderState* rstate_table, uint8_t* cov) {
+void __not_in_flash_func(raster_tile)(int tile, const struct TileBin* bin,
+                                      const struct TVtx* pool, uint16_t* fb,
+                                      uint16_t* zbuf,
+                                      const struct RenderState* rstate_table,
+                                      uint8_t* cov) {
   if (zbuf == 0) {
     return;
   }
