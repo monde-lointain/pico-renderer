@@ -516,13 +516,22 @@ uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs) {
   // disable any invalid texture IN the local copy — then dedup and store THAT.
   // Doing this before the dedup scan keeps the table storing only corrected
   // values, so the value-compare collapses duplicates of an invalid material to
-  // ONE entry (counted once on append below), and a re-intern of the same
-  // source dedups against the corrected entry, not spuriously appending. Valid
-  // materials (every shipping demo material) are copied byte-identically, so
-  // this is golden-neutral. `cand` lives on the stack; the table copy is taken
-  // from it on append.
+  // ONE table entry, and a re-intern of the same source dedups against the
+  // corrected entry, not spuriously appending. Valid materials (every shipping
+  // demo material) are copied byte-identically, so this is golden-neutral.
+  // `cand` lives on the stack; the table copy is taken from it on append.
   struct RenderState cand = *rs;
   int const disabled = material_disable_invalid_textures(&cand);
+  // Count the disable EVENTS now — independent of the append-vs-dedup outcome
+  // below — so the "never silent" guarantee holds even when a corrected
+  // candidate dedups against an existing entry (the disable happened either
+  // way, and a per-call counter is the observable signal). The counter is a
+  // per-frame texture-disable EVENT count (0/1/2 per call: a 2-cycle material
+  // can disable both tex and tex1), NOT a distinct-material count; reset in
+  // geom_material_reset. Golden-neutral materials disable nothing (==0).
+  if (disabled > 0) {
+    s_material_invalid += (uint32_t)disabled;
+  }
   // Dedup: deterministic linear VALUE compare over the RenderState POD. The
   // table is tiny (<=RDR_MAX_MATERIALS, ≈6 distinct states per scene), so a
   // scan is ample; pointer identity is unusable because every intern sees the
@@ -551,12 +560,6 @@ uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs) {
   }
   uint16_t const id = f->rstate_count;
   f->rstate_table[id] = cand;  // append the corrected new distinct entry
-  // CL-6: count the disabled texture(s) ONCE here, only when a corrected value
-  // is actually appended as a NEW distinct entry — so the invalid-material drop
-  // is observable yet counted exactly once per distinct invalid texture.
-  if (disabled > 0) {
-    s_material_invalid += (uint32_t)disabled;
-  }
   ++f->rstate_count;
   return id;
 }

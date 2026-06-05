@@ -658,6 +658,80 @@ TEST(GeomMaterial, ValidTwoCycleWithTex1InternsClean) {
   EXPECT_EQ(memcmp(&f.rstate_table[0], &rs, sizeof rs), 0);
 }
 
+// 2-cycle material with a VALID base tex but an INVALID tex1 -> only tex1 is
+// cleared (the tex1-disable true-positive), tex survives, counter reflects the
+// 1 disabled texture. (The all-valid tex1 path is covered above; this pins the
+// failure branch.)
+TEST(GeomMaterial, TwoCycleInvalidTex1DisablesOnlyTex1AndCounts) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState rs = mk_rstate(10);
+  rs.tex = mk_valid_tex();
+  rs.tex1 = mk_invalid_tex();
+  rs.cycle = (uint8_t)COMBINE_TWO_CYCLE;
+  uint16_t const id = geom_material_intern(&f, &rs);
+
+  EXPECT_EQ(id, 0U);
+  EXPECT_EQ(f.rstate_count, 1U);
+  // Base tex survives verbatim.
+  EXPECT_EQ(f.rstate_table[0].tex.data, rs.tex.data);
+  EXPECT_EQ(f.rstate_table[0].tex.w, rs.tex.w);
+  // tex1 disabled in place -> rs_two_cycle falls to single-cycle.
+  EXPECT_EQ(f.rstate_table[0].tex1.data, (const void*)0);
+  EXPECT_EQ(f.rstate_table[0].tex1.w, 0U);
+  EXPECT_EQ(f.rstate_table[0].tex1.h, 0U);
+  // One texture-disable event.
+  EXPECT_EQ(geom_material_invalid_count(), 1U);
+}
+
+// 1-cycle material (cycle==COMBINE_ONE_CYCLE) with a garbage/invalid tex1 ->
+// tex1 is NOT inspected or cleared (don't-care in 1-cycle; raster never samples
+// TEXEL1 there) and the counter stays 0. Pins the cycle==TWO gate guarantee:
+// only a 2-cycle material's tex1 is validated.
+TEST(GeomMaterial, OneCycleIgnoresInvalidTex1NoCount) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState rs = mk_rstate(11);
+  rs.tex = mk_valid_tex();
+  rs.tex1 = mk_invalid_tex();  // garbage in the unused TEXEL1 slot
+  rs.cycle = (uint8_t)COMBINE_ONE_CYCLE;
+  uint16_t const id = geom_material_intern(&f, &rs);
+
+  EXPECT_EQ(id, 0U);
+  EXPECT_EQ(f.rstate_count, 1U);
+  // tex1 is left UNTOUCHED (not validated, not cleared) in 1-cycle.
+  EXPECT_EQ(f.rstate_table[0].tex1.data, rs.tex1.data);
+  EXPECT_EQ(f.rstate_table[0].tex1.w, rs.tex1.w);
+  EXPECT_EQ(f.rstate_table[0].tex1.h, rs.tex1.h);
+  EXPECT_EQ(geom_material_invalid_count(), 0U);
+}
+
+// Same invalid material interned TWICE -> the corrected candidate dedups so the
+// table holds ONE entry, AND the counter bumps on EVERY disabling intern call
+// (bump-on-every-disable semantics, CL-6 review #1): one disabled texture per
+// call x 2 calls == 2. (A dedup-only counter would have read 1 and the second
+// disable would be silent.)
+TEST(GeomMaterial, SameInvalidMaterialTwiceDedupsButCountsEachDisable) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState rs = mk_rstate(12);
+  rs.tex = mk_invalid_tex();  // one invalid texture
+  uint16_t const id0 = geom_material_intern(&f, &rs);
+  uint16_t const id1 = geom_material_intern(&f, &rs);  // re-intern same source
+
+  EXPECT_EQ(id0, 0U);
+  EXPECT_EQ(id1, 0U);             // dedups to the same corrected entry
+  EXPECT_EQ(f.rstate_count, 1U);  // table did NOT grow
+  // Bump-on-every-disable: 1 disabled texture x 2 intern calls.
+  EXPECT_EQ(geom_material_invalid_count(), 2U);
+}
+
 // ---- G1: transform-once + share tests (geom-share barrier) ------------------
 // These tests are RED under the old per-tri emit code and GREEN only after
 // the transform-once / vbase share is implemented.
