@@ -281,3 +281,47 @@ jobs:
         run: |
           cmake --preset pico-tidy
           cmake --build build-pico-tidy --parallel
+
+  # ---- clang-tidy over the pico build with the profiler ON -------------------
+  # The other two tidy jobs (`tidy`, `tidy-pico`) both run RENDERER_PROFILER=OFF, so
+  # the profiler's ON-path (src/prof/* + the instrumented TUs compiled with
+  # PROFILER=1) ships UNLINTED — a manual pico-prof-tidy caught 5 real issue classes
+  # during T5 (WORKFLOW T5-friction #2). This job lints exactly that ON-path: it
+  # mirrors `tidy-pico` (arm-none-eabi + pinned pico-sdk + clang-tidy-22) but builds
+  # the `pico-prof-tidy` preset (RENDERER_PICO_TIDY=ON + RENDERER_PROFILER=ON).
+  # Findings fail the build.
+  pico-prof-tidy:
+    name: clang-tidy-22 (pico arm-none-eabi, PROFILER=ON)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain + clang-tidy-22
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-dev libstdc++-arm-none-eabi-newlib \
+            cmake ninja-build git libusb-1.0-0-dev pkg-config
+          wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+          sudo ./llvm.sh 22
+          sudo apt-get install -y clang-tidy-22
+
+      - name: Install Pillow (asset gen)
+        run: python -m pip install --upgrade pip Pillow
+
+      # pico-sdk pinned to the commit SHA of tag 2.2.0 for reproducible lint.
+      # Bump deliberately. A SHA pin can't use --depth 1 --branch, so clone then
+      # checkout the SHA and init submodules (the submodule update is what pins
+      # them — a --recurse-submodules clone would fetch the wrong gitlinks first).
+      - name: Fetch pico-sdk (pinned to 2.2.0)
+        run: |
+          git clone https://github.com/raspberrypi/pico-sdk.git "${RUNNER_TEMP}/pico-sdk"
+          git -C "${RUNNER_TEMP}/pico-sdk" checkout a1438dff1d38bd9c65dbd693f0e5db4b9ae91779
+          git -C "${RUNNER_TEMP}/pico-sdk" submodule update --init --recursive
+          echo "PICO_SDK_PATH=${RUNNER_TEMP}/pico-sdk" >> "$GITHUB_ENV"
+
+      - name: Configure + build (pico-prof-tidy preset; clang-tidy runs inline, findings fail)
+        run: |
+          cmake --preset pico-prof-tidy
+          cmake --build build-pico-prof-tidy --parallel

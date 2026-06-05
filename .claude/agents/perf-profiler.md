@@ -11,7 +11,24 @@ You measure performance on the real device and gate against the renderer spec's 
 - **Perf gate (W5):** full feature set; per-stage cycle counters (transform/bin/raster/aa-resolve); tile-time + core-balance histograms; assert frame ≤ 33.3 ms.
 - **Levers (in order) if over budget:** raise the affine/perspective threshold, gate AA to large-tri silhouettes, drop per-pixel features to point, cap lights, lower the triangle cap.
 
-Use **on-target-probe** for all device measurement (and its **probe-validity checklist** — Release/`-O3`/`NDEBUG`, hot code in SRAM, anti-DCE `volatile` sink, confirm `SYSCLK`, HW regs via the SDK struct not hardcoded offsets — a wrong probe gives a confidently-wrong number, TW-04). The single device serializes runs.
+Use **on-target-probe** for all device measurement. The single device serializes runs.
+
+## Probe-validity checklist (TW-04 — a wrong probe gives a confidently-wrong number)
+Apply this to EVERY device measurement before believing a number (mirrors the on-target-probe skill):
+- **Build:** Release / `-O3` / `NDEBUG` (a Debug build measures the wrong code).
+- **Hot code in SRAM:** the timed path is `__not_in_flash_func` (or otherwise SRAM-resident) when the
+  question is compute, not XIP — else you accidentally measure flash-fetch stalls (observer effect).
+- **Anti-DCE:** the result feeds a `volatile` sink / asm barrier so the compiler can't elide the work
+  (the S0 `MICRORAST` was dead-code-eliminated — a logged prior failure).
+- **Clock confirmed:** read back `SYSCLK` (confirm the 250 MHz overclock took) before cycles→time.
+- **HW regs via the SDK struct, never hardcoded offsets** — the S0 prompt's `CTR_ACC=0x08` was wrong
+  (real `0x10`); use the SDK register struct so the field layout is correct.
+- **Right timer for the span (T5):** `time_us_64` (1µs, no-wrap, cross-core) for spans that can
+  approach SysTick's ~67ms wrap; SysTick/FINE only for spans guaranteed <67ms. Reset CVR per fine
+  block so COUNTFLAG is a true >67ms tripwire; a `wrap=1` means "move that anchor to coarse".
+- **Flash + capture back-to-back, plain `cat` (T5):** flash an IDLE device (a busy 100%/100% device
+  wedges picotool reboot-to-BOOTSEL); attach the reader within a bounded run's window or capture 0
+  lines; read with `cat` (no DTR toggle), not a pyserial open that asserts DTR.
 ## References — MANDATORY (read before writing code; never hallucinate APIs/hardware)
 Before implementing, **read the primary sources relevant to your module** (full list + per-module guide
 in `docs/REFERENCES.md`). **Never invent** a software API, register, hardware behavior, format, or

@@ -122,6 +122,14 @@ struct GeomOut {
   struct TileBin tiles[GEOM_NUM_TILES];
   uint32_t tris_total;    // accepted triangles (placed in bins by finalize)
   uint32_t tris_dropped;  // dropped on overflow / cull / clip / near
+  // Source triangles submitted by DRAW_TRIS, BEFORE near/guard-band clip fan
+  // expansion (CL-4). Counted ONCE per source tri (every index triple a
+  // DRAW_TRIS iterates), INCLUDING ones later dropped/culled/clipped/near-
+  // rejected and ones expanded to a multi-triangle clip fan — so it is the
+  // submitted-source-poly count, distinct from tris_total (accepted POST-clip
+  // binned fan tris). Pure telemetry (read by nobody in the raster path);
+  // T5 quotes tri throughput against THIS, not the over-counting tris_total.
+  uint32_t tris_source;
   // Arena-backed variable bins (Wave-E). geom_bin_tri DEFERS: it buffers each
   // surviving tri (a TriRef) into jobs[] and tallies per-tile demand in
   // tiles[].count. geom_bin_finalize prefix-sums those demands into contiguous
@@ -197,5 +205,23 @@ uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs);
 // mirrors the bin/cmd drop-with-count convention). Reset by
 // geom_material_reset.
 uint32_t geom_material_overflow_count(void);
+
+// Per-frame count of texture-disable EVENTS at material intern (R.1 handoff
+// wiring, CL-6). UNIT: one per texture cleared, NOT per material — a 2-cycle
+// material with BOTH tex and tex1 invalid bumps by 2; a material with one
+// invalid texture bumps by 1. geom_material_intern calls tex_validate(&rs->tex)
+// (and, for cycle==COMBINE_TWO_CYCLE, tex_validate(&rs->tex1)); a non-RDR_OK
+// descriptor (non-pow2 WRAP/MIRROR, bilinear-on-CI, CI-without-TLUT, unknown
+// format) is DISABLED IN PLACE — its TexDesc is cleared (data/w/h := 0) so
+// raster's existing "valid texture?" branch (rs_has_texture / rs_two_cycle)
+// falls to the flat path and NEVER samples an invalid texture — and this
+// counter is bumped so the disable is observable, never silent. The bump fires
+// on EVERY intern call that disables a texture, INDEPENDENT of whether the
+// corrected candidate appends a new entry or dedups against an existing one
+// (the disable happened either way). A material whose textures are all valid
+// (or absent) disables nothing and does NOT bump this. Golden-neutral (every
+// shipping demo material is valid). Reset each frame in geom_material_reset;
+// debug-surfaced like the overflow count.
+uint32_t geom_material_invalid_count(void);
 
 #endif  // RDR_GEOM_H

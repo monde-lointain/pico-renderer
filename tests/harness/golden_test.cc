@@ -206,7 +206,19 @@ TEST(Golden, CommittedSceneRegression) {
 
   struct GoldenReport rep;
   int const r = golden_check(&p, buf.data(), width, height, &rep);
-  // PASS (golden present, matches) or WROTE (first time / regen). Never FAIL.
-  EXPECT_NE(r, GOLDEN_FAIL);
-  EXPECT_NE(r, GOLDEN_ERROR);
+
+  // A committed anchor must assert the POSITIVE result (== GOLDEN_PASS), not
+  // merely the absence of failure (!= GOLDEN_FAIL). With "!= FAIL", a deleted
+  // or missing golden yields GOLDEN_WROTE (a fresh golden is written) and the
+  // test silently passes — so the anchor stops anchoring. Requiring PASS makes
+  // a missing committed golden fail loudly.
+  //
+  // The one legitimate WROTE path is a deliberate refresh: GOLDEN_REGEN set.
+  const char* const regen_env = getenv("GOLDEN_REGEN");
+  int const regen = (regen_env && regen_env[0]) ? 1 : 0;
+  if (regen) {
+    EXPECT_EQ(r, GOLDEN_WROTE);  // deliberate refresh writes the new golden
+  } else {
+    EXPECT_EQ(r, GOLDEN_PASS);  // golden present AND matches; missing -> fails
+  }
 }

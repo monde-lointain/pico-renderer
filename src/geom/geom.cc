@@ -14,6 +14,8 @@
 #include "cmd/cmd.h"
 #include "fixed/fixed.h"
 #include "rdr/frame.h"
+#include "shade/shade.h"  // COMBINE_TWO_CYCLE (gate the tex1 validation, CL-6)
+#include "tex/tex.h"      // tex_validate (R.1 handoff: validate at material)
 
 #define FX_ONE (1 << 16)
 
@@ -289,6 +291,7 @@ void geom_out_init(struct GeomOut* o, struct TVtx* tverts, uint32_t tvert_cap,
   o->tvert_cap = tvert_cap;
   o->tris_total = 0;
   o->tris_dropped = 0;
+  o->tris_source = 0;
   o->jobs = jobs;
   o->jobs_count = 0;
   o->jobs_cap = jobs_cap;
@@ -462,10 +465,44 @@ void geom_bin_finalize(struct GeomOut* o) {
 // Orthodox idiom for single-instance state (see CLAUDE.md "Encapsulate state");
 // reached only through the geom_material_* functions and reset per frame.
 static uint32_t s_material_overflow = 0;
+// CL-6: count of interned materials whose texture(s) failed tex_validate this
+// frame. Same encapsulation idiom; reset per frame beside the overflow count.
+static uint32_t s_material_invalid = 0;
 
 void geom_material_reset(struct Frame* f) {
   f->rstate_count = 0;
   s_material_overflow = 0;
+  s_material_invalid = 0;
+}
+
+// CL-6: validate the texture descriptor(s) of a candidate material and DISABLE
+// any that fails tex_validate, IN PLACE on `e` (R.1 handoff: "call tex_validate
+// at SET_MATERIAL; RDR_EINVAL = bad material — don't sample"). Policy is geom-
+// owned and raster-agnostic: clearing the bad TexDesc (data/w/h := 0) makes
+// raster's EXISTING "valid texture?" branch (rs_has_texture / rs_two_cycle)
+// fall to the flat path — NO raster change. PURE/idempotent: it does NOT touch
+// the counter (the caller bumps s_material_invalid once, only when a corrected
+// value is actually APPENDED as a new entry — so a re-interned duplicate dedups
+// to the already-corrected entry and is counted exactly once per DISTINCT
+// invalid texture). Returns the count of textures disabled (0 = nothing did).
+// Golden-neutral: every shipping demo material is valid, so this returns 0 for
+// the demo and leaves `e` byte-identical.
+static int material_disable_invalid_textures(struct RenderState* e) {
+  int disabled = 0;
+  if (tex_validate(&e->tex) != RDR_OK) {
+    memset(&e->tex, 0, sizeof e->tex);  // disable TEXEL0 -> flat path
+    ++disabled;
+  }
+  // tex1 (TEXEL1) is sampled only on the 2-cycle detail path; validate it only
+  // when that path is requested (cycle==TWO), mirroring raster's rs_two_cycle
+  // gate. A null/zero-dim tex1 is RDR_OK (tex_validate treats it as "no
+  // texture"), so a single-cycle material is untouched.
+  if (e->cycle == (uint8_t)COMBINE_TWO_CYCLE &&
+      tex_validate(&e->tex1) != RDR_OK) {
+    memset(&e->tex1, 0, sizeof e->tex1);  // disable TEXEL1 (rs_two_cycle false)
+    ++disabled;
+  }
+  return disabled;
 }
 
 uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs) {
@@ -474,6 +511,26 @@ uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs) {
   }
   if (rs == 0) {
     rs = &f->rstate;  // null => intern the current render state
+  }
+  // CL-6: build the CORRECTED candidate up front — tex_validate the source and
+  // disable any invalid texture IN the local copy — then dedup and store THAT.
+  // Doing this before the dedup scan keeps the table storing only corrected
+  // values, so the value-compare collapses duplicates of an invalid material to
+  // ONE table entry, and a re-intern of the same source dedups against the
+  // corrected entry, not spuriously appending. Valid materials (every shipping
+  // demo material) are copied byte-identically, so this is golden-neutral.
+  // `cand` lives on the stack; the table copy is taken from it on append.
+  struct RenderState cand = *rs;
+  int const disabled = material_disable_invalid_textures(&cand);
+  // Count the disable EVENTS now — independent of the append-vs-dedup outcome
+  // below — so the "never silent" guarantee holds even when a corrected
+  // candidate dedups against an existing entry (the disable happened either
+  // way, and a per-call counter is the observable signal). The counter is a
+  // per-frame texture-disable EVENT count (0/1/2 per call: a 2-cycle material
+  // can disable both tex and tex1), NOT a distinct-material count; reset in
+  // geom_material_reset. Golden-neutral materials disable nothing (==0).
+  if (disabled > 0) {
+    s_material_invalid += (uint32_t)disabled;
   }
   // Dedup: deterministic linear VALUE compare over the RenderState POD. The
   // table is tiny (<=RDR_MAX_MATERIALS, ≈6 distinct states per scene), so a
@@ -484,12 +541,13 @@ uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs) {
   // memset-zero (rdr.cc rstate_defaults) and then field-assigned, and
   // SET_MATERIAL copies the whole struct from such a zeroed origin — so padding
   // bytes are uniformly zero on both sides and never diverge for value-equal
-  // states. (clang-tidy flags the generic padding hazard; the invariant rules
-  // it out — see WORKFLOW.md.)
+  // states. material_disable_invalid_textures only memsets whole TexDesc fields
+  // to 0, preserving that all-padding-zero invariant. (clang-tidy flags the
+  // generic padding hazard; the invariant rules it out — see WORKFLOW.md.)
   for (uint16_t i = 0; i < f->rstate_count; ++i) {
     // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
-    if (memcmp(&f->rstate_table[i], rs, sizeof *rs) == 0) {
-      return i;  // existing value-equal entry
+    if (memcmp(&f->rstate_table[i], &cand, sizeof cand) == 0) {
+      return i;  // existing value-equal entry (dedup vs the corrected value)
     }
   }
   if (f->rstate_count >= RDR_MAX_MATERIALS) {
@@ -501,12 +559,14 @@ uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs) {
                                  : (uint16_t)0;
   }
   uint16_t const id = f->rstate_count;
-  f->rstate_table[id] = *rs;  // append a new distinct entry
+  f->rstate_table[id] = cand;  // append the corrected new distinct entry
   ++f->rstate_count;
   return id;
 }
 
 uint32_t geom_material_overflow_count(void) { return s_material_overflow; }
+
+uint32_t geom_material_invalid_count(void) { return s_material_invalid; }
 
 // ---- front-end command interpreter (C1) ------------------------------------
 // Module-local interpreter state threaded through cb_walk as the visitor ctx.
@@ -565,6 +625,13 @@ static void geom_emit_tri(struct Frame* f, const struct TVtx* a,
 static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
                           uint16_t vi2) {
   struct Frame* f = g->f;
+  // CL-4: one SOURCE triangle enters the pipeline here (this function is called
+  // exactly once per DRAW_TRIS index triple, before any clip/cull/near drop or
+  // fan expansion). Count it unconditionally — including the no-cursor /
+  // out-of-range / near-rejected / fully-clipped fates below — so tris_source
+  // is the submitted-source-poly count, distinct from the POST-clip binned
+  // tris_total. Pure telemetry: never read by the raster path (bit-identical).
+  ++f->geom.tris_source;
   if (g->vptr == 0) {
     return;  // DRAW_TRIS with no LOAD_VERTS cursor: nothing to fetch
   }
