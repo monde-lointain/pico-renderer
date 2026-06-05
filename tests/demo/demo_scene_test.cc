@@ -23,6 +23,7 @@
 #include "gtest/gtest.h"
 #include "platform/platform.h"  // enum Button (camera trace)
 #include "png_io.h"             // png_write_rgb8 (env-gated visual dump)
+#include "raster/raster.h"      // raster_xlu_dropped (soft-XLU gather guard)
 #include "rdr/config.h"
 #include "rdr/frame.h"
 #include "rdr/rdr.h"
@@ -317,10 +318,11 @@ TEST(TerrainSceneGuard, TerrainMaterialAppliesEnvTint) {
       << "terrain 2-cycle combine is not (TEXEL0 x detail) x ENV";
 }
 
-// TREE MATERIAL (opaque cutout, T2): faithful sprite descriptor (32x64
-// RGBA5551), MODULATE (TEXEL x SHADE), double-sided billboard (CULL_NONE, N6),
-// crisp POINT filter, and the alpha-cutout threshold that kills the
-// transparent billboard background (G_RM_AA_ZB_TEX_EDGE, the visible T2 win).
+// TREE MATERIAL (soft-edge XLU): faithful sprite descriptor (32x64 RGBA5551),
+// MODULATE (TEXEL0 x SHADE), double-sided billboard (CULL_NONE, N6), BILINEAR
+// filter (N64 G_TF_BILERP -> intermediate alpha across the cutout boundary
+// softens the silhouette), ZMODE_XLU (G_RM_AA_ZB_XLU_SURF: z-test, no z-write,
+// alpha-over the texel alpha), alpha_cmp==1 (discard only the clear border).
 TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
   struct RenderState rs;
   demo_tree_material(&rs);
@@ -330,11 +332,13 @@ TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
   EXPECT_EQ(rs.tex.format, (uint8_t)TEXFMT_RGBA5551);
   EXPECT_EQ(rs.cull, (uint8_t)CULL_NONE);
   EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_MODULATE);
-  EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_POINT);  // crisp cutout edge
-  EXPECT_EQ(rs.zmode, (uint8_t)ZMODE_OPAQUE);
-  EXPECT_NE(rs.alpha_cmp, (uint8_t)0)
-      << "tree cutout pass must alpha-test (else the black billboard "
-         "background is not discarded)";
+  EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_THREE_POINT)
+      << "trees BILINEAR (N64 G_TF_BILERP) — softens the cutout silhouette";
+  EXPECT_EQ(rs.zmode, (uint8_t)ZMODE_XLU)
+      << "soft-edge trees use the XLU_SURF alpha-over pass (z-test, no "
+         "z-write)";
+  EXPECT_EQ(rs.alpha_cmp, (uint8_t)1)
+      << "discard only fully-transparent texels; keep+blend the soft ring";
   EXPECT_EQ(rs.fog.enabled, (uint8_t)0)
       << "trees are 1-cycle no-fog (N64 scenery.c); only terrain fogs";
 }
@@ -361,10 +365,11 @@ TEST(TerrainSceneGuard, RealDensityRendersTexturedTerrain) {
       << " dropped=" << g_frame.geom.tris_dropped << " (terrain not visible?)";
 
   // The cmdgen telemetry must report the real source-tri budget (front-end
-  // scene-build work), distinct from the geom-accepted count above. T2 ships
-  // the cutout pass only (the XLU pass is deferred to T4), so trees draw ONCE.
+  // scene-build work), distinct from the geom-accepted count above. Trees draw
+  // ONCE — a single soft-edge XLU pass CONVERTS the old cutout pass (no second
+  // draw) — so the source-tri / draw / vert budget is unchanged.
   EXPECT_EQ(telem.cmdgen_tris, (uint32_t)(DEMO_TERRAIN_TRIS + DEMO_TREE_TRIS));
-  // Two draws: terrain, tree-cutout.
+  // Two draws: terrain, tree (soft XLU).
   EXPECT_EQ(telem.cmdgen_draws, 2U);
   EXPECT_EQ(telem.cmdgen_verts,
             (uint32_t)(DEMO_TERRAIN_VERTS + DEMO_TREE_VERTS));
@@ -647,12 +652,13 @@ TEST(TerrainSceneGuard, DumpFramePng) {
 // regression that under-sizes a cap or loses the variable-bin behavior trips
 // this. Prints the high-water marks for the T0 report.
 //
-// T2 NOTE: the faithful tree XLU pass (a SECOND tree draw) doubled the tree
-// per-tile spans and pushed worst-frame bin_pool demand 1756 -> 2310, over
-// RDR_BIN_POOL_REFS=2048. Per the Lead decision the XLU demo pass is DEFERRED
-// to T4 (visually identical at 1-bit alpha / no-AA), so trees draw ONCE again
-// and demand returns to ~1756 < 2048 — this guard passes with frame.h
-// UNTOUCHED.
+// SOFT-XLU NOTE: faithful soft-edge trees CONVERT the single opaque tree pass
+// into a single XLU pass (bilinear + ZMODE_XLU alpha-over) — they do NOT add a
+// second draw. So the per-tile bin demand is identical to the cutout build
+// (~1756 < RDR_BIN_POOL_REFS=2048) and this guard passes with frame.h
+// UNTOUCHED. (The discarded T2 approach drew each tree TWICE, doubling the
+// per-tile spans to 2310 and overflowing the pool — exactly what this guard
+// caught, and why the soft-edge path is deliberately single-pass.)
 TEST(TerrainSceneGuard, ArenaBinsNoOverflowAcrossScriptedLoop) {
   struct DemoCamera cam;
   struct DemoScroll scroll;
@@ -689,6 +695,34 @@ TEST(TerrainSceneGuard, ArenaBinsNoOverflowAcrossScriptedLoop) {
       << "pool high-water at/over cap — size RDR_BIN_POOL_REFS up";
   EXPECT_LT(peak_jobs, (uint32_t)RDR_BIN_MAX_JOBS)
       << "job high-water at/over cap — size RDR_BIN_MAX_JOBS up";
+}
+
+// SOFT-XLU GATHER GUARD: soft-edge trees route through the XLU sweep's per-tile
+// gather (RASTER_XLU_TILE_CAP=256 indices, drop-with-count). 126 trees x 2 tris
+// = 252 tree tris total, but tile-spanning billboards could cluster a hot tile
+// past the cap and silently drop blended geometry. Sweep the whole scripted
+// loop (render_terrain rasterizes the XLU sweep) and assert the
+// process-monotonic raster_xlu_dropped() never advances (read as a before/after
+// DELTA — other suites bump the same lifetime counter). A positive delta is the
+// documented re-surface signal: raise to a Lead-owned per-worker XLU scratch,
+// NOT the local stack cap (raster.cc R.2 note).
+TEST(TerrainSceneGuard, SoftXluTreesNeverDropInGatherAcrossScriptedLoop) {
+  struct DemoCamera cam;
+  struct DemoScroll scroll;
+  struct DemoTelemetry telem;
+  demo_camera_init(&cam);
+  demo_scroll_init(&scroll);
+  uint32_t const before = raster_xlu_dropped();
+  for (uint32_t f = 0; f < (uint32_t)SCRIPTED_FRAME_COUNT; ++f) {
+    render_terrain(&cam, &scroll, &telem);
+    demo_camera_advance(&cam, 0, 0);
+    demo_scroll_advance(&scroll);
+  }
+  uint32_t const dropped = raster_xlu_dropped() - before;
+  fprintf(stderr, "[soft-xlu] gather drops across loop = %u\n", dropped);
+  EXPECT_EQ(dropped, 0U)
+      << "XLU per-tile gather overflowed (RASTER_XLU_TILE_CAP) — a hot tile "
+         "packed > cap tree tris; re-surface for a per-worker XLU scratch";
 }
 
 // ===========================================================================
@@ -934,7 +968,13 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   }
   digest ^= 0xFFFFFFFFU;
   fprintf(stderr, "[golden] fb_crc stream digest = 0x%08x\n", digest);
-  EXPECT_EQ(digest, 0x850571caU)
+  // Rebaked 0x850571ca -> 0x8afa5629 for the faithful soft-edge XLU trees
+  // (bilinear 5551 + ZMODE_XLU alpha-over). The delta is localized to tree
+  // silhouettes (verified: a soft-vs-cutout frame diff lights up ONLY at tree
+  // edges; terrain/sky/water unchanged), and the arena-bins + soft-xlu-gather
+  // guards stay green — so this digest pins a VERIFIED image, not a corrupt
+  // one.
+  EXPECT_EQ(digest, 0x8afa5629U)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 
