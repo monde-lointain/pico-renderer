@@ -20,7 +20,7 @@ set +o pipefail
 cmake --build build-host --target tidy 2>&1 | tee "$tidy_log"
 tidy_rc=${PIPESTATUS[0]}
 set -o pipefail
-tidy_err=$(grep -c ': error:' "$tidy_log" || true)
+tidy_err=$(grep -c ': error:' "$tidy_log" 2>/dev/null || true); tidy_err=${tidy_err:-0}
 if [ "$tidy_rc" -ne 0 ] || [ "$tidy_err" -ne 0 ]; then
   echo "TIDY FAIL (D2-01): exit=$tidy_rc, ': error:' lines=$tidy_err on the FINISHED log"
   rm -f "$tidy_log"

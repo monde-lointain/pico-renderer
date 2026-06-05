@@ -836,9 +836,9 @@ TEST(GeomShare, SourceTriCounterCountsDroppedSourceTris) {
     verts[k].c.rgba[3] = 255;
   }
 
-  // Two source tris, BOTH near-rejected (each references v2). Index 9 in the
-  // second triple is also out of range, but the near-reject fires first; either
-  // way the tri is a SUBMITTED source tri that never bins.
+  // Two source tris, BOTH near-rejected (each references v2, behind the near
+  // plane). Each is a SUBMITTED source tri that never bins -> tris_source counts
+  // both, tris_total counts neither.
   static const uint16_t idx[6] = {0, 1, 2, 2, 1, 0};
   struct Command cmds[4];
   memset(cmds, 0, sizeof cmds);

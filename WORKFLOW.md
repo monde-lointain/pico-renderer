@@ -202,7 +202,7 @@ Scope: back-end raster only (FE single-core; no scanline-race). `sched_rasterize
 - β `geom_modelview_det_sign` overflows `fx_mul` at uniform scale ≳180 → flips det sign → inverts cull. Use a 64-bit product or document the operand-range bound.
 - θ per-band DMA re-arming vs the continuous-stream 14.75 ms budget — confirm 30 fps at C2.
 - η `main()`/exit-code wiring untested (core is); `read_until_sentinel` tested but production re-implements it inline (drift risk); key-charset asymmetry parse vs check-spec.
-- δ `tex_sample` has no non-pow2 guard (documented pow2-only) — add a debug assert.
+- δ `tex_sample` has no non-pow2 guard (documented pow2-only) — add a debug assert. **CLOSED by CL-5** (validate-time pow2 rejection in `tex_validate`, not a sampler assert — keeps the hot loop byte-identical); runtime wiring of `tex_validate` at SET_MATERIAL is **CL-6**.
 
 ## Cycle KPIs — second dispatch (Wave-1 parallel fan-out, 7 streams), 2026-05-27
 - **Review-catch rate: 0 escaped blockers** (7/7 APPROVE; reviewers independently rebuilt/retested per W1-09, confirmed the 4444 coupling, and surfaced the latents above as tracked items rather than blockers).
@@ -544,7 +544,7 @@ App-side of the T0 "real-density geometry + deterministic camera" milestone. Sel
 
 ## CL-1 — tidy false-green hardening (D2-01) + pico-prof-tidy CI job — 2026-06-04 (branch `cleanup/tidy-gate`)
 
-Pre-T5 CI/build-tooling cleanup. Two deliverables, all four owned files (`Makefile`, `cmake/StaticAnalysis.cmake`, `tools/ci_main.sh`, `.github/workflows/ci.yml` + `CMakePresets.json`) — no contention.
+Pre-T5 CI/build-tooling cleanup. Two deliverables; owned files actually changed: `Makefile`, `tools/ci_main.sh`, `.github/workflows/ci.yml`, `CMakePresets.json` (`cmake/StaticAnalysis.cmake` was inspected — the `tidy` target was already structurally sound — but NOT changed).
 
 **A — D2-01 `make tidy` false-green.** Investigated the chain: the `tidy` custom target (StaticAnalysis.cmake) runs `clang-tidy --warnings-as-errors=*`, so the command itself exits nonzero on a finding; `add_custom_target` propagates that. The Makefile `tidy`/`tidy-pico` recipes are MULTI-LINE with no `.ONESHELL`, so each line is its own shell and the FINAL (tidy) line's exit is the recipe's exit — structurally sound, but the build line could mask the tidy exit if these were ever collapsed to one shell. Hardened: documented the no-`.ONESHELL` contract on both recipes (Makefile). **Executable guard (closed-loop):** rewrote the `ci_main.sh` tidy block to assert the house doctrine EXPLICITLY — capture the tidy command's OWN exit via `PIPESTATUS[0]` (pipefail temporarily off so `$?` reflects clang-tidy, not `tee`) AND `grep -c ': error:' == 0` on the FINISHED log; fail if EITHER trips. Belt-and-braces: the exit catches a real failure, the grep catches a false-green exit. **Verified by injecting a trivial finding** (a lowercase `1.0f` → `readability-uppercase-literal-suffix`) into `src/fixed/fixed.cc`: `make tidy` exited 2 (propagated through every gmake layer up to the top Makefile) AND the log carried exactly 1 `: error:` line — guard caught it on BOTH signals; canary reverted, tree clean.
 
