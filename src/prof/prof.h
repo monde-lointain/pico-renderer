@@ -49,9 +49,16 @@ enum ProfAnchor {
   PROF_RASTER_DISPATCH,  // sched_rasterize wall span incl. core join (coarse)
   PROF_PRESENT,          // plat_present scanout/upload (coarse)
   PROF_RASTER_TILE,      // raster_tile whole tile (both cores, coarse)
-  PROF_SWEEP_OPAQUE,  // raster sweep 1 — opaque (both cores, COARSE: >67ms)
-  PROF_SWEEP_XLU,     // raster sweep 2 — translucent (both cores, FINE)
-  PROF_AA_RESOLVE,    // aa_resolve_tile (both cores, FINE)
+  PROF_SWEEP_OPAQUE,     // raster sweep 1 — opaque (both cores, COARSE: >67ms)
+  PROF_SWEEP_XLU,        // raster sweep 2 — translucent (both cores, COARSE: a
+                         // tree-heavy tile's XLU fill exceeds SysTick's ~67ms)
+  PROF_AA_RESOLVE,       // aa_resolve_tile (both cores, FINE)
+  // Opaque-sweep FINE sub-anchors (SysTick) — per-TRIANGLE spans nested inside
+  // the COARSE PROF_SWEEP_OPAQUE: setup (tri_setup) vs fill (raster_one). A
+  // single triangle's setup/fill is << SysTick's ~67ms span, so these never
+  // wrap (verified via the wrap tripwire) — unlike the whole-sweep parent.
+  PROF_OPAQUE_SETUP,  // opaque sweep: per-tri tri_setup (FINE)
+  PROF_OPAQUE_FILL,   // opaque sweep: per-tri raster_one inner loop (FINE)
   PROF_ANCHOR_COUNT
 };
 
@@ -87,6 +94,35 @@ struct ProfileState {
 
 extern struct ProfileState g_prof[PROF_NUM_CORES];
 
+// Opaque-sweep filled-pixel counter (per-core, zeroed each frame in
+// prof_frame_begin). raster_one increments its core's slot once per pixel that
+// passes the inside test (i.e. entered the heavy per-pixel body). The report
+// divides PROF_OPAQUE_FILL's summed inclusive ns by the summed pixel count to
+// yield ns/pixel — the direct cyc/pixel correlation vs Abrash's texture loops.
+// Plain per-core slot: each core writes only its own index (no atomics), and
+// the call-site += runs once per triangle (negligible), not per pixel.
+extern uint32_t g_prof_opaque_px[PROF_NUM_CORES];
+
+// XLU-sweep inside-pixel counter (per-core, zeroed each frame). raster_one_xlu
+// increments its core's slot per inside pixel — same denominator as
+// g_prof_opaque_px, so XLU ns/px is directly comparable to opaque ns/px.
+extern uint32_t g_prof_xlu_px[PROF_NUM_CORES];
+
+// T5 overdraw probe (per-core, zeroed each frame). Sizes the two optimization
+// gates BEFORE we build them:
+//   g_prof_opaque_zrej — opaque fragments that shaded fully then LOST the
+//   z-test
+//     (the work Q3's z-test-first elides). Equals Q3's payoff.
+//   g_prof_xlu_frags / _distinct / _ge2 — z-passing XLU fragments / distinct
+//     pixels touched (0->1) / pixels reaching depth>=2 (1->2),
+//     transition-counted against a raster.cc-local per-tile depth array. mean
+//     XLU overdraw = frags/distinct; >>1 means L6's front-to-back early-out has
+//     killable overdraw to recover, ~1 means it does not (ship L5/cap only).
+extern uint32_t g_prof_opaque_zrej[PROF_NUM_CORES];
+extern uint32_t g_prof_xlu_frags[PROF_NUM_CORES];
+extern uint32_t g_prof_xlu_distinct[PROF_NUM_CORES];
+extern uint32_t g_prof_xlu_ge2[PROF_NUM_CORES];
+
 // --- platform-split timer + core primitives (prof_pico.cc / prof_host.cc) ---
 // Hot ones are __not_in_flash_func on device (the renderer hot path is entirely
 // flash-resident and the XIP code-cache is only 16KB — un-SRAM'd timer reads
@@ -104,6 +140,24 @@ void prof_frame_begin(void);  // core0: zero all cores' anchors + reset parents
 void prof_frame_end(uint32_t frame,
                     uint32_t frame_ms);  // accumulate + snapshot
 void prof_report_final(void);  // final averaged block (call at bounded exit)
+
+// REORDERING — verified, no barrier needed (see the pico-prof disassembly).
+// The timer reads (prof_fine_read / prof_*_elapsed_ns) are CROSS-TU calls
+// through RAM veneers with NO LTO/IPO in any preset, so the compiler treats
+// each as an opaque call that may touch escaped memory — a HARD reordering
+// barrier. arm-none-eabi-objdump of raster_tile_noclear confirms the timed work
+// sits strictly between the start and end reads (per block): SETUP brackets the
+// tri_setup call; FILL brackets the inlined raster_one body (tex_sample /
+// shade_pixel / the UV+inv_w lmul/ldivmod) — nothing hoisted before the start
+// read or sunk after the end read.
+// A `__asm__ volatile("" ::: "memory")` clobber was TRIED as belt-and-braces
+// and REJECTED: it forced these ProfileBlock members to the stack and turned
+// the compile-time-constant `flavor` into a runtime fine/coarse branch in the
+// dtor — i.e. it made the profiler's OWN per-block dtor heavier, adding
+// measurement perturbation (the cardinal profiler sin) for a future-LTO case
+// that no preset builds. If LTO/IPO is ever enabled, re-verify this disasm and,
+// only if the bracket breaks, add a TARGETED fence around the read (not a full
+// clobber).
 
 // The one ctor/dtor (user-sanctioned). ctor: save parent, snapshot the anchor's
 // old inclusive, become the parent, read the start timer. dtor: compute elapsed

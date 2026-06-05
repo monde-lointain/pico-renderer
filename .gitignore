@@ -3,6 +3,7 @@
 *.uf2
 *.elf
 *.bin
+*.log
 compile_commands.json
 
 # Swap
