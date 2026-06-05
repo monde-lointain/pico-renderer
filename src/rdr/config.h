@@ -23,10 +23,20 @@
 //      docs/superpowers/specs/hardware-measurements.md). Sized to ~3000-tri. --
 // T0: dropped 3000->2400. Post-G1 vertex sharing makes peak pool occupancy
 // ~scene-vert-count, not tris*3. Measured peak over the full scripted loop at
-// real density (1024 terrain + 252 tree tris) = 1827 tverts (PeakTvert probe);
-// 2400 = ~31% headroom over the worst-framing peak (TVtx 20 B -> ~47 KB pool).
-#define RDR_MAX_TVERTS 2400  // transformed-vertex pool (20 B each)
+// real density (1024 terrain + 252 tree tris) = 1827 tverts (PeakTvert probe).
+// T5 SRAM reclaim: 2400->2048 (12% headroom over the 1827 scripted peak) frees
+// ~6.9 KB toward the L6 XLU front-to-back accumulators. Overflow drops-with-
+// count (graceful, never corrupts); PeakTvert guard keeps the cap above peak.
+// NOTE free-fly (BTN_A) framing is unmeasured — re-check the probe if it ships.
+#define RDR_MAX_TVERTS 2048  // transformed-vertex pool (20 B each)
 #define RDR_MAX_TRIS 3000    // bin triangle cap (drop-with-count on overflow)
-#define RDR_CMD_ARENA_BYTES (16 * 1024)
+// T5 SRAM reclaim: the per-frame scratch arena is VESTIGIAL — arena_alloc() is
+// called nowhere in src/ (only its own unit test); the Wave-E variable bins
+// moved to the fixed Frame.bin_pool/bin_jobs arrays, leaving this 16 KB buffer
+// dead (still init'd+reset each frame, never allocated from). Shrunk 16
+// KiB->256 B (~15.7 KB reclaimed toward L6); kept nonzero so the
+// arena_init/reset call sites stay valid and any future transient alloc has a
+// home.
+#define RDR_CMD_ARENA_BYTES 256
 
 #endif  // RDR_CONFIG_H
