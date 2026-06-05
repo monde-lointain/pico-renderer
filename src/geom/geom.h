@@ -206,4 +206,18 @@ uint16_t geom_material_intern(struct Frame* f, const struct RenderState* rs);
 // geom_material_reset.
 uint32_t geom_material_overflow_count(void);
 
+// Count of interned materials whose texture(s) failed tex_validate this frame
+// (R.1 handoff wiring, CL-6). geom_material_intern calls tex_validate(&rs->tex)
+// (and, for cycle==COMBINE_TWO_CYCLE, tex_validate(&rs->tex1)) on each NEW
+// distinct entry; a non-RDR_OK descriptor (non-pow2 WRAP/MIRROR, bilinear-on-
+// CI, CI-without-TLUT, unknown format) is DISABLED IN PLACE — its TexDesc is
+// cleared (data/w/h := 0) so raster's existing "valid texture?" branch
+// (rs_has_texture / rs_two_cycle) falls to the flat path and NEVER samples an
+// invalid texture — and this counter is bumped so the drop is observable, never
+// silent. A material whose textures are all valid (or absent) is interned
+// verbatim and does NOT bump this. Drop-with-count, golden-neutral (every
+// shipping demo material is valid). Reset by geom_material_reset;
+// debug-surfaced like the overflow count.
+uint32_t geom_material_invalid_count(void);
+
 #endif  // RDR_GEOM_H

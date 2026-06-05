@@ -12,6 +12,7 @@
 #include "oracle.h"
 #include "rdr/config.h"
 #include "rdr/frame.h"  // struct Frame + RDR_MAX_MATERIALS (material interning)
+#include "shade/shade.h"  // COMBINE_TWO_CYCLE (CL-6 2-cycle intern test)
 
 // ---- helpers ---------------------------------------------------------------
 static fx16_16 fx(double v) { return (fx16_16)lrint(v * 65536.0); }
@@ -550,6 +551,111 @@ TEST(GeomMaterial, OverflowClampsAndCounts) {
   uint16_t const pid = geom_material_intern(&f, &present);
   EXPECT_EQ(pid, 0U);
   EXPECT_EQ(geom_material_overflow_count(), 1U);  // unchanged
+}
+
+// ---- CL-6: tex_validate wired at material intern -------------------------
+// A valid POINT-filtered pow2 RGBA565 texture descriptor (passes tex_validate).
+// CLAMP+CLAMP exempts the pow2 axis check, but we also use a pow2 dim so the
+// helper is unambiguous for both WRAP and CLAMP callers.
+static struct TexDesc mk_valid_tex(void) {
+  static const uint8_t texels[64 * 64 * 2] = {0};  // 64x64 RGBA565 stand-in
+  struct TexDesc t;
+  memset(&t, 0, sizeof t);
+  t.data = texels;
+  t.w = 64;  // pow2
+  t.h = 64;  // pow2
+  t.format = (uint8_t)TEXFMT_RGBA565;
+  t.wrap_s = (uint8_t)WRAP_REPEAT;
+  t.wrap_t = (uint8_t)WRAP_REPEAT;
+  t.filter = (uint8_t)FILTER_POINT;
+  t.mip_levels = 1;
+  t.tlut = 0;
+  return t;
+}
+
+// An INVALID texture: non-pow2 dim on a masking (WRAP_REPEAT) axis -> the
+// sampler would mask-wrap a non-pow2 dim (corrupt + +47 cyc/px on-device);
+// tex_validate returns RDR_EINVAL (CL-5 pow2 guard).
+static struct TexDesc mk_invalid_tex(void) {
+  static const uint8_t texels[48 * 48 * 2] = {0};  // 48 is NOT pow2
+  struct TexDesc t = mk_valid_tex();
+  t.data = texels;
+  t.w = 48;  // non-pow2 on a WRAP_REPEAT axis -> RDR_EINVAL
+  t.h = 48;
+  return t;
+}
+
+// Invalid base texture at intern -> texturing DISABLED in place (tex desc
+// cleared so raster's rs_has_texture falls to the flat path) AND the invalid
+// counter is bumped. The rest of the material (combiner/zmode/etc.) survives,
+// and the material is still interned (id 0) so its triangles still draw flat.
+TEST(GeomMaterial, InvalidTextureDisablesTexturingAndCounts) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState rs = mk_rstate(7);
+  rs.tex = mk_invalid_tex();
+  uint16_t const id = geom_material_intern(&f, &rs);
+
+  EXPECT_EQ(id, 0U);
+  EXPECT_EQ(f.rstate_count, 1U);  // still interned (draws flat, not dropped)
+  // Texturing disabled in place: the stored desc is cleared so the existing
+  // raster "valid texture?" branch (tex.data && tex.w && tex.h) is false.
+  EXPECT_EQ(f.rstate_table[0].tex.data, (const void*)0);
+  EXPECT_EQ(f.rstate_table[0].tex.w, 0U);
+  EXPECT_EQ(f.rstate_table[0].tex.h, 0U);
+  // The drop is observable, never silent.
+  EXPECT_EQ(geom_material_invalid_count(), 1U);
+  // The non-texture state survived (only the bad tex was cleared).
+  EXPECT_EQ(f.rstate_table[0].combiner.mode, rs.combiner.mode);
+  EXPECT_EQ(f.rstate_table[0].prim_color, rs.prim_color);
+}
+
+// A VALID textured material is interned VERBATIM: texturing intact, invalid
+// counter stays zero (golden-neutral path — every shipping material is valid).
+TEST(GeomMaterial, ValidTextureInternedUnchangedNoCount) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState rs = mk_rstate(8);
+  rs.tex = mk_valid_tex();
+  uint16_t const id = geom_material_intern(&f, &rs);
+
+  EXPECT_EQ(id, 0U);
+  EXPECT_EQ(f.rstate_count, 1U);
+  // Texturing intact: the valid descriptor survives verbatim.
+  EXPECT_EQ(f.rstate_table[0].tex.data, rs.tex.data);
+  EXPECT_EQ(f.rstate_table[0].tex.w, rs.tex.w);
+  EXPECT_EQ(f.rstate_table[0].tex.h, rs.tex.h);
+  EXPECT_EQ(geom_material_invalid_count(), 0U);
+  // Whole material stored verbatim (no clearing of any field).
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  EXPECT_EQ(memcmp(&f.rstate_table[0], &rs, sizeof rs), 0);
+}
+
+// A VALID 2-cycle material (cycle==TWO, both tex and tex1 valid) interns clean:
+// neither texture cleared, invalid counter zero. This exercises the tex1 branch
+// on the success path (golden-neutral; the demo detail material is like this).
+TEST(GeomMaterial, ValidTwoCycleWithTex1InternsClean) {
+  static struct Frame f;
+  memset(&f, 0, sizeof f);
+  geom_material_reset(&f);
+
+  struct RenderState rs = mk_rstate(9);
+  rs.tex = mk_valid_tex();
+  rs.tex1 = mk_valid_tex();
+  rs.cycle = (uint8_t)COMBINE_TWO_CYCLE;
+  uint16_t const id = geom_material_intern(&f, &rs);
+
+  EXPECT_EQ(id, 0U);
+  EXPECT_EQ(f.rstate_count, 1U);
+  EXPECT_EQ(geom_material_invalid_count(), 0U);
+  EXPECT_EQ(f.rstate_table[0].tex.data, rs.tex.data);
+  EXPECT_EQ(f.rstate_table[0].tex1.data, rs.tex1.data);
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  EXPECT_EQ(memcmp(&f.rstate_table[0], &rs, sizeof rs), 0);
 }
 
 // ---- G1: transform-once + share tests (geom-share barrier) ------------------
