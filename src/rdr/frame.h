@@ -123,6 +123,27 @@ struct Frame {
   // resolve (the 565 + per-tile-coverage build, config.h). Untouched until R.3
   // lands — like TVtx.fog, defined where born so there are no stray bytes.
   uint8_t cov[RDR_NUM_RASTER_WORKERS][RDR_TILE_W * RDR_TILE_H];
+
+  // L6 CONTRACT-BARRIER NOTE (flagged for the Lead — Frame layout UNCHANGED):
+  // L6 (XLU front-to-back premultiplied UNDER + saturation early-out) needs a
+  // per-worker per-tile accumulator pair — premultiplied color (565) + 8-bit
+  // accumulated alpha — exactly parallel to the per-worker zbuf/cov above. The
+  // spec asked for these as Frame members (C_acc/acc_alpha) plumbed through
+  // raster_tile/raster_tile_noclear like zbuf/cov. That plumbing is BLOCKED for
+  // the L6 stream: raster_tile's parameter list is Q1-owned (the
+  // __not_in_flash_func wrap) and the sole call site (src/sched/drain.h) is not
+  // in the L6 lane's grant — adding parameters/members can't be reached. Since
+  // the accumulators are PURE within-tile scratch (cleared, filled, consumed
+  // entirely inside ONE raster_tile_noclear call; never read across calls), L6
+  // stores them as file-scope-static-per-worker arrays in src/raster/raster.cc
+  // (g_xlu_c_acc / g_xlu_acc_alpha) — the same encapsulation pattern as the
+  // PROFILER overdraw probe there, indexed by the runtime core id, preserving
+  // dual==serial identically. SRAM cost is the SAME wherever it lives: C_acc =
+  // NW * 3600 * 2 B = 14.4 KB and acc_alpha = NW * 3600 * 1 B = 7.2 KB (NW =
+  // RDR_NUM_RASTER_WORKERS, 3600 = RDR_TILE_W*RDR_TILE_H), ~21.6 KB total. 565
+  // is mandatory (RGB888 at 28.8 KB won't fit). If the Lead prefers a Frame
+  // member, it is a 2-line signature change + the drain.h call site, reconciled
+  // at the barrier merge after Q1 lands.
 };
 
 #endif  // RDR_FRAME_H

@@ -1,8 +1,10 @@
 // raster.cc — half-space edge-function rasterizer. Per-material: flat-fill fast
 // path (BIT-IDENTICAL to B.1-gamma) OR textured + Gouraud + combiner path
 // (R.1), then a two-pass split (R.2): an OPAQUE sweep (sweep 1, unchanged from
-// R.1) followed by a back-to-front-sorted TRANSLUCENT sweep (sweep 2, z-test
-// only + texel-alpha alpha-over). Stream B.1-gamma + R.1 + R.2. Orthodox C++:
+// R.1) followed by a front-to-back-sorted TRANSLUCENT sweep (sweep 2, T5/L6:
+// z-test only, premultiplied-UNDER accumulation + saturation early-out, then a
+// per-tile composite that folds the opaque terrain under). Stream B.1-gamma +
+// R.1 + R.2 + T5/L6. Orthodox C++:
 // POD + free functions, C headers, C-style casts, no STL/auto/lambda/templates/
 // exceptions. See raster.h for contract.
 #include "raster/raster.h"
@@ -10,8 +12,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "aa/aa.h"            // AA_COV_FULL, aa_enabled, aa_resolve_tile
-#include "blend/blend.h"      // blend_pixel_alpha (XLU texel-alpha alpha-over)
+#include "aa/aa.h"        // AA_COV_FULL, aa_enabled, aa_resolve_tile
+#include "blend/blend.h"  // blend_premul_accumulate/_resolve (XLU UNDER), fog_lerp
 #include "gfx/framebuffer.h"  // rgb565()
 #include "prof/prof.h"  // T5: PROF_RASTER_TILE + FINE sweep blocks (no-op when off)
 #include "rdr/config.h"
@@ -172,6 +174,40 @@ static uint32_t s_xlu_dropped = 0;
 // ~7.2KB, pico-prof build ONLY (PROFILER=0 erases it -> golden bit-identical).
 static uint8_t g_prof_xlu_depth[PROF_NUM_CORES][RDR_TILE_W * RDR_TILE_H];
 #endif
+
+// L6 FRONT-TO-BACK XLU ACCUMULATORS (the overdraw lever) ---------------------
+// Per-tile premultiplied-UNDER accumulation scratch, ONE independent slice per
+// raster worker (RASTER_NUM_WORKERS, == frame.h RDR_NUM_RASTER_WORKERS). The
+// front-to-back sweep clears these to zero at sweep-2 start, accumulates each
+// XLU fragment in, then the final composite folds terrain under and writes fb.
+//
+// CONTRACT-BARRIER NOTE (frame.h, flagged for the Lead): the spec called for
+// these as `struct Frame` members (C_acc/acc_alpha) plumbed through
+// raster_tile/raster_tile_noclear like zbuf/cov. That plumbing is BLOCKED for
+// this stream: raster_tile's parameter list is Q1-owned (the
+// __not_in_flash_func wrap) and the one call site (src/sched/drain.h) is not in
+// this lane's grant — so a Frame member cannot be reached without edits this
+// stream may not make. The accumulators are PURE within-tile scratch (cleared,
+// filled, and consumed entirely inside ONE raster_tile_noclear call; never read
+// across calls), so file-scope-static-per-worker storage is the exact same
+// encapsulation pattern as g_prof_xlu_depth above and the per-worker zbuf/cov
+// in Frame — and it preserves the dual==serial invariant identically (each
+// worker writes only its OWN slice, selected by the `worker` id THREADED into
+// raster_tile/raster_tile_noclear — exactly how zbuf[worker]/cov[worker] are
+// selected by sched_drain_tile, NOT a separate get_core_num() mechanism). The
+// SRAM cost is the SAME wherever it lives; documenting it here (and in
+// frame.h's budget comment) gives the Lead the contract delta without the
+// un-editable plumbing. If the Lead prefers a Frame member, it's a 2-line
+// signature change
+// + the drain.h call site, reconciled at the barrier merge after Q1 lands.
+//
+// SIZES: C_acc 565 = RASTER_NUM_WORKERS * 3600 * 2 B = 14.4 KB; acc_alpha =
+// NW * 3600 * 1 B = 7.2 KB. Total ~21.6 KB on device. 565 (not 888) is
+// MANDATORY for the SRAM budget. RASTER_NUM_WORKERS (raster.h) is the
+// build-wide raster fan-out; src/sched/drain.h static_asserts it == frame.h
+// RDR_NUM_RASTER_WORKERS so the threaded `worker` id indexes both alike.
+static uint16_t g_xlu_c_acc[RASTER_NUM_WORKERS][RDR_TILE_W * RDR_TILE_H];
+static uint8_t g_xlu_acc_alpha[RASTER_NUM_WORKERS][RDR_TILE_W * RDR_TILE_H];
 
 // Edge function in Q12.4 integer space: signed area of (a->b) x (a->p). > 0
 // means p is to the left of directed edge a->b (screen y-down). Coords are
@@ -674,15 +710,21 @@ static uint32_t raster_one(const struct TriSetup* t,
 #endif
 }
 
-// Rasterize ONE already-setup TRANSLUCENT (XLU) triangle (R.2, sweep 2). Shares
-// the opaque path's coverage + perspective-UV + Gouraud + combiner, but the
-// fragment store differs in TWO ways:
-//   - z-TEST only, NO z-write (so a later, FARTHER XLU fragment is not blocked
-//     by an earlier nearer one — the back-to-front sort owns ordering, not the
-//     depth buffer);
-//   - the store is texel-alpha alpha-over: fb = blend_pixel_alpha(BLEND_ALPHA,
-//     combiner_out, texel_alpha, fb) where texel_alpha = the sampled texel's
-//     own alpha (rgba[3]) — P3-3: XLU blends on TEXEL0 alpha, NOT coverage.
+// Rasterize ONE already-setup TRANSLUCENT (XLU) triangle (L6, sweep 2). Shares
+// the opaque path's coverage + perspective-UV + Gouraud + combiner + fog, but
+// the fragment store is the L6 FRONT-TO-BACK PREMULTIPLIED UNDER accumulate:
+//   - z-TEST only, NO z-write (a farther XLU fragment is not blocked by a
+//     nearer one — the FRONT-TO-BACK sort + the accumulator own ordering, not
+//     the depth buffer);
+//   - SATURATION EARLY-OUT: if this pixel's accumulated alpha already reached
+//     RASTER_XLU_SAT, skip the fragment entirely (this is the overdraw win —
+//     farther fragments contribute ~0 through the residual transmittance);
+//   - otherwise accumulate the FOGGED combiner color premultiplied by the
+//     effective contribution alpha into the per-worker per-tile accumulator
+//     (g_xlu_c_acc / g_xlu_acc_alpha) via blend_premul_accumulate. NO fb write
+//     here (the final composite pass folds terrain under and writes fb); NO cov
+//     write here (the composite pass stamps AA_COV_FULL on composited pixels,
+//     preserving the R.3-AA "AA ignores XLU" behavior exactly).
 // XLU materials are ALWAYS textured here (the flat fast path is opaque-only and
 // stays in sweep 1); a non-textured XLU material would write nothing, so we
 // gate on a valid texture and skip otherwise. `rs->alpha_cmp` is honored
@@ -691,12 +733,18 @@ static uint32_t raster_one(const struct TriSetup* t,
 // ring.
 // `zbuf` is const here: the XLU sweep z-TESTS but never WRITES depth (the no-
 // z-write invariant, enforced at the type level — a write would not compile).
-// Returns inside-pixel count when PROFILER is on (mirrors raster_one — same
-// ns/px denominator), 0 otherwise (production path byte-for-byte unchanged).
+// L6 drops the `fb`/`cov` parameters this function carried under R.2: the
+// per-fragment path no longer touches the framebuffer or coverage — it writes
+// only the accumulator, and the composite pass in raster_tile_noclear owns the
+// single fb write + cov stamp. `c_acc`/`acc_alpha` are this worker's already-
+// sliced premultiplied-UNDER accumulator (the caller selected the slice via the
+// threaded `worker` id and cleared it at sweep-2 start); this tri accumulates
+// front-to-back into it. Returns inside-pixel count when PROFILER is on
+// (mirrors raster_one — same ns/px denominator), 0 otherwise.
 static uint32_t raster_one_xlu(const struct TriSetup* t,
                                const struct RenderState* rs, int tile_px_x0,
-                               int tile_px_y0, uint16_t* fb,
-                               const uint16_t* zbuf, uint8_t* cov) {
+                               int tile_px_y0, const uint16_t* zbuf,
+                               uint16_t* c_acc, uint8_t* acc_alpha) {
   int const textured = rs_has_texture(rs);
   if (!textured) {
     return 0;  // XLU without a texture contributes nothing (flat is opaque).
@@ -815,6 +863,18 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
       }
 #endif
 
+      // L6 SATURATION EARLY-OUT (the overdraw win): if this pixel's accumulated
+      // alpha already reached RASTER_XLU_SAT, every FARTHER fragment (we are
+      // front-to-back) contributes ~0 through the residual transmittance — skip
+      // ALL of its shade/texture/combiner/fog work. Placed AFTER the profiler
+      // probe so the probe still reports the true (pre-early-out) overdraw, and
+      // BEFORE the expensive shade so the skip is maximally cheap. The compare
+      // is >= against a uint8 accumulated alpha, so RASTER_XLU_SAT==256 (> any
+      // uint8) never triggers (pure-reorder, for re-running the A/B).
+      if ((uint32_t)acc_alpha[zi] >= (uint32_t)RASTER_XLU_SAT) {
+        continue;
+      }
+
       // Perspective-correct UV (same num/area2 form as the opaque path).
       int64_t const num_u = ((int64_t)w0 * t->u_iw0) +
                             ((int64_t)w1 * t->u_iw1) + ((int64_t)w2 * t->u_iw2);
@@ -857,25 +917,22 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
       if (!keep) {
         continue;  // forward-compat combiner alpha-compare.
       }
-      // R.3 FOG (post-combiner, BEFORE the alpha-over): fog the combiner color
+      // R.3 FOG (post-combiner, BEFORE the premultiply): fog the combiner color
       // toward rstate.fog.color by the affine per-pixel fog factor, then
-      // composite the fogged color over the framebuffer by its texel alpha
-      // (faithful: a distant translucent fragment fogs, then blends). Affine
+      // accumulate the FOGGED color premultiplied by its texel alpha (faithful:
+      // a distant translucent fragment fogs first, then contributes). Affine
       // interp (N64 per-vertex fog), same path as the opaque sweep.
       if (rs->fog.enabled) {
         uint8_t const fogf = gouraud_chan(w0, w1, w2, (int)t->fog0,
                                           (int)t->fog1, (int)t->fog2, t->area2);
         combined = fog_lerp(combined, rs->fog.color, fogf);
       }
-      // Texel-alpha alpha-over the current framebuffer pixel. NO z-write.
-      int const fbi = (sy * RDR_SCREEN_W) + sx;
-      fb[fbi] = blend_pixel_alpha(BLEND_ALPHA, combined, rgba[3], fb[fbi]);
-      // R.3-AA: AA ignores translucent geometry (plan v1) -> stamp FULL
-      // coverage so the resolve treats a blended XLU pixel as interior (no
-      // edge re-blend on top of the alpha-over). Skipped when AA is off.
-      if (cov != 0) {
-        cov[(tile_y * RDR_TILE_W) + tile_x] = AA_COV_FULL;
-      }
+      // L6 FRONT-TO-BACK PREMULTIPLIED UNDER: accumulate the fogged combiner
+      // color (straight) by its TEXEL0 alpha (rgba[3]) into this worker's
+      // per-tile accumulator. NO fb write (the composite pass folds terrain
+      // under and writes fb) and NO cov stamp here (the composite pass stamps
+      // AA_COV_FULL on composited pixels, preserving "AA ignores XLU" exactly).
+      blend_premul_accumulate(&c_acc[zi], &acc_alpha[zi], combined, rgba[3]);
     }
   }
 #if PROFILER
@@ -885,23 +942,27 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
 #endif
 }
 
-// Per-tri back-to-front depth key: the sum of the 3 verts' inv_w (ASCENDING
-// inv_w == farthest first). int64 because the sum of three Q16.16 values can
-// exceed int32. inv_w is winding-swap-invariant under sum, so the PRE-setup
-// verts give the same key as the post-setup ones.
+// Per-tri depth key: the sum of the 3 verts' inv_w (LARGER inv_w == NEARER).
+// int64 because the sum of three Q16.16 values can exceed int32. inv_w is
+// winding-swap-invariant under sum, so the PRE-setup verts give the same key as
+// the post-setup ones.
 static int64_t xlu_depth_key(const struct TVtx* pool,
                              const struct TriRef* ref) {
   return (int64_t)pool[ref->v0].inv_w + (int64_t)pool[ref->v1].inv_w +
          (int64_t)pool[ref->v2].inv_w;
 }
 
-// STABLE insertion sort of the gathered XLU bin-index array `idx[0..n)`
-// ascending by depth key (farthest first). Stability is load-bearing:
-// equal-depth tris keep their GATHER order (== bin order, since gather is in
-// bin order) — exactly the deterministic tie-break the dual==serial
-// bit-identical invariant relies on. (std::stable_sort/qsort-with-index would
-// do the same; a hand-written insertion sort keeps it Orthodox,
-// allocation-free, and avoids the int64-key comparator-return overflow trap. n
+// STABLE insertion sort of the gathered XLU bin-index array `idx[0..n)` by
+// depth key. L6: sorted FRONT-TO-BACK = DESCENDING inv_w (nearest first), the
+// reverse of R.2's back-to-front ascending order — front-to-back is what lets
+// the premultiplied-UNDER accumulation early-out once a pixel's alpha
+// saturates. Stability is load-bearing and PRESERVED: the shift condition is
+// strict (<), so equal-key tris keep their GATHER order (== bin order, since
+// gather is in bin order) — exactly the deterministic tie-break the
+// dual==serial bit-identical invariant relies on.
+// (std::stable_sort/qsort-with-index would do the same; a hand-written
+// insertion sort keeps it Orthodox, allocation-free, and avoids the int64-key
+// comparator-return overflow trap. n
 // <= RASTER_XLU_TILE_CAP=256, so the O(n^2) worst case is bounded and tiny vs
 // the per-pixel raster cost.)
 static void xlu_sort_stable(uint16_t* idx, uint32_t n, const struct TVtx* pool,
@@ -910,9 +971,10 @@ static void xlu_sort_stable(uint16_t* idx, uint32_t n, const struct TVtx* pool,
     uint16_t const cur = idx[i];
     int64_t const cur_key = xlu_depth_key(pool, &bin->refs[cur]);
     uint32_t j = i;
-    // Shift strictly-greater-key elements right; STOP on >= so equal keys keep
-    // their earlier (smaller-index) position -> stable.
-    while (j > 0 && xlu_depth_key(pool, &bin->refs[idx[j - 1]]) > cur_key) {
+    // DESCENDING (nearest first): shift strictly-SMALLER-key elements right;
+    // STOP on <= so equal keys keep their earlier (smaller-index, == gather/bin
+    // order) position -> stable. Flipping > to < here reverses R.2's order.
+    while (j > 0 && xlu_depth_key(pool, &bin->refs[idx[j - 1]]) < cur_key) {
       idx[j] = idx[j - 1];
       --j;
     }
@@ -922,7 +984,8 @@ static void xlu_sort_stable(uint16_t* idx, uint32_t n, const struct TVtx* pool,
 
 void __not_in_flash_func(raster_tile_noclear)(
     int tile, const struct TileBin* bin, const struct TVtx* pool, uint16_t* fb,
-    uint16_t* zbuf, const struct RenderState* rstate_table, uint8_t* cov) {
+    uint16_t* zbuf, const struct RenderState* rstate_table, uint8_t* cov,
+    int worker) {
   if (bin == 0 || pool == 0 || fb == 0 || zbuf == 0 || rstate_table == 0) {
     return;
   }
@@ -1000,11 +1063,22 @@ void __not_in_flash_func(raster_tile_noclear)(
     }
   }
 
-  // SWEEP 2 — TRANSLUCENT. STABLE-sort the gathered XLU indices BACK-TO-FRONT
-  // (ascending inv_w = farthest first); equal-depth tris keep bin order. Then
-  // composite each over the framebuffer (z-test against sweep-1 depth, NO
-  // z-write, texel-alpha alpha-over). Each tile is drawn by exactly ONE worker,
-  // so a deterministic (stable) sort makes serial == 2-worker bit-identical.
+  // SWEEP 2 — TRANSLUCENT (L6 FRONT-TO-BACK). STABLE-sort the gathered XLU
+  // indices FRONT-TO-BACK (descending inv_w = nearest first); equal-depth tris
+  // keep bin order. Each tri ACCUMULATES premultiplied UNDER into this worker's
+  // per-tile accumulator (g_xlu_c_acc/g_xlu_acc_alpha) with a saturation
+  // early-out — no fb write per fragment. Then the COMPOSITE pass folds the
+  // opaque terrain under the accumulation and writes fb once per touched pixel.
+  // Each tile is drawn by exactly ONE worker, and the worker's accumulator
+  // slice is cleared here per tile, so a deterministic (stable) sort makes
+  // serial == 2-worker bit-identical (the accumulator never leaks across tiles
+  // or workers). The slice is selected by the THREADED `worker` id (the same id
+  // that selects zbuf[worker]/cov[worker] in sched_drain_tile) — masked into
+  // [0,RASTER_NUM_WORKERS) for the static analyzer (RASTER_NUM_WORKERS is a
+  // power of two).
+  uint32_t const w_acc = (uint32_t)worker & (uint32_t)(RASTER_NUM_WORKERS - 1);
+  uint16_t* const c_acc = g_xlu_c_acc[w_acc];
+  uint8_t* const acc_alpha = g_xlu_acc_alpha[w_acc];
 #if PROFILER
   // Overdraw probe: reset THIS worker's per-pixel XLU depth for this tile,
   // OUTSIDE the timed sweep_xlu block (so the memset doesn't perturb the
@@ -1012,13 +1086,24 @@ void __not_in_flash_func(raster_tile_noclear)(
   memset(g_prof_xlu_depth[prof_core()], 0, sizeof g_prof_xlu_depth[0]);
 #endif
   {
-    // T5: sweep 2 — sort + translucent composite. COARSE (time_us_64), NOT
-    // FINE: a tree-heavy tile's XLU fill (soft billboards, heavy back-to-front
-    // overdraw) exceeds SysTick's ~67ms span — measured wrap=1 on every window
-    // when FINE, which UNDER-reported XLU and hid its true cost in the coarse
-    // raster_tile "unaccounted" remainder. Coarse, like sweep_opaque, is wrap-
-    // free and gives the real XLU magnitude for the opaque-vs-XLU comparison.
+    // T5: sweep 2 — sort + translucent accumulate + composite. COARSE
+    // (time_us_64), NOT FINE: a tree-heavy tile's XLU fill (soft billboards,
+    // heavy overdraw) exceeds SysTick's ~67ms span — measured wrap=1 on every
+    // window when FINE, which UNDER-reported XLU and hid its true cost in the
+    // coarse raster_tile "unaccounted" remainder. Coarse, like sweep_opaque, is
+    // wrap-free and gives the real XLU magnitude for the opaque-vs-XLU compare.
     PROF_BLOCK(PROF_SWEEP_XLU);
+    // L6: clear this worker's per-tile premultiplied accumulator (color 0 +
+    // alpha 0 = "nothing accumulated"). Per-tile, like the zbuf/cov clear, so
+    // the accumulator carries nothing across tiles -> dual==serial holds. Skip
+    // the clear+sweep entirely when this tile has no XLU (the common
+    // opaque-only tile stays byte-identical to pre-L6: no accumulator touched,
+    // no fb write).
+    if (xlu_n > 0) {
+      memset(c_acc, 0, (size_t)(RDR_TILE_W * RDR_TILE_H) * sizeof c_acc[0]);
+      memset(acc_alpha, 0,
+             (size_t)(RDR_TILE_W * RDR_TILE_H) * sizeof acc_alpha[0]);
+    }
     if (xlu_n > 1) {
       xlu_sort_stable(xlu_idx, xlu_n, pool, bin);
     }
@@ -1031,8 +1116,8 @@ void __not_in_flash_func(raster_tile_noclear)(
         continue;  // degenerate -> rejected, no fill
       }
       const struct RenderState* rs = &rstate_table[ref->material];
-      uint32_t const px =
-          raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
+      uint32_t const px = raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, zbuf,
+                                         c_acc, acc_alpha);
 #if PROFILER
       // Per-core XLU inside-pixel count (same denominator as opaque) — once per
       // tri, not per pixel. ns/px = coarse sweep_xlu / xlu_px (µs-granular,
@@ -1041,6 +1126,29 @@ void __not_in_flash_func(raster_tile_noclear)(
 #else
       (void)px;
 #endif
+    }
+
+    // L6 COMPOSITE PASS: fold the opaque terrain UNDER the accumulation, once
+    // per touched pixel. For each tile pixel with acc_alpha != 0:
+    //   fb = blend_premul_resolve(c_acc, acc_alpha, fb_terrain)
+    // and stamp cov = AA_COV_FULL (preserves "AA ignores XLU" — the composited
+    // pixel reads as interior in the resolve). Pixels with acc_alpha == 0 are
+    // LEFT UNTOUCHED, so an opaque-only tile is byte-identical to pre-L6 (the
+    // hard regression gate). Only runs when this tile had XLU geometry.
+    if (xlu_n > 0) {
+      for (int ty = 0; ty < RDR_TILE_H; ++ty) {
+        for (int tx = 0; tx < RDR_TILE_W; ++tx) {
+          int const zi = (ty * RDR_TILE_W) + tx;
+          if (acc_alpha[zi] == 0U) {
+            continue;  // no XLU contribution here -> leave the terrain as-is
+          }
+          int const px = ((tile_px_y0 + ty) * RDR_SCREEN_W) + (tile_px_x0 + tx);
+          fb[px] = blend_premul_resolve(c_acc[zi], acc_alpha[zi], fb[px]);
+          if (cov_active != 0) {
+            cov_active[zi] = AA_COV_FULL;
+          }
+        }
+      }
     }
   }
 }
@@ -1058,7 +1166,7 @@ void __not_in_flash_func(raster_tile)(int tile, const struct TileBin* bin,
                                       const struct TVtx* pool, uint16_t* fb,
                                       uint16_t* zbuf,
                                       const struct RenderState* rstate_table,
-                                      uint8_t* cov) {
+                                      uint8_t* cov, int worker) {
   if (zbuf == 0) {
     return;
   }
@@ -1082,7 +1190,8 @@ void __not_in_flash_func(raster_tile)(int tile, const struct TileBin* bin,
       cov_active[i] = AA_COV_FULL;
     }
   }
-  raster_tile_noclear(tile, bin, pool, fb, zbuf, rstate_table, cov_active);
+  raster_tile_noclear(tile, bin, pool, fb, zbuf, rstate_table, cov_active,
+                      worker);
   // R.3-AA: within-tile, edge-gated, border-clamped resolve. Reads only this
   // tile's pixels (no cross-tile / cross-core FB access) -> the dual-core sweep
   // stays bit-identical to serial. aa_resolve_tile no-ops if AA is off, but we

@@ -48,4 +48,40 @@ uint16_t blend_pixel_alpha(uint8_t mode, uint16_t src, uint8_t src_alpha,
 // the factor directly.
 uint16_t fog_lerp(uint16_t color, uint16_t fog_color, uint8_t factor);
 
+// L6 FRONT-TO-BACK PREMULTIPLIED UNDER (the XLU overdraw lever) ---------------
+// The translucent sweep no longer over-blends each fragment into the
+// framebuffer back-to-front. Instead it sorts FRONT-TO-BACK and ACCUMULATES a
+// premultiplied "over from front" result into a per-tile accumulator
+// (premultiplied color `c_acc` packed 565 + 8-bit accumulated alpha
+// `acc_alpha`), then folds the opaque terrain under the accumulation ONCE at
+// the end. Premultiplied UNDER lets a saturated pixel STOP compositing (the
+// caller's saturation early-out), killing the measured 6.12x XLU overdraw.
+//
+// All channel math reuses the SAME +127-then-/255 round-to-nearest form as
+// blend_over_channel (host<->device bit-identical, validated against the float
+// oracle); see blend.cc.
+
+// Accumulate one front-to-back fragment INTO the premultiplied accumulator.
+//   t  = 255 - *acc_alpha                 (remaining transmittance)
+//   ea = round(frag_alpha * t / 255)      (effective contribution alpha)
+//   *c_acc_chan += round(frag_chan * ea / 255)   (clamp 255), per channel
+//   *acc_alpha  += ea                            (clamp 255)
+// `frag565` is the straight (un-premultiplied) fragment color (the FOGGED
+// combiner output); `frag_alpha` is its 8-bit alpha (TEXEL0 alpha post
+// alpha-compare). `c_acc`/`acc_alpha` are read-modify-written in place. A
+// fragment with ea==0 (acc already saturated, or zero alpha) is a no-op — but
+// the caller's early-out should skip those before calling.
+void blend_premul_accumulate(uint16_t* c_acc, uint8_t* acc_alpha,
+                             uint16_t frag565, uint8_t frag_alpha);
+
+// Fold the opaque terrain UNDER the finished premultiplied accumulation:
+//   out_chan = c_acc_chan + round((255 - acc_alpha) * terrain_chan / 255)
+// per channel (clamp 255), returning the composited RGB565 to store. This is
+// the correct front-to-back UNDER operator: terrain is scaled by the residual
+// transmittance (255-acc_alpha) and added to the already-premultiplied
+// accumulation (NOT an alpha-over of straight colors). Caller skips pixels with
+// acc_alpha==0 (leaves the framebuffer's opaque terrain byte-identical).
+uint16_t blend_premul_resolve(uint16_t c_acc, uint8_t acc_alpha,
+                              uint16_t terrain565);
+
 #endif  // RDR_BLEND_H

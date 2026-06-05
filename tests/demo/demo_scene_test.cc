@@ -978,7 +978,18 @@ TEST(TerrainSceneGuard, FbCrcStreamMatchesGolden) {
   // edges; terrain/sky/water unchanged), and the arena-bins + soft-xlu-gather
   // guards stay green — so this digest pins a VERIFIED image, not a corrupt
   // one.
-  EXPECT_EQ(digest, 0x8afa5629U)
+  // Rebaked 0x8afa5629 -> 0xcad13160 for L6 XLU front-to-back + saturation
+  // early-out. The XLU sweep now sorts FRONT-TO-BACK and accumulates
+  // premultiplied UNDER into a per-tile accumulator (color stored RGB565), then
+  // folds terrain under once at the composite — vs the old back-to-front texel-
+  // alpha over-blend. The image delta is the 565-accumulator requantization,
+  // localized to the tree foliage (A/B vs the old render: PSNR ~49-52 dB,
+  // <1% pixels changed, all at tree silhouettes; terrain/sky/water identical).
+  // The DEFAULT saturation early-out (RASTER_XLU_SAT=255) is BYTE-IDENTICAL to
+  // pure reorder (verified: same digest at SAT 255 and 256) while eliding
+  // ~22.5% of z-passing XLU fragment work. So this digest pins a VERIFIED
+  // image (the front-to-back reorder), not a corrupt one.
+  EXPECT_EQ(digest, 0xcad13160U)
       << "demo scene fb_crc stream changed — rebake if intended, else regress";
 }
 

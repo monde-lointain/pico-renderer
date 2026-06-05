@@ -121,3 +121,67 @@ uint16_t __not_in_flash_func(fog_lerp)(uint16_t color, uint16_t fog_color,
   uint8_t const ob = blend_over_channel(fb, cb, factor);
   return rgb565(orr, og, ob);
 }
+
+// L6 PREMULTIPLIED-UNDER helpers ---------------------------------------------
+// round(x * y / 255) for x,y in [0,255]: same +127-then-/255 round-to-nearest
+// as blend_over_channel's terms (host<->device bit-identical, non-negative ->
+// truncation == floor). Result is in [0,255] (x*y max 65025 -> 255 after the
+// divide). Used by both accumulate (premultiply by the effective alpha) and
+// resolve (scale terrain by the residual transmittance).
+static uint8_t mul255_round(uint8_t x, uint8_t y) {
+  uint32_t const num = ((uint32_t)x * (uint32_t)y) + 127U;
+  return (uint8_t)(num / 255U);  // non-negative -> truncates toward zero
+}
+
+// out = clamp255(acc_chan + add_chan). Premultiplied accumulation never
+// overshoots in exact arithmetic (the front-to-back UNDER weights sum to <=1),
+// but the per-fragment 565 requantization can nudge a channel +1, so clamp.
+static uint8_t add_clamp255(uint8_t acc, uint8_t add) {
+  uint32_t const sum = (uint32_t)acc + (uint32_t)add;
+  return (uint8_t)(sum > 255U ? 255U : sum);
+}
+
+void __not_in_flash_func(blend_premul_accumulate)(uint16_t* c_acc,
+                                                  uint8_t* acc_alpha,
+                                                  uint16_t frag565,
+                                                  uint8_t frag_alpha) {
+  uint8_t const t = (uint8_t)(255U - (uint32_t)*acc_alpha);  // transmittance
+  uint8_t const ea = mul255_round(frag_alpha, t);  // effective contribution
+  if (ea == 0U) {
+    return;  // no light reaches this pixel through the accumulated alpha
+  }
+  uint8_t fr;
+  uint8_t fg;
+  uint8_t fb;
+  blend_unpack565(frag565, &fr, &fg, &fb);
+  uint8_t ar;
+  uint8_t ag;
+  uint8_t ab;
+  blend_unpack565(*c_acc, &ar, &ag, &ab);
+  // Premultiply the straight fragment color by ea, add to the accumulator.
+  uint8_t const orr = add_clamp255(ar, mul255_round(fr, ea));
+  uint8_t const og = add_clamp255(ag, mul255_round(fg, ea));
+  uint8_t const ob = add_clamp255(ab, mul255_round(fb, ea));
+  *c_acc = rgb565(orr, og, ob);
+  *acc_alpha = add_clamp255(*acc_alpha, ea);
+}
+
+uint16_t __not_in_flash_func(blend_premul_resolve)(uint16_t c_acc,
+                                                   uint8_t acc_alpha,
+                                                   uint16_t terrain565) {
+  uint8_t const t = (uint8_t)(255U - (uint32_t)acc_alpha);  // residual transmit
+  uint8_t ar;
+  uint8_t ag;
+  uint8_t ab;
+  blend_unpack565(c_acc, &ar, &ag, &ab);
+  uint8_t tr;
+  uint8_t tg;
+  uint8_t tb;
+  blend_unpack565(terrain565, &tr, &tg, &tb);
+  // out = premultiplied accumulation + terrain scaled by residual
+  // transmittance.
+  uint8_t const orr = add_clamp255(ar, mul255_round(tr, t));
+  uint8_t const og = add_clamp255(ag, mul255_round(tg, t));
+  uint8_t const ob = add_clamp255(ab, mul255_round(tb, t));
+  return rgb565(orr, og, ob);
+}
