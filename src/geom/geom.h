@@ -122,6 +122,14 @@ struct GeomOut {
   struct TileBin tiles[GEOM_NUM_TILES];
   uint32_t tris_total;    // accepted triangles (placed in bins by finalize)
   uint32_t tris_dropped;  // dropped on overflow / cull / clip / near
+  // Source triangles submitted by DRAW_TRIS, BEFORE near/guard-band clip fan
+  // expansion (CL-4). Counted ONCE per source tri (every index triple a
+  // DRAW_TRIS iterates), INCLUDING ones later dropped/culled/clipped/near-
+  // rejected and ones expanded to a multi-triangle clip fan — so it is the
+  // submitted-source-poly count, distinct from tris_total (accepted POST-clip
+  // binned fan tris). Pure telemetry (read by nobody in the raster path);
+  // T5 quotes tri throughput against THIS, not the over-counting tris_total.
+  uint32_t tris_source;
   // Arena-backed variable bins (Wave-E). geom_bin_tri DEFERS: it buffers each
   // surviving tri (a TriRef) into jobs[] and tallies per-tile demand in
   // tiles[].count. geom_bin_finalize prefix-sums those demands into contiguous

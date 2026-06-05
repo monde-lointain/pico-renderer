@@ -770,6 +770,170 @@ TEST(GeomShare, OutOfRangeIndexDropped) {
   EXPECT_GE(f.geom.tris_dropped, 1U);
 }
 
+// ---- source-triangle counter (CL-4) ----------------------------------------
+// tris_source counts SUBMITTED source tris (one per DRAW_TRIS index triple,
+// BEFORE clip/cull/near), distinct from tris_total (accepted POST-clip binned
+// fan tris). Direction (a): a SINGLE guard-clipped source tri fans into >1
+// binned tri -> tris_total > tris_source (the over-count tris_source fixes).
+TEST(GeomShare, SourceTriCounterFanExpandsTotalNotSource) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  // v0,v1 on-screen; v2 far outside the guard band so guard-band clip fires and
+  // the surviving polygon fans into >= 2 binned triangles.
+  static struct Vtx verts[3];
+  verts[0] = mk_vtx(-2, -3, 10);
+  verts[1] = mk_vtx(2, 3, 10);
+  verts[2] = mk_vtx(200, 0, 10);  // way outside guard band -> clip fan
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+
+  static const uint16_t idx[3] = {0, 1, 2};
+  struct Command cmds[4];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  // Exactly ONE source tri submitted.
+  EXPECT_EQ(f.geom.tris_source, 1U);
+  // ...but the clip fan binned MORE than one tri -> tris_total over-counts the
+  // source poly. This is precisely the skew CL-4 separates out.
+  EXPECT_GT(f.geom.tris_total, 1U);
+  EXPECT_GT(f.geom.tris_total, f.geom.tris_source);
+}
+
+// Direction (b): a SOURCE tri that is dropped (near-rejected / out-of-range)
+// is counted by tris_source but NOT by tris_total -> tris_total < tris_source.
+TEST(GeomShare, SourceTriCounterCountsDroppedSourceTris) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  // v0,v1 on-screen; v2 behind the near plane (sentinel) -> whole-tri reject.
+  static struct Vtx verts[3];
+  verts[0] = mk_vtx(-2, -2, 10);
+  verts[1] = mk_vtx(2, -2, 10);
+  verts[2] = mk_vtx(0, 0, -5);  // behind near plane (clip.w <= 0)
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+
+  // Two source tris, BOTH near-rejected (each references v2). Index 9 in the
+  // second triple is also out of range, but the near-reject fires first; either
+  // way the tri is a SUBMITTED source tri that never bins.
+  static const uint16_t idx[6] = {0, 1, 2, 2, 1, 0};
+  struct Command cmds[4];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 2;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  // Both source tris submitted...
+  EXPECT_EQ(f.geom.tris_source, 2U);
+  // ...both dropped (near-reject), so NONE binned: tris_total under-counts the
+  // submitted source polys.
+  EXPECT_EQ(f.geom.tris_total, 0U);
+  EXPECT_GE(f.geom.tris_dropped, 2U);
+  EXPECT_LT(f.geom.tris_total, f.geom.tris_source);
+}
+
+// A DRAW_TRIS with no LOAD_VERTS cursor still SUBMITTED its source tris (they
+// are counted) even though none can fetch geometry -> tris_source > 0,
+// tris_total == 0.
+TEST(GeomShare, SourceTriCounterCountsNoCursorDraws) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  static const uint16_t idx[3] = {0, 1, 2};
+  struct Command cmds[3];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  // DRAW_TRIS with NO preceding LOAD_VERTS: cursor is null, nothing fetches.
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  EXPECT_EQ(f.geom.tris_source, 1U);  // the triple WAS submitted
+  EXPECT_EQ(f.geom.tris_total, 0U);   // nothing binned (no cursor)
+}
+
+// tris_source is reset per geom_run (init), so a second run does not accumulate
+// the first run's submitted count.
+TEST(GeomShare, SourceTriCounterResetsPerRun) {
+  struct Mat4fx proj;
+  struct OMat4 oproj;
+  make_proj(&proj, &oproj, 1.5, 0.5, 50.0);
+
+  static struct Frame f;
+  frame_init_for_share(&f, &proj);
+
+  static struct Vtx verts[3];
+  verts[0] = mk_vtx(-3, -3, 10);
+  verts[1] = mk_vtx(3, -3, 10);
+  verts[2] = mk_vtx(0, 3, 10);
+  for (int k = 0; k < 3; ++k) {
+    verts[k].c.rgba[3] = 255;
+  }
+  static const uint16_t idx[3] = {0, 1, 2};
+  struct Command cmds[3];
+  memset(cmds, 0, sizeof cmds);
+  int n = 0;
+  cmds[n].op = CMD_LOAD_VERTS;
+  cmds[n].u.load_verts.ptr = verts;
+  cmds[n].u.load_verts.count = 3;
+  cmds[n].u.load_verts.base = 0;
+  ++n;
+  cmds[n].op = CMD_DRAW_TRIS;
+  cmds[n].u.draw_tris.idx = idx;
+  cmds[n].u.draw_tris.tri_count = 1;
+  ++n;
+  cmds[n].op = CMD_END;
+
+  // geom_out_init zeroes tris_source; geom_run does not re-init the GeomOut, so
+  // pin reset via a fresh init between runs (mirrors the per-frame harness).
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  EXPECT_EQ(f.geom.tris_source, 1U);
+  geom_out_init(&f.geom, f.pool, RDR_MAX_TVERTS, f.bin_pool, RDR_BIN_POOL_REFS,
+                f.bin_jobs, RDR_BIN_MAX_JOBS);
+  EXPECT_EQ(f.geom.tris_source, 0U);  // init clears it
+  ASSERT_EQ(geom_run(cmds, &f), RDR_OK);
+  EXPECT_EQ(f.geom.tris_source, 1U);  // not 2U: did not accumulate
+}
+
 // End-to-end: two SET_MATERIAL blocks drawing the same geometry produce TriRefs
 // whose material ids match the interned ids (resolves the always-0
 // placeholder). Distinct states -> distinct ids on the binned refs; a repeated

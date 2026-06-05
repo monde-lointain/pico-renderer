@@ -289,6 +289,7 @@ void geom_out_init(struct GeomOut* o, struct TVtx* tverts, uint32_t tvert_cap,
   o->tvert_cap = tvert_cap;
   o->tris_total = 0;
   o->tris_dropped = 0;
+  o->tris_source = 0;
   o->jobs = jobs;
   o->jobs_count = 0;
   o->jobs_cap = jobs_cap;
@@ -565,6 +566,13 @@ static void geom_emit_tri(struct Frame* f, const struct TVtx* a,
 static void geom_draw_one(struct GeomCtx* g, uint16_t vi0, uint16_t vi1,
                           uint16_t vi2) {
   struct Frame* f = g->f;
+  // CL-4: one SOURCE triangle enters the pipeline here (this function is called
+  // exactly once per DRAW_TRIS index triple, before any clip/cull/near drop or
+  // fan expansion). Count it unconditionally — including the no-cursor /
+  // out-of-range / near-rejected / fully-clipped fates below — so tris_source
+  // is the submitted-source-poly count, distinct from the POST-clip binned
+  // tris_total. Pure telemetry: never read by the raster path (bit-identical).
+  ++f->geom.tris_source;
   if (g->vptr == 0) {
     return;  // DRAW_TRIS with no LOAD_VERTS cursor: nothing to fetch
   }
