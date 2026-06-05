@@ -8,6 +8,7 @@
 
 #include "blend/blend.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -344,9 +345,9 @@ static void premul_chain_oracle(const uint16_t* frag565, const uint8_t* frag_a,
   uint8_t tb;
   oracle_unpack565(terrain565, &tr, &tg, &tb);
   float const t = 1.0F - a_acc;
-  out_rgb[0] = (uint8_t)(cr + t * (float)tr + 0.5F);
-  out_rgb[1] = (uint8_t)(cg + t * (float)tg + 0.5F);
-  out_rgb[2] = (uint8_t)(cb + t * (float)tb + 0.5F);
+  out_rgb[0] = (uint8_t)lroundf(cr + (t * (float)tr));
+  out_rgb[1] = (uint8_t)lroundf(cg + (t * (float)tg));
+  out_rgb[2] = (uint8_t)lroundf(cb + (t * (float)tb));
 }
 
 // (a) Sweep many 1-, 2-, and 3-layer stacks over varied terrain; the integer
@@ -416,8 +417,8 @@ TEST(BlendPremul, AccumulatedAlphaMatchesFloat) {
   float trans = 1.0F;  // product of (1-ai)
   for (int i = 0; i < 4; ++i) {
     blend_premul_accumulate(&c_acc, &a_acc, 0xFFFF, seq[i]);
-    trans *= (1.0F - (float)seq[i] / 255.0F);
-    int const expect = (int)((1.0F - trans) * 255.0F + 0.5F);
+    trans *= (1.0F - ((float)seq[i] / 255.0F));
+    int const expect = (int)lroundf((1.0F - trans) * 255.0F);
     EXPECT_LE(chan_abs_diff(a_acc, (uint8_t)expect), 1)
         << "after layer " << i << " acc_alpha=" << (int)a_acc << " expect~"
         << expect;
