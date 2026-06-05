@@ -25,6 +25,7 @@
 #include "blend/blend.h"
 
 #include "gfx/framebuffer.h"
+#include "rdr/sram.h"  // __not_in_flash_func (SRAM placement; no-op on host)
 
 // Unpack RGB565 -> 8-bit channels with bit replication (matches the oracle's
 // oracle_unpack565 and the inverse of gfx/framebuffer.h rgb565()).
@@ -64,8 +65,9 @@ uint16_t blend_pixel(uint8_t mode, uint16_t src, uint16_t dst) {
   }
 }
 
-uint16_t blend_pixel_alpha(uint8_t mode, uint16_t src, uint8_t src_alpha,
-                           uint16_t dst) {
+uint16_t __not_in_flash_func(blend_pixel_alpha)(uint8_t mode, uint16_t src,
+                                                uint8_t src_alpha,
+                                                uint16_t dst) {
   if (mode == BLEND_OPAQUE) {
     (void)dst;
     (void)src_alpha;
@@ -101,7 +103,8 @@ uint16_t blend_pixel_alpha(uint8_t mode, uint16_t src, uint8_t src_alpha,
   return rgb565(orr, og, ob);
 }
 
-uint16_t fog_lerp(uint16_t color, uint16_t fog_color, uint8_t factor) {
+uint16_t __not_in_flash_func(fog_lerp)(uint16_t color, uint16_t fog_color,
+                                       uint8_t factor) {
   uint8_t cr;
   uint8_t cg;
   uint8_t cb;
