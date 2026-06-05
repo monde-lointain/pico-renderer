@@ -37,8 +37,15 @@ void tex_sample_rgba(const struct TexDesc* t, fx16_16 u, fx16_16 v, int lod,
 // Validate a TexDesc for sampling at material/sample setup. Returns RDR_OK if
 // the descriptor is sampleable as configured, else an errno-like code:
 //   RDR_EINVAL      — THREE_POINT requested on a CI4/CI8 format (palette
-//                     indices do not interpolate), an unknown format, or a CI
-//                     format with a null TLUT.
+//                     indices do not interpolate), an unknown format, a CI
+//                     format with a null TLUT, OR a non-power-of-2 dimension on
+//                     an axis whose wrap mode masks (WRAP_REPEAT/WRAP_MIRROR):
+//                     the sampler mask-wraps (coord & (dim-1)) / reflects via
+//                     log2_pow2(dim), which only behaves for pow2 dims, and a
+//                     non-pow2 fallback would cost +47 cyc/px on-device (S0).
+//                     A WRAP_CLAMP axis saturates without a mask and is EXEMPT
+//                     (any dim is accepted on a CLAMP-only axis); the check is
+//                     per-axis (wrap_s vs w, wrap_t vs h).
 // A null/zero-dim TexDesc is RDR_OK (callers gate the actual fetch on validity;
 // "no texture" is a legal render state).
 int tex_validate(const struct TexDesc* t);

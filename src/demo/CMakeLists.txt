@@ -18,7 +18,7 @@ if(PLATFORM STREQUAL "picosystem")
   add_executable(renderer_demo main.cc)
   target_link_libraries(renderer_demo PRIVATE
     Renderer::rdr Renderer::DemoScene Renderer::Aa renderer::gfx
-    renderer::platform_pico)
+    renderer::platform_pico Renderer::Prof)
   target_include_directories(renderer_demo PRIVATE ${CMAKE_SOURCE_DIR}/src)
   pico_set_linker_script(renderer_demo
     ${CMAKE_SOURCE_DIR}/src/platform/memmap_picosystem.ld)
@@ -30,6 +30,15 @@ else()
   add_executable(renderer_demo main.cc)
   target_link_libraries(renderer_demo PRIVATE
     Renderer::rdr Renderer::DemoScene Renderer::Aa renderer::gfx
-    renderer::platform_sdl project_warnings)
+    renderer::platform_sdl project_warnings Renderer::Prof)
   target_include_directories(renderer_demo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+endif()
+
+# Bounded demo frame count. 0 (default) = run forever (interactive / device
+# infinite loop). The pico-prof preset sets RENDERER_DEMO_FRAMES=480 (one
+# scripted camera cycle) so the profiler's final averaged block fires at a clean
+# exit; main.cc's #ifndef guard leaves the source default (0) when unset.
+set(RENDERER_DEMO_FRAMES 0 CACHE STRING "Bounded demo frame count (0 = run forever)")
+if(RENDERER_DEMO_FRAMES GREATER 0)
+  target_compile_definitions(renderer_demo PRIVATE DEMO_FRAMES=${RENDERER_DEMO_FRAMES})
 endif()

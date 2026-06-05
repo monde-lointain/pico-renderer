@@ -27,6 +27,17 @@
 
 #include "gfx/framebuffer.h"  // rgb565()
 
+// True iff dim is a power of two (nonzero, single bit set). The REPEAT/MIRROR
+// samplers mask-wrap (coord & (dim-1)) / reflect via log2_pow2(dim), which is
+// only correct for pow2 dims; tex_validate() rejects non-pow2 on those axes.
+static int is_pow2(uint16_t dim) { return dim != 0 && (dim & (dim - 1)) == 0; }
+
+// True iff a wrap mode masks the coordinate (so its axis dim must be pow2).
+// CLAMP saturates to [0,dim-1] (no mask) and is therefore exempt — any dim.
+static int wrap_mode_masks(uint8_t mode) {
+  return mode == WRAP_REPEAT || mode == WRAP_MIRROR;
+}
+
 // log2 of a power-of-2 dimension (mask = dim-1). dim must be >= 1.
 static int log2_pow2(uint16_t dim) {
   int bits = 0;
@@ -256,6 +267,15 @@ int tex_validate(const struct TexDesc* t) {
   if (t == (const struct TexDesc*)0 || t->data == (const void*)0 || t->w == 0 ||
       t->h == 0) {
     return RDR_OK;  // "no texture" is a legal render state; fetch gates on it.
+  }
+  // Per-axis pow2 guard: a masking wrap mode (REPEAT/MIRROR) on a non-pow2 dim
+  // silently corrupts wrapping AND costs +47 cyc/px on-device (% vs mask; S0).
+  // CLAMP saturates without a mask, so its axis is exempt (any dim accepted).
+  if (wrap_mode_masks(t->wrap_s) && !is_pow2(t->w)) {
+    return RDR_EINVAL;
+  }
+  if (wrap_mode_masks(t->wrap_t) && !is_pow2(t->h)) {
+    return RDR_EINVAL;
   }
   switch (t->format) {
     case TEXFMT_RGBA565:
