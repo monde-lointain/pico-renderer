@@ -2,10 +2,14 @@
 # adapted for this project: headers live under src/ (no include/), and pico-only and
 # generated sources are excluded since they are not in the host compile DB.
 
-# Prefer the versioned binary (CI installs clang-tidy-22; no unversioned symlink
-# is guaranteed on the runner) and keep the .clang-tidy checks consistent with
-# the clang-22 toolchain the Orthodoxy/CI jobs use.
-find_program(CLANG_TIDY_EXECUTABLE NAMES clang-tidy-22 clang-tidy)
+# Require the VERSIONED clang-tidy-22 — NEVER fall back to the unversioned
+# `clang-tidy`, which on many machines is an older toolchain (e.g. 18) whose
+# checks DIVERGE from CI's clang-tidy-22. A silent v18 local pass masked a v22
+# CI failure (the reserved-identifier gate on rdr/sram.h, 2026-06) — the local
+# gate must match CI exactly. If clang-tidy-22 is absent the `tidy` target is
+# simply not created (the host build still configures/builds/tests), and CI —
+# which installs clang-tidy-22 — remains the enforcing gate.
+find_program(CLANG_TIDY_EXECUTABLE NAMES clang-tidy-22)
 if(CLANG_TIDY_EXECUTABLE)
   # Lint ALL source we author — every renderer module + façade + demo + platform,
   # AND the tests (matching the .clang-tidy HeaderFilterRegex). Only three things are

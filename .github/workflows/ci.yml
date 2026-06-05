@@ -176,15 +176,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # arm-none-eabi toolchain + build tools. libusb/pkg-config are needed
-      # because configuring the pico preset builds picotool from source (the
-      # SDK's pico_add_extra_outputs on the exe triggers it at configure).
-      - name: Install ARM toolchain + build deps
+      - name: Setup pinned ARM GNU toolchain (15.2.rel1)
+        uses: ./.github/actions/setup-arm-toolchain
+
+      # libusb/pkg-config are needed because configuring the pico preset builds
+      # picotool from source (the SDK's pico_add_extra_outputs on the exe
+      # triggers it at configure).
+      - name: Install build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi \
-            libstdc++-arm-none-eabi-dev libstdc++-arm-none-eabi-newlib \
             cmake ninja-build git \
             libusb-1.0-0-dev pkg-config
 
@@ -252,12 +253,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ARM toolchain + clang-tidy-22
+      - name: Setup pinned ARM GNU toolchain (15.2.rel1)
+        uses: ./.github/actions/setup-arm-toolchain
+
+      - name: Install clang-tidy-22 + build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi \
-            libstdc++-arm-none-eabi-dev libstdc++-arm-none-eabi-newlib \
             cmake ninja-build git libusb-1.0-0-dev pkg-config
           wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
           sudo ./llvm.sh 22
@@ -296,12 +298,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ARM toolchain + clang-tidy-22
+      - name: Setup pinned ARM GNU toolchain (15.2.rel1)
+        uses: ./.github/actions/setup-arm-toolchain
+
+      - name: Install clang-tidy-22 + build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi \
-            libstdc++-arm-none-eabi-dev libstdc++-arm-none-eabi-newlib \
             cmake ninja-build git libusb-1.0-0-dev pkg-config
           wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
           sudo ./llvm.sh 22

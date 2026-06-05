@@ -1,0 +1,25 @@
+name: Setup ARM GNU toolchain
+description: >
+  Install the pinned arm-none-eabi GNU toolchain (Arm GNU Toolchain 15.2.rel1)
+  and prepend it to PATH. Pins CI to the SAME compiler used for local on-target
+  builds — the Ubuntu apt gcc-arm-none-eabi drifted from the dev toolchain, and
+  arm codegen differences can mask/expose device-only behavior (a hang chased
+  to a removed /usr/bin gcc during T5). Bump the version + sha256 deliberately.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Arm GNU Toolchain 15.2.rel1 (arm-none-eabi)
+      shell: bash
+      run: |
+        set -euo pipefail
+        url="https://developer.arm.com/-/media/Files/downloads/gnu/15.2.rel1/binrel/arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi.tar.xz"
+        sha="597893282ac8c6ab1a4073977f2362990184599643b4c5ee34870a8215783a16"
+        curl -fsSL -o /tmp/arm-gnu.tar.xz "$url"
+        echo "${sha}  /tmp/arm-gnu.tar.xz" | sha256sum -c -
+        sudo mkdir -p /opt/arm-gnu
+        sudo tar -xJf /tmp/arm-gnu.tar.xz -C /opt/arm-gnu --strip-components=1
+        # Prepend to PATH for subsequent steps; pico-sdk finds arm-none-eabi-gcc here.
+        echo "/opt/arm-gnu/bin" >> "$GITHUB_PATH"
+        # Fail fast if the binary can't run on the runner (missing host lib).
+        /opt/arm-gnu/bin/arm-none-eabi-gcc --version | head -1

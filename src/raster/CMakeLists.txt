@@ -10,8 +10,11 @@ target_link_libraries(Renderer_raster
     # final executable. rgb565 is a header-only static inline (no link symbol),
     # but link renderer::gfx explicitly so the dependency is declared (no
     # cycle: gfx does not depend on raster).
-    # R.2: the XLU sweep composes blend_pixel_alpha (Renderer::Blend) for the
-    # texel-alpha alpha-over; also PRIVATE (not in raster.h's interface).
+    # L6: the XLU sweep composes Renderer::Blend's front-to-back premultiplied-
+    # UNDER helpers (blend_premul_accumulate/_resolve) + fog_lerp; also PRIVATE
+    # (not in raster.h's interface). blend_pixel_alpha is retained in the Blend
+    # module (still used by tests + a valid primitive) but no longer called from
+    # the XLU sweep.
     # R.3-AA: the coverage WRITE + the end-of-tile resolve compose Renderer::Aa
     # (aa_enabled / aa_resolve_tile / AA_COV_FULL); PRIVATE — none is in
     # raster.h's interface (the nullable cov param is just a uint8_t*).

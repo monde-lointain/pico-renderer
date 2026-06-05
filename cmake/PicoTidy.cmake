@@ -30,14 +30,16 @@ set(RENDERER_PICO_TIDY_RESOURCE_DIR "" CACHE STRING
 set(RENDERER_PICO_TIDY_ACTIVE OFF)
 
 if(RENDERER_PICO_TIDY AND PLATFORM STREQUAL "picosystem")
-  # Prefer the versioned binary that matches CI's toolchain; fall back to plain.
-  find_program(RENDERER_CLANG_TIDY_EXE NAMES clang-tidy-22 clang-tidy)
+  # Require the VERSIONED clang-tidy-22 only — NEVER the unversioned `clang-tidy`
+  # (often an older toolchain whose checks diverge from CI's clang-tidy-22; a
+  # silent v18 pass once masked a v22 CI failure). The local gate must match CI.
+  find_program(RENDERER_CLANG_TIDY_EXE NAMES clang-tidy-22)
   if(NOT RENDERER_CLANG_TIDY_EXE)
     # The user explicitly asked for the lint to run; a silent no-op would hide
     # that it never happened. Fail loudly (cf. RENDERER_REQUIRE_ORTHODOXY).
     message(FATAL_ERROR
-      "RENDERER_PICO_TIDY=ON but no clang-tidy found (tried clang-tidy-22, "
-      "clang-tidy). Install clang-tidy or set RENDERER_PICO_TIDY=OFF.")
+      "RENDERER_PICO_TIDY=ON but clang-tidy-22 not found. Install clang-tidy-22 "
+      "(the version CI uses) or set RENDERER_PICO_TIDY=OFF.")
   endif()
 
   # Base command + the warnings-as-errors gate (matches the host `tidy` target).

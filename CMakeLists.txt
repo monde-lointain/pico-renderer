@@ -22,6 +22,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# This codebase uses NO C++ modules (Orthodox C++ forbids them). With a
+# modules-capable compiler (e.g. GCC 15 at C++20) CMake otherwise turns on
+# module dependency scanning and emits GCC scan flags (-fmodules-ts,
+# -fdeps-format=, -fmodule-mapper=) that inline clang-tidy can't parse, breaking
+# the *-tidy presets. Off = no spurious scan, and clang-tidy sees clean flags.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 option(BUILD_TESTS "Build host unit tests" ${PROJECT_IS_TOP_LEVEL})
 

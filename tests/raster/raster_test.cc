@@ -12,7 +12,7 @@
 
 #include <string>
 
-#include "blend/blend.h"  // R.2 XLU exact reference (blend_pixel_alpha)
+#include "blend/blend.h"  // L6 XLU exact reference (blend_premul_accumulate/_resolve)
 #include "golden.h"
 #include "gtest/gtest.h"
 #include "oracle.h"
@@ -98,7 +98,7 @@ void render_tile0_to_rgb(const TileBin* bin, const TVtx* pool, uint8_t* rgb_out,
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, bin, pool, fb, zbuf, no_texture_table(), 0);
+  raster_tile(0, bin, pool, fb, zbuf, no_texture_table(), 0, /*worker=*/0);
   for (int y = 0; y < RDR_TILE_H; ++y) {
     for (int x = 0; x < RDR_TILE_W; ++x) {
       uint16_t const px = fb[(y * RDR_SCREEN_W) + x];
@@ -337,7 +337,7 @@ TEST(Raster, ClipsToTileBounds) {
   OneTri o;
   one_tri(&o, mk_vtx(40, 5, 0, 0, 0x10000), mk_vtx(100, 30, 0, 0, 0x10000),
           mk_vtx(40, 55, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0, /*worker=*/0);
   // No pixel with screen x >= RDR_TILE_W should be written by tile 0.
   int leaked = 0;
   for (int y = 0; y < RDR_SCREEN_H; ++y) {
@@ -404,7 +404,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   bin.count = 2;
   bin.cap = 2;
   bin.dropped = 0;
-  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0);
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0, /*worker=*/0);
 
   // A pixel inside the triangle must be the NEAR color (red), not far (blue).
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
@@ -420,7 +420,7 @@ TEST(Raster, ZTestNearOccludesFar) {
   refs[1].v0 = 0;
   refs[1].v1 = 1;
   refs[1].v2 = 2;  // far second
-  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0);
+  raster_tile(0, &bin, pool, fb, zbuf, no_texture_table(), 0, /*worker=*/0);
   uint16_t const px2 = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px2, c_near);
 }
@@ -445,7 +445,8 @@ TEST(Raster, NonZeroTileMapsToScreenRect) {
   one_tri(&o, mk_vtx(x0 + 10, y0 + 8, 0, 0, 0x10000),
           mk_vtx(x0 + 45, y0 + 12, 0, 0, 0x10000),
           mk_vtx(x0 + 20, y0 + 48, 0, 0, 0x10000));
-  raster_tile(tile, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
+  raster_tile(tile, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0,
+              /*worker=*/0);
 
   // Oracle reference at the same absolute screen coords (full-screen image).
   uint8_t fr;
@@ -495,7 +496,7 @@ TEST(Raster, ClearsZScratchOnEntry) {
   OneTri o;
   one_tri(&o, mk_vtx(10, 8, 0, 0, 0x10000), mk_vtx(45, 12, 0, 0, 0x10000),
           mk_vtx(20, 48, 0, 0, 0x10000));
-  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0);
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), 0, /*worker=*/0);
   uint16_t const px = fb[(20 * RDR_SCREEN_W) + 25];
   EXPECT_EQ(px, K_FLAT565) << "Z scratch not cleared: stale depth blocked fill";
 }
@@ -861,7 +862,7 @@ TEST(RasterTextured, MatchesTexSampleAndShadeExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -938,7 +939,7 @@ TEST(RasterTextured, ReversedWindingTexturedSwapsAllAttrsInLockstep) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   // ref_setup mirrors tri_setup's swap; ref_textured_pixel mirrors the inner
   // loop. Bit-exact equality at every covered pixel proves the impl swapped all
@@ -1002,7 +1003,7 @@ TEST(RasterTextured, MatchesFloatOracleWithinTolerance) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0, /*worker=*/0);
 
   // Float reference per covered pixel. Mirror oracle_fill_tri's winding-
   // normalize + top-left rule, then float-interpolate.
@@ -1237,7 +1238,7 @@ TEST(RasterTextured, AlphaCutoutDiscardsAndSkipsZbuf) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   // Sample a clearly-left (opaque) interior pixel and a clearly-right
   // (transparent) interior pixel — both well inside the triangle (x+y << 56 so
@@ -1364,11 +1365,12 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
   bin.dropped = 0;
 
   for (int tile = 0; tile < num_tiles; ++tile) {
-    raster_tile(tile, &bin, pool, fb_serial, z0, table, 0);
+    raster_tile(tile, &bin, pool, fb_serial, z0, table, 0, /*worker=*/0);
   }
   for (int tile = 0; tile < num_tiles; ++tile) {
-    uint16_t* const z = (tile & 1) ? z1 : z0;
-    raster_tile(tile, &bin, pool, fb_par, z, table, 0);
+    int const worker = tile & 1;
+    uint16_t* const z = worker ? z1 : z0;
+    raster_tile(tile, &bin, pool, fb_par, z, table, 0, worker);
   }
   EXPECT_EQ(memcmp(fb_serial, fb_par,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -1378,10 +1380,11 @@ TEST(RasterTextured, DualWorkerBitIdenticalTexturedScene) {
 }
 
 // ===========================================================================
-// R.2 — XLU two-pass + per-tile back-to-front sort. The opaque sweep stays the
+// L6 — XLU two-pass + per-tile FRONT-TO-BACK sort. The opaque sweep stays the
 // R.1 path (verified bit-identical by the goldens above); these tests pin the
-// NEW translucent sweep: texel-alpha alpha-over, z-test (no z-write), and the
-// back-to-front compositing order with a deterministic tie-break.
+// translucent sweep: front-to-back premultiplied-UNDER accumulation
+// (blend_premul_accumulate) + a per-tile composite that folds terrain under
+// (blend_premul_resolve), z-test (no z-write), and a deterministic tie-break.
 // ===========================================================================
 namespace {
 
@@ -1422,14 +1425,22 @@ void tex_desc_4444(struct TexDesc* td, const struct Tex4444* t) {
   td->tlut = 0;
 }
 
-// XLU reference pixel: mirror ref_textured_pixel (same coverage + interp +
-// combiner) but compute the EXPECTED stored value = blend_pixel_alpha over the
-// destination `dst`, using the texel's own alpha (rgba[3]) as the source alpha
-// (P3-3: XLU blends on TEXEL0 alpha, not coverage). z-TEST only (no z-write) is
-// modelled by the caller passing the right `dst`. Returns 1 + writes *out if
-// covered (and not alpha-discarded); else 0.
-int ref_xlu_pixel(const struct RefTri* t, const struct RenderState* rs, int sx,
-                  int sy, uint16_t dst, uint16_t* out) {
+// L6 NOTE: the former `ref_xlu_pixel` (back-to-front blend_pixel_alpha over a
+// destination) modelled the OLD over-blend XLU contract and is REMOVED — the
+// XLU store is now front-to-back premultiplied UNDER (ref_xlu_frag +
+// blend_premul_accumulate/_resolve below). See the L6 contract-delta note.
+
+// L6 contract-delta (flagged for the Lead — cross-lane edit into T2's
+// raster_test as a DIRECT consequence of the XLU front-to-back rework): the XLU
+// fragment store is now FRONT-TO-BACK PREMULTIPLIED UNDER, not back-to-front
+// over-blend. For a covered pixel this returns the combiner color + its texel
+// alpha so a test can drive the SAME premultiplied helpers the impl uses
+// (blend_premul_accumulate / blend_premul_resolve) -> bit-exact again. Fog is
+// NOT applied here (the fog test fogs `combined` itself and passes it as a
+// fragment); the non-fog tests set rs->fog.enabled = 0. Returns 1 + fills
+// *frag565/*frag_a if the pixel is covered (post alpha-cmp), else 0.
+int ref_xlu_frag(const struct RefTri* t, const struct RenderState* rs, int sx,
+                 int sy, uint16_t* frag565, uint8_t* frag_a) {
   fx12_4 const cx = (fx12_4)((sx << 4) + 8);
   fx12_4 const cy = (fx12_4)((sy << 4) + 8);
   int32_t const w0 = edge_i(t->x1, t->y1, t->x2, t->y2, cx, cy);
@@ -1465,12 +1476,13 @@ int ref_xlu_pixel(const struct RefTri* t, const struct RenderState* rs, int sx,
   uint8_t rgba[4];
   tex_sample_rgba(&rs->tex, u_q16, v_q16, 0, rgba);
   if (rs->alpha_cmp != 0 && rgba[3] < rs->alpha_cmp) {
-    return 0;  // honor alpha-compare discard (generality)
+    return 0;  // honor alpha-compare discard
   }
   uint16_t const texel565 = rgb565_pack(rgba[0], rgba[1], rgba[2]);
   uint8_t keep = 1;
   uint16_t const combined = shade_pixel(rs, texel565, shade565, &keep);
-  *out = blend_pixel_alpha(BLEND_ALPHA, combined, rgba[3], dst);
+  *frag565 = combined;
+  *frag_a = rgba[3];
   return 1;
 }
 
@@ -1485,12 +1497,13 @@ void mk_xlu_state(struct RenderState* rs, const struct Tex4444* tex) {
 
 }  // namespace
 
-// (1) XLU alpha-over correctness: a single XLU tri with a FRACTIONAL-alpha
-// texture over a known opaque background must blend per pixel EXACTLY like
-// blend_pixel_alpha(BLEND_ALPHA, combiner_out, texel_alpha, bg). Uses alpha
-// nibble 0x8 (-> 136), so a coverage-vs-texel-alpha bug or a missing blend
-// cannot hide.
-TEST(RasterXlu, AlphaOverMatchesBlendPixelAlphaExact) {
+// (1) XLU premultiplied-UNDER correctness: a single XLU tri with a
+// FRACTIONAL-alpha texture over a known opaque background must blend per pixel
+// EXACTLY like the L6 path — one fragment accumulated front-to-back
+// (blend_premul_accumulate) then terrain folded under (blend_premul_resolve).
+// Uses alpha nibble 0x8 (-> 136), so a coverage-vs-texel-alpha bug or a missing
+// blend cannot hide.
+TEST(RasterXlu, PremulUnderMatchesBlendPremulExact) {
   struct Tex4444 tex;
   make_tex4444_alpha(&tex, 0x8);  // alpha = expand4(0x8) = 136 (fractional)
   struct RenderState rs;
@@ -1520,17 +1533,26 @@ TEST(RasterXlu, AlphaOverMatchesBlendPixelAlphaExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
   int checked = 0;
   for (int sy = 0; sy < RDR_TILE_H; ++sy) {
     for (int sx = 0; sx < RDR_TILE_W; ++sx) {
-      uint16_t expected;
-      if (!ref_xlu_pixel(&rt, &rs, sx, sy, bg, &expected)) {
+      // L6: a single XLU layer over bg via the premultiplied-UNDER path. One
+      // fragment accumulated from (0,0), then terrain folded under at the
+      // composite -> the SAME helpers the impl uses, so bit-exact.
+      uint16_t frag;
+      uint8_t fa;
+      if (!ref_xlu_frag(&rt, &rs, sx, sy, &frag, &fa)) {
         continue;
       }
+      uint16_t c_acc = 0;
+      uint8_t aa = 0;
+      blend_premul_accumulate(&c_acc, &aa, frag, fa);
+      uint16_t const expected =
+          (aa != 0) ? blend_premul_resolve(c_acc, aa, bg) : bg;
       uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
       ASSERT_EQ(got, expected)
           << "XLU pixel (" << sx << "," << sy << ") mismatch";
@@ -1543,12 +1565,16 @@ TEST(RasterXlu, AlphaOverMatchesBlendPixelAlphaExact) {
   EXPECT_GT(checked, 50) << "too few covered XLU pixels — test is vacuous";
 }
 
-// (2) Back-to-front compositing order + determinism: two overlapping XLU tris
-// at different depths over a known bg. The FARTHER tri composites first, then
-// the nearer over that. The overlap pixels must equal near-over-(far-over-bg).
-// Re-running with the bin insertion order PERMUTED yields the identical result
-// (the per-tile sort makes draw order depth-driven, not insertion-driven).
-TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
+// (2) L6 FRONT-TO-BACK compositing order + determinism: two overlapping XLU
+// tris at different depths over a known bg. The NEARER tri accumulates first
+// (premultiplied UNDER), then the farther under it; the composite folds bg
+// under. The overlap pixels must equal the premultiplied-under accumulation of
+// near-then-far over bg. Re-running with the bin insertion order PERMUTED
+// yields the identical result (the per-tile sort makes draw order depth-driven,
+// not insertion-driven). Mathematically the final color equals the old
+// near-over-(far-over-bg), differing only by the 565-accumulator requantization
+// — so the test references the SAME premultiplied helpers the impl uses.
+TEST(RasterXlu, FrontToBackUnderOrderAndDeterminism) {
   struct Tex4444 tex;
   make_tex4444_alpha(&tex, 0x8);  // alpha 136
   struct RenderState rs;
@@ -1613,8 +1639,8 @@ TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
   }
   static uint16_t z_a[RDR_TILE_W * RDR_TILE_H];
   static uint16_t z_b[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin_a, pool, fb_a, z_a, table, 0);
-  raster_tile(0, &bin_b, pool, fb_b, z_b, table, 0);
+  raster_tile(0, &bin_a, pool, fb_a, z_a, table, 0, /*worker=*/0);
+  raster_tile(0, &bin_b, pool, fb_b, z_b, table, 0, /*worker=*/0);
 
   // Determinism: permuting insertion order must NOT change the result.
   EXPECT_EQ(memcmp(fb_a, fb_b,
@@ -1623,8 +1649,9 @@ TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
       << "XLU result depends on bin insertion order — sort is not "
          "depth-deterministic";
 
-  // Correctness: far-over-bg, then near-over-that. Reference the impl's own
-  // fixed-point + blend math for both layers in the SAME far->near order.
+  // Correctness (L6 premultiplied UNDER): accumulate NEAR first, then FAR (the
+  // front-to-back order the sort produces), then fold bg under. References the
+  // impl's own fixed-point + premultiplied helpers, so it is bit-exact.
   struct RefTri rt_far;
   ref_setup(&rt_far, &pool[0], &pool[1], &pool[2]);
   struct RefTri rt_near;
@@ -1632,23 +1659,25 @@ TEST(RasterXlu, BackToFrontOrderAndDeterminism) {
   int checked = 0;
   for (int sy = 0; sy < RDR_TILE_H; ++sy) {
     for (int sx = 0; sx < RDR_TILE_W; ++sx) {
-      uint16_t after_far = bg;
-      int const cov_far = ref_xlu_pixel(&rt_far, &rs, sx, sy, bg, &after_far);
-      uint16_t const dst_for_near = cov_far ? after_far : bg;
-      uint16_t after_near;
-      int const cov_near =
-          ref_xlu_pixel(&rt_near, &rs, sx, sy, dst_for_near, &after_near);
-      uint16_t expected;
+      uint16_t c_acc = 0;
+      uint8_t aa = 0;
+      uint16_t frag;
+      uint8_t fa;
+      int const cov_near = ref_xlu_frag(&rt_near, &rs, sx, sy, &frag, &fa);
       if (cov_near) {
-        expected = after_near;
-      } else if (cov_far) {
-        expected = after_far;
-      } else {
+        blend_premul_accumulate(&c_acc, &aa, frag, fa);
+      }
+      int const cov_far = ref_xlu_frag(&rt_far, &rs, sx, sy, &frag, &fa);
+      if (cov_far) {
+        blend_premul_accumulate(&c_acc, &aa, frag, fa);
+      }
+      if (aa == 0) {
         continue;  // pixel covered by neither -> bg, nothing to check
       }
+      uint16_t const expected = blend_premul_resolve(c_acc, aa, bg);
       uint16_t const got = fb_a[(sy * RDR_SCREEN_W) + sx];
       ASSERT_EQ(got, expected)
-          << "XLU composite (" << sx << "," << sy << ") not far-over-near";
+          << "XLU composite (" << sx << "," << sy << ") not near-under-far";
       if (cov_far && cov_near) {
         ++checked;
       }
@@ -1709,7 +1738,7 @@ TEST(RasterXlu, ZTestHonoredBehindOpaqueOccluder) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   // A deep-interior pixel covered by BOTH: the occluder wrote depth NEAR, the
   // XLU tri is FAR -> z-test rejects it -> the pixel stays the occluder color
@@ -1721,12 +1750,13 @@ TEST(RasterXlu, ZTestHonoredBehindOpaqueOccluder) {
 
 // (3b) NO z-write: a SECOND XLU tri drawn behind the FIRST still composites.
 // If the XLU sweep wrote depth, the first (nearer) XLU tri would block the
-// second (farther) — but XLU must z-TEST only. So both layers blend, and the
-// pixel equals far-over-(near's-blend-over-bg)... no: nearer composites LAST
-// (back-to-front), so result = near-over-(far-over-bg). The discriminator vs a
-// z-writing impl: a z-writing near layer would reject the far layer entirely,
-// giving near-over-bg. We assert the TWO-LAYER composite, which only holds if
-// the far layer was NOT z-rejected by the near layer's (absent) z-write.
+// second (farther) — but XLU must z-TEST only. So both layers contribute to the
+// premultiplied-UNDER accumulation: front-to-back, NEAR accumulates first then
+// FAR under it, and the composite folds bg under (= near-under-far-over-bg).
+// The discriminator vs a z-writing impl: a z-writing near layer would reject
+// the far layer entirely, leaving only the near contribution. We assert the
+// TWO-LAYER composite, which only holds if the far layer was NOT z-rejected by
+// the near layer's (absent) z-write.
 TEST(RasterXlu, NoZWriteSoSecondXluStillComposites) {
   struct Tex4444 tex;
   make_tex4444_alpha(&tex, 0x8);
@@ -1772,10 +1802,12 @@ TEST(RasterXlu, NoZWriteSoSecondXluStillComposites) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
-  // Expected TWO-LAYER composite (far-over-bg, then near-over-that). Only holds
-  // if the far layer's fragment was NOT depth-rejected by a near z-write.
+  // Expected TWO-LAYER composite (L6 premultiplied UNDER: NEAR accumulated
+  // first, then FAR under it, then bg folded under). Only holds if the FAR
+  // layer's fragment was NOT depth-rejected by a near z-write — i.e. both
+  // layers contributed to the accumulator.
   struct RefTri rt_far;
   ref_setup(&rt_far, &pool[0], &pool[1], &pool[2]);
   struct RefTri rt_near;
@@ -1783,20 +1815,28 @@ TEST(RasterXlu, NoZWriteSoSecondXluStillComposites) {
   int checked = 0;
   for (int sy = 0; sy < RDR_TILE_H; ++sy) {
     for (int sx = 0; sx < RDR_TILE_W; ++sx) {
-      uint16_t after_far;
-      if (!ref_xlu_pixel(&rt_far, &rs, sx, sy, bg, &after_far)) {
+      uint16_t frag;
+      uint8_t fa;
+      int const cov_far = ref_xlu_frag(&rt_far, &rs, sx, sy, &frag, &fa);
+      if (!cov_far) {
         continue;
       }
-      uint16_t after_near;
-      int const cov_near =
-          ref_xlu_pixel(&rt_near, &rs, sx, sy, after_far, &after_near);
+      uint16_t frag_n;
+      uint8_t fa_n;
+      int const cov_near = ref_xlu_frag(&rt_near, &rs, sx, sy, &frag_n, &fa_n);
       if (!cov_near) {
         continue;
       }
-      // near-over-(far-over-bg): the second (farther) tri DID composite,
-      // proving the first (nearer) tri did not z-write and block it.
+      // Front-to-back: NEAR accumulates first, then FAR under it.
+      uint16_t c_acc = 0;
+      uint8_t aa = 0;
+      blend_premul_accumulate(&c_acc, &aa, frag_n, fa_n);
+      blend_premul_accumulate(&c_acc, &aa, frag, fa);
+      uint16_t const expected = blend_premul_resolve(c_acc, aa, bg);
+      // both layers DID composite, proving the near tri did not z-write and
+      // block the far tri.
       uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
-      ASSERT_EQ(got, after_near)
+      ASSERT_EQ(got, expected)
           << "XLU pixel (" << sx << "," << sy
           << ") missing a layer — XLU wrote zbuf and blocked the far tri";
       ++checked;
@@ -1867,8 +1907,8 @@ TEST(RasterXlu, OpaqueSweepUnaffectedByPresenceOfXlu) {
   }
   static uint16_t z0[RDR_TILE_W * RDR_TILE_H];
   static uint16_t z1[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin_opaque, pool, fb_opaque, z0, table, 0);
-  raster_tile(0, &bin_mixed, pool, fb_mixed, z1, table, 0);
+  raster_tile(0, &bin_opaque, pool, fb_opaque, z0, table, 0, /*worker=*/0);
+  raster_tile(0, &bin_mixed, pool, fb_mixed, z1, table, 0, /*worker=*/0);
 
   // Every pixel in the opaque tri's footprint (x < 40) must be byte-identical
   // between the two renders — the XLU sweep did not touch the opaque region.
@@ -1925,11 +1965,11 @@ TEST(RasterXlu, DecalTreatedAsOpaque) {
   }
   static uint16_t zd[RDR_TILE_W * RDR_TILE_H];
   static uint16_t zo[RDR_TILE_W * RDR_TILE_H];
-  raster_tile(0, &bin, pool, fb_decal, zd, table, 0);
+  raster_tile(0, &bin, pool, fb_decal, zd, table, 0, /*worker=*/0);
   struct RenderState rs_op = rs;
   rs_op.zmode = ZMODE_OPAQUE;
   const struct RenderState* table_op = &rs_op;
-  raster_tile(0, &bin, pool, fb_opaque, zo, table_op, 0);
+  raster_tile(0, &bin, pool, fb_opaque, zo, table_op, 0, /*worker=*/0);
 
   EXPECT_EQ(memcmp(fb_decal, fb_opaque,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -1984,7 +2024,7 @@ TEST(RasterXlu, DropWithCountOnPerTileOverflow) {
   }
 
   uint32_t const dropped_before = raster_xlu_dropped();
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
   uint32_t const dropped_after = raster_xlu_dropped();
 
   // The gather overflowed: at least (K_OVF - cap) tris dropped. We don't know
@@ -2127,7 +2167,7 @@ TEST(RasterFog, TexturedFogMatchesReferenceExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2188,7 +2228,7 @@ TEST(RasterFog, TexturedFogMatchesFloatOracle) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0, /*worker=*/0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2294,7 +2334,7 @@ TEST(RasterFog, MoreFogTowardFarVertex) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, &rs, 0, /*worker=*/0);
 
   uint8_t fogr;
   uint8_t fogg;
@@ -2325,11 +2365,12 @@ TEST(RasterFog, MoreFogTowardFarVertex) {
 }
 
 // XLU + FOG bit-exact: the translucent sweep must fog the combiner color BEFORE
-// the texel-alpha alpha-over. Expected = blend_pixel_alpha(BLEND_ALPHA,
-// fog_lerp(combiner, fog_color, fogf), texel_alpha, bg). Proves fog is applied
-// pre-blend on the XLU path (faithful: a distant translucent fragment fogs then
-// composites).
-TEST(RasterFog, XluFogAppliedBeforeAlphaOver) {
+// the premultiply. Expected = the L6 premultiplied-UNDER path with the FOGGED
+// fragment: blend_premul_accumulate(fog_lerp(combiner, fog_color, fogf),
+// texel_alpha) then blend_premul_resolve over bg. Proves fog is applied
+// pre-premultiply on the XLU path (faithful: a distant translucent fragment
+// fogs then contributes).
+TEST(RasterFog, XluFogAppliedBeforePremulUnder) {
   struct Tex4444 tex;
   make_tex4444_alpha(&tex, 0x8);  // fractional alpha 136
   struct RenderState rs;
@@ -2361,7 +2402,7 @@ TEST(RasterFog, XluFogAppliedBeforeAlphaOver) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = bg;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2401,8 +2442,14 @@ TEST(RasterFog, XluFogAppliedBeforeAlphaOver) {
       fx16_16 const u_q16 = (fx16_16)(((int64_t)u_iw_p << 27) / (int64_t)inv_w);
       fx16_16 const v_q16 = (fx16_16)(((int64_t)v_iw_p << 27) / (int64_t)inv_w);
       tex_sample_rgba(&rs.tex, u_q16, v_q16, 0, rgba);
+      // L6: fog applied to `fogged` FIRST (before the premultiply), then the
+      // single layer accumulated UNDER and bg folded under — bit-exact vs the
+      // impl's blend_premul_accumulate/_resolve.
+      uint16_t c_acc = 0;
+      uint8_t aa = 0;
+      blend_premul_accumulate(&c_acc, &aa, fogged, rgba[3]);
       uint16_t const expected =
-          blend_pixel_alpha(BLEND_ALPHA, fogged, rgba[3], bg);
+          (aa != 0) ? blend_premul_resolve(c_acc, aa, bg) : bg;
       uint16_t const got = fb[(sy * RDR_SCREEN_W) + sx];
       ASSERT_EQ(got, expected)
           << "XLU+fog pixel (" << sx << "," << sy << ") mismatch";
@@ -2460,7 +2507,7 @@ TEST(RasterFog, FlatFogMatchesReferenceExact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -2519,7 +2566,8 @@ void render_cov(const OneTri* o, uint8_t* cov_out) {
     fb[i] = 0;
   }
   aa_set_enabled(1);
-  raster_tile(0, &o->bin, o->pool, fb, zbuf, no_texture_table(), cov_out);
+  raster_tile(0, &o->bin, o->pool, fb, zbuf, no_texture_table(), cov_out,
+              /*worker=*/0);
   aa_set_enabled(0);
 }
 
@@ -2539,7 +2587,8 @@ TEST(RasterCoverage, DisabledLeavesCovUntouched) {
   uint8_t cov[RDR_TILE_W * RDR_TILE_H];
   memset(cov, 0x5A, sizeof(cov));  // sentinel
   aa_set_enabled(0);
-  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), cov);
+  raster_tile(0, &o.bin, o.pool, fb, zbuf, no_texture_table(), cov,
+              /*worker=*/0);
   for (int i = 0; i < RDR_TILE_W * RDR_TILE_H; ++i) {
     ASSERT_EQ(cov[i], 0x5A) << "AA-off must not touch cov (i=" << i << ")";
   }
@@ -2760,7 +2809,7 @@ TEST(RasterCoverage, TexturedOpaqueParityWithOracle) {
   }
   uint8_t cov[RDR_TILE_W * RDR_TILE_H];
   aa_set_enabled(1);
-  raster_tile(0, &bin, pool, fb, zbuf, table, cov);
+  raster_tile(0, &bin, pool, fb, zbuf, table, cov, /*worker=*/0);
   aa_set_enabled(0);
 
   double const x0 = (double)pool[0].x;
@@ -2836,7 +2885,7 @@ TEST(RasterCoverage, XluFragmentStampsFullCoverage) {
   }
   uint8_t cov[RDR_TILE_W * RDR_TILE_H];
   aa_set_enabled(1);
-  raster_tile(0, &bin, pool, fb, zbuf, table, cov);
+  raster_tile(0, &bin, pool, fb, zbuf, table, cov, /*worker=*/0);
   aa_set_enabled(0);
 
   // Find a pixel the XLU fragment actually touched (fb changed from bg), assert
@@ -2980,7 +3029,7 @@ TEST(RasterDetail, TwoCycleMatchesShadePixel2Exact) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb, zbuf, table, 0);
+  raster_tile(0, &bin, pool, fb, zbuf, table, 0, /*worker=*/0);
 
   struct RefTri rt;
   ref_setup(&rt, &pool[0], &pool[1], &pool[2]);
@@ -3035,7 +3084,7 @@ TEST(RasterDetail, DetailModulatesVsOneCycle) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb1[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb1, zbuf1, &rs1, 0);
+  raster_tile(0, &bin, pool, fb1, zbuf1, &rs1, 0, /*worker=*/0);
 
   // 2-cycle (base * detail) render.
   struct RenderState rs2;
@@ -3045,7 +3094,7 @@ TEST(RasterDetail, DetailModulatesVsOneCycle) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb2[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb2, zbuf2, &rs2, 0);
+  raster_tile(0, &bin, pool, fb2, zbuf2, &rs2, 0, /*worker=*/0);
 
   int covered = 0;
   int differ = 0;
@@ -3105,8 +3154,8 @@ TEST(RasterDetail, DetailShiftChangesFrequency) {
     fb0[i] = 0;
     fb1[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb0, zbuf, &rs0, 0);
-  raster_tile(0, &bin, pool, fb1, zbuf, &rs1, 0);
+  raster_tile(0, &bin, pool, fb0, zbuf, &rs0, 0, /*worker=*/0);
+  raster_tile(0, &bin, pool, fb1, zbuf, &rs1, 0, /*worker=*/0);
 
   int covered = 0;
   int differ = 0;
@@ -3174,8 +3223,8 @@ TEST(RasterDetail, TwoCycleWithNoTex1IsByteIdenticalToOneCycle) {
     fb1[i] = 0;
     fb2[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb1, zbuf, &rs1, 0);
-  raster_tile(0, &bin, pool, fb2, zbuf, &rs2, 0);
+  raster_tile(0, &bin, pool, fb1, zbuf, &rs1, 0, /*worker=*/0);
+  raster_tile(0, &bin, pool, fb2, zbuf, &rs2, 0, /*worker=*/0);
 
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     ASSERT_EQ(fb1[i], fb2[i])
@@ -3222,8 +3271,9 @@ TEST(RasterDetail, DetailShiftAtLeast32IsUbsanCleanAndMasks) {
     fb0[i] = 0;
     fb32[i] = 0;
   }
-  raster_tile(0, &bin, pool, fb0, zbuf, &rs0, 0);
-  raster_tile(0, &bin, pool, fb32, zbuf, &rs32, 0);  // must not UB / crash
+  raster_tile(0, &bin, pool, fb0, zbuf, &rs0, 0, /*worker=*/0);
+  raster_tile(0, &bin, pool, fb32, zbuf, &rs32, 0,
+              /*worker=*/0);  // must not UB / crash
 
   int checked = 0;
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {

@@ -75,14 +75,15 @@ void build_scene_geom() {
       << "scene produced no tris — determinism test would be vacuous";
 }
 
-// Serial sweep: every tile in order, one worker, one zbuf -> `fb`.
+// Serial sweep: every tile in order, one worker, one zbuf -> `fb`. Worker id 0
+// (the serial path uses only worker 0's zbuf + XLU accumulator slice).
 void raster_serial(uint16_t* fb) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, g_z0,
-                &g_frame.rstate_table[0], 0);
+                &g_frame.rstate_table[0], 0, /*worker=*/0);
   }
 }
 
@@ -90,15 +91,19 @@ void raster_serial(uint16_t* fb) {
 // each worker draining into its OWN zbuf -> `fb`. This is the dual-core
 // dispatch reproduced on host: any claim order, disjoint pixel-rects, private
 // depth. raster_tile re-clears each worker's scratch on entry (the per-tile
-// clear), exactly as the runtime dual-core path does into f->zbuf[core_id].
+// clear), exactly as the runtime dual-core path does into f->zbuf[core_id]. The
+// worker id (tile & 1) is threaded to raster_tile so worker 1's tiles use BOTH
+// the z1 scratch AND XLU accumulator slice 1 — so this sim exercises per-worker
+// accumulator independence on host, not just on-target (L6 review #2).
 void raster_two_workers_interleaved(uint16_t* fb, uint16_t* z0, uint16_t* z1) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    uint16_t* const z = (tile & 1) ? z1 : z0;
+    int const worker = tile & 1;
+    uint16_t* const z = worker ? z1 : z0;
     raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, z,
-                &g_frame.rstate_table[0], 0);
+                &g_frame.rstate_table[0], 0, worker);
   }
 }
 
@@ -123,7 +128,7 @@ void raster_shared_zbuf_race(uint16_t* fb, uint16_t* zshared) {
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     raster_tile_noclear(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts,
-                        fb, zshared, &g_frame.rstate_table[0], 0);
+                        fb, zshared, &g_frame.rstate_table[0], 0, /*worker=*/0);
   }
 }
 
@@ -346,11 +351,13 @@ TEST(SchedXluDeterminism, MixedSceneSerialEqualsTwoWorker) {
     g_fb_par[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table, 0);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table, 0,
+                /*worker=*/0);
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    uint16_t* const z = (tile & 1) ? g_z1 : g_z0;
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_xlu_table, 0);
+    int const worker = tile & 1;
+    uint16_t* const z = worker ? g_z1 : g_z0;
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_xlu_table, 0, worker);
   }
 
   uint32_t const crc_serial =
@@ -377,14 +384,16 @@ TEST(SchedXluDeterminism, XluActuallyBlends) {
     g_fb_par[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table, 0);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_xlu_table, 0,
+                /*worker=*/0);
   }
   // Force the XLU material opaque and re-render into g_fb_par.
   struct RenderState all_opaque[3];
   memcpy(all_opaque, g_xlu_table, sizeof(all_opaque));
   all_opaque[2].zmode = ZMODE_OPAQUE;
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, all_opaque, 0);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, all_opaque, 0,
+                /*worker=*/0);
   }
   EXPECT_NE(memcmp(g_fb_serial, g_fb_par,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -456,11 +465,13 @@ TEST(SchedFogDeterminism, FogSceneSerialEqualsTwoWorker) {
     g_fb_par[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table, 0);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table, 0,
+                /*worker=*/0);
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    uint16_t* const z = (tile & 1) ? g_z1 : g_z0;
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_fog_table, 0);
+    int const worker = tile & 1;
+    uint16_t* const z = worker ? g_z1 : g_z0;
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, z, g_fog_table, 0, worker);
   }
 
   uint32_t const crc_serial =
@@ -491,7 +502,8 @@ TEST(SchedFogDeterminism, FogActuallyChangesPixels) {
   }
   // Fog ON.
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table, 0);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_serial, g_z0, g_fog_table, 0,
+                /*worker=*/0);
   }
   // Fog OFF (same table, fog disabled) into g_fb_par.
   struct RenderState fog_off[3];
@@ -500,7 +512,8 @@ TEST(SchedFogDeterminism, FogActuallyChangesPixels) {
     fog_off[i].fog.enabled = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, fog_off, 0);
+    raster_tile(tile, &bin, g_xlu_pool, g_fb_par, g_z0, fog_off, 0,
+                /*worker=*/0);
   }
   EXPECT_NE(memcmp(g_fb_serial, g_fb_par,
                    (size_t)(RDR_SCREEN_W * RDR_SCREEN_H) * sizeof(uint16_t)),
@@ -536,20 +549,22 @@ void raster_serial_aa(uint16_t* fb) {
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
     raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, g_z0,
-                &g_frame.rstate_table[0], g_cov0);
+                &g_frame.rstate_table[0], g_cov0, /*worker=*/0);
   }
 }
 
-// 2-worker interleaved with AA: each worker has its OWN cov + zbuf scratch.
+// 2-worker interleaved with AA: each worker has its OWN cov + zbuf scratch (and
+// XLU accumulator slice — the worker id is threaded so slice 1 is exercised).
 void raster_two_workers_aa(uint16_t* fb) {
   for (int i = 0; i < RDR_SCREEN_W * RDR_SCREEN_H; ++i) {
     fb[i] = 0;
   }
   for (int tile = 0; tile < GEOM_NUM_TILES; ++tile) {
-    uint16_t* const z = (tile & 1) ? g_z1 : g_z0;
-    uint8_t* const cv = (tile & 1) ? g_cov1 : g_cov0;
+    int const worker = tile & 1;
+    uint16_t* const z = worker ? g_z1 : g_z0;
+    uint8_t* const cv = worker ? g_cov1 : g_cov0;
     raster_tile(tile, &g_frame.geom.tiles[tile], g_frame.geom.tverts, fb, z,
-                &g_frame.rstate_table[0], cv);
+                &g_frame.rstate_table[0], cv, worker);
   }
 }
 

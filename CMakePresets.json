@@ -45,7 +45,8 @@
       "binaryDir": "${sourceDir}/build-pico-prof",
       "cacheVariables": {
         "RENDERER_PROFILER": "ON",
-        "RENDERER_DEMO_FRAMES": "480"
+        "RENDERER_DEMO_FRAMES": "480",
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
       }
     },
     {
@@ -54,7 +55,8 @@
       "inherits": "pico-tidy",
       "binaryDir": "${sourceDir}/build-pico-prof-tidy",
       "cacheVariables": {
-        "RENDERER_PROFILER": "ON"
+        "RENDERER_PROFILER": "ON",
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
       }
     },
     {
