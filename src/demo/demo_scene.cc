@@ -433,7 +433,7 @@ static struct Mat4fx s_terrain_view;
 static struct Mat4fx s_freefly_vp;     // free-fly only: projection * view
 static struct Mat4fx s_terrain_model;  // identity (verts authored in world)
 static struct RenderState s_terrain_state;
-static struct RenderState s_tree_state;  // opaque cutout pass
+static struct RenderState s_tree_state;  // soft-edge XLU pass
 
 // ---- T1 material fillers (single source of truth) --------------------------
 // The build below populates its statics through THESE, and tests assert the

@@ -330,6 +330,10 @@ TEST(TerrainSceneGuard, TreeMaterialIsDoubleSidedTextured) {
   EXPECT_EQ(rs.tex.w, (uint16_t)32);
   EXPECT_EQ(rs.tex.h, (uint16_t)64);
   EXPECT_EQ(rs.tex.format, (uint8_t)TEXFMT_RGBA5551);
+  // CLAMP is load-bearing under BILINEAR: REPEAT/MIRROR would wrap the opposite
+  // sprite edge into the soft ring and reintroduce a fringe.
+  EXPECT_EQ(rs.tex.wrap_s, (uint8_t)WRAP_CLAMP);
+  EXPECT_EQ(rs.tex.wrap_t, (uint8_t)WRAP_CLAMP);
   EXPECT_EQ(rs.cull, (uint8_t)CULL_NONE);
   EXPECT_EQ(rs.combiner.mode, (uint8_t)COMBINE_MODULATE);
   EXPECT_EQ(rs.tex.filter, (uint8_t)FILTER_THREE_POINT)
