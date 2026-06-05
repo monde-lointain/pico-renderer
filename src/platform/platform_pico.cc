@@ -306,7 +306,7 @@ void plat_present(const struct Framebuffer *fb) {
    * display's TE line stalls, give up after ~100 ms and present anyway. A torn
    * frame beats a permanent core0 wedge in this busy-wait (the only unbounded
    * loop in the present path). time_us_64 is wrap-safe (T5 probe checklist). */
-  uint64_t const te_deadline = time_us_64() + 100000u; /* 100 ms */
+  uint64_t const te_deadline = time_us_64() + 100000U; /* 100 ms */
   while (gpio_get(PIN_VSYNC) && time_us_64() < te_deadline) { /* TE to fall */
   }
   while (!gpio_get(PIN_VSYNC) && time_us_64() < te_deadline) { /* TE rising */
