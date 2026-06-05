@@ -13,6 +13,8 @@
 
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
+#include "pico/stdio.h" /* stdio_flush — drain telemetry before a reboot */
+#include "pico/time.h"  /* sleep_ms — let the stdio_usb timer pump tud_task */
 #include "platform/reset_stub.h"
 
 /* RP2040 watchdog max load is ~8388 ms (RP2040-E1; see watchdog.h). */
@@ -35,6 +37,14 @@ void plat_watchdog_kick(void) { watchdog_update(); }
 bool plat_watchdog_caused_reboot(void) { return watchdog_caused_reboot(); }
 
 void plat_reset_to_bootsel(void) {
+  /* Drain buffered stdout (e.g. the final RESULT=PASS sentinel the on-target
+   * runner waits for) BEFORE rebooting: main returns right after logging it, so
+   * without a final pump the USB-CDC TX FIFO never flushes and the last line is
+   * lost (observed on the bounded demo exit). stdio_flush pushes it into the CDC
+   * driver; the sleep lets the stdio_usb background timer run tud_task to
+   * transmit it before the ROM reboot tears USB down. */
+  stdio_flush();
+  sleep_ms(100);
   /* Reboot to ROM USB boot, both interfaces enabled, no activity LED. */
   reset_usb_boot(0, 0);
 }

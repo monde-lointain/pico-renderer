@@ -301,11 +301,15 @@ void plat_present_watermark(uint16_t committed_rows) {
 
 /* ---- plat_present -------------------------------------------------------- */
 void plat_present(const struct Framebuffer *fb) {
-  /* Gate on TE (VSYNC) rising edge to avoid tearing.
-   * (hardware.cpp _wait_vsync() lines 105-108) */
-  while (gpio_get(PIN_VSYNC)) { /* wait for vsync to end if already in it */
+  /* Gate on TE (VSYNC) rising edge to avoid tearing
+   * (hardware.cpp _wait_vsync() lines 105-108), but BOUND the wait: if the
+   * display's TE line stalls, give up after ~100 ms and present anyway. A torn
+   * frame beats a permanent core0 wedge in this busy-wait (the only unbounded
+   * loop in the present path). time_us_64 is wrap-safe (T5 probe checklist). */
+  uint64_t const te_deadline = time_us_64() + 100000u; /* 100 ms */
+  while (gpio_get(PIN_VSYNC) && time_us_64() < te_deadline) { /* TE to fall */
   }
-  while (!gpio_get(PIN_VSYNC)) { /* wait for rising edge */
+  while (!gpio_get(PIN_VSYNC) && time_us_64() < te_deadline) { /* TE rising */
   }
 
   /* Scanline-race chase: stream the framebuffer in watermark-bounded bands so

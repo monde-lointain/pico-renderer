@@ -19,6 +19,7 @@
 #include "demo/demo_scene.h"
 #include "gfx/framebuffer.h"
 #include "platform/platform.h"
+#include "platform/reset_stub.h"  // hardware watchdog + BOOTSEL reset (robustness)
 #include "prof/prof.h"  // T5: granular intra-frame profiler (no-op when PROFILER=0)
 #include "rdr/frame.h"  // struct Frame, RDR_NUM_RASTER_WORKERS
 #include "rdr/rdr.h"
@@ -78,8 +79,16 @@ int main(void) {
   aa_set_enabled(1);  // T4a: coverage AA on for the demo (terrain fog too, set
                       // in the terrain material). Runtime flag (default OFF).
 
+  // Robustness (on-target checklist): arm the hardware watchdog so a hung frame
+  // self-recovers (reboots) instead of permanently wedging the device — which
+  // otherwise needs a physical BOOTSEL. Kicked once per frame below; ~8.3 s is
+  // the RP2040 max load and comfortably exceeds the worst frame (<1 s).
+  plat_watchdog_arm(8388);
+
   uint32_t frame = 0;
   for (;;) {
+    plat_watchdog_kick();  // feed the dog; a frame that hangs >8.3 s trips it
+                           // and reboots, recovering the device
     // Poll input first so the free-fly toggle/nudge applies this frame. A
     // shutdown request (host window closed) ends the loop cleanly.
     struct Input in;
@@ -162,7 +171,14 @@ int main(void) {
       break;
     }
   }
+  // Bounded exit (profiler/test preset). Feed the watchdog before the final
+  // report (unkicked, and a multi-line USB burst under PROFILER=1), then return
+  // the device to BOOTSEL so the host runner can reflash without a physical
+  // button press — and so we never strand in a post-main idle with no watchdog
+  // kick. (Host: plat_reset_to_bootsel is a no-op and we return normally.)
+  plat_watchdog_kick();
   prof_report_final();  // T5: final averaged prof block at the bounded exit
   plat_log("RESULT=PASS\n");
+  plat_reset_to_bootsel();
   return 0;
 }
