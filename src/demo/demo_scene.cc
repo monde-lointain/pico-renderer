@@ -433,7 +433,7 @@ static struct Mat4fx s_terrain_view;
 static struct Mat4fx s_freefly_vp;     // free-fly only: projection * view
 static struct Mat4fx s_terrain_model;  // identity (verts authored in world)
 static struct RenderState s_terrain_state;
-static struct RenderState s_tree_state;  // opaque cutout pass
+static struct RenderState s_tree_state;  // soft-edge XLU pass
 
 // ---- T1 material fillers (single source of truth) --------------------------
 // The build below populates its statics through THESE, and tests assert the
@@ -520,23 +520,37 @@ void demo_tree_material(struct RenderState* out) {
   out->tex.w = 32;
   out->tex.h = 64;
   out->tex.format = (uint8_t)TEXFMT_RGBA5551;
-  // CLAMP so the sprite edge does not wrap.
+  // CLAMP so the sprite edge does not wrap (N64: G_TX_CLAMP both axes).
   out->tex.wrap_s = (uint8_t)WRAP_CLAMP;
   out->tex.wrap_t = (uint8_t)WRAP_CLAMP;
-  // Trees stay POINT (crisp cutout edge); do NOT bilinear the trees.
-  out->tex.filter = (uint8_t)FILTER_POINT;
+  // BILINEAR (N64 scenery.c sets G_TF_BILERP for trees — verified against the
+  // libultra GBI + the terrain source). This is the load-bearing field for the
+  // soft silhouette: 3-tap filtering the 5551 alpha (decoded 0/255) yields
+  // INTERMEDIATE alpha across the ~1-texel cutout boundary.
+  out->tex.filter = (uint8_t)FILTER_THREE_POINT;
   out->tex.mip_levels = 1;
   out->tex.tlut = 0;
-  out->combiner.mode = (uint8_t)COMBINE_MODULATE;  // TEXEL x SHADE
-  out->zmode = (uint8_t)ZMODE_OPAQUE;
+  out->combiner.mode = (uint8_t)COMBINE_MODULATE;  // TEXEL0 x SHADE
+  // FAITHFUL SOFT-EDGE TREES (N64 G_RM_AA_ZB_XLU_SURF, combiner alpha =
+  // TEXEL0). The N64 softens the cutout silhouette via CVG_X_ALPHA (bilinear
+  // alpha -> coverage) + the VI scanout AA filter (neighbour-feather by
+  // (7-cvg)/8). We have NEITHER: our AA derives coverage analytically from the
+  // triangle EDGE functions only, so it cannot soften a texture-cutout
+  // silhouette interior to the billboard quad. The faithful-visible stand-in
+  // (confirmed against angrylion-rdp-plus) is the XLU_SURF mode itself:
+  // alpha-over the bilinear texel alpha over the framebuffer. ZMODE_XLU =
+  // z-TEST, NO z-write, back-to-front per-tile sort (R.2). The N64 also does
+  // NOT draw each tree twice; it partitions trees into disjoint
+  // TEX_EDGE/XLU_SURF sets by a visibility flag. We render every tree once via
+  // this XLU soft-edge pass.
+  out->zmode = (uint8_t)ZMODE_XLU;
   out->cull = (uint8_t)CULL_NONE;  // N6 double-sided billboard
-  // T2 opaque cutout pass (N64 G_RM_AA_ZB_TEX_EDGE, combiner alpha = TEXEL0).
-  // The tree0 sprite is 5551 (1-bit alpha) -> decoded texel alpha is 0 or 255,
-  // so ANY threshold in (0,255] cuts the same silhouette; 128 is the canonical
-  // midpoint. This activates raster's alpha_cmp discard path, killing the black
-  // billboard background and leaving only the tree silhouette (the visible T2
-  // win).
-  out->alpha_cmp = 128;
+  // Discard only FULLY-transparent texels (a==0, surrounded by transparent) to
+  // skip the no-op blend; the soft ring (a in [1,254]) is kept and blended. The
+  // N64 uses G_AC_NONE (coverage does the cutout); our 1-threshold is the
+  // alpha-over equivalent that avoids wasted per-pixel work on the clear
+  // border.
+  out->alpha_cmp = 1;
   out->lit = 0;
 }
 
@@ -845,13 +859,13 @@ uint32_t demo_terrain_build(struct Command* buf, uint32_t cap,
   telem->cmdgen_draws += 1;
   telem->cmdgen_tris += terrain_tcount;
 
-  // ---- tree billboards: tree0 sprite (MODULATE), double-sided, cutout ------
-  // T2 ships the OPAQUE cutout pass only (G_RM_AA_ZB_TEX_EDGE): alpha_cmp
-  // discards the transparent billboard background -> z-write the tree
-  // silhouette. The faithful XLU surface pass (G_RM_AA_ZB_XLU_SURF) is DEFERRED
-  // to T4: at 1-bit 5551 alpha with no coverage-AA yet it composites visually
-  // IDENTICALLY to the cutout, and the double-draw is what overflowed the
-  // shared bin-ref pool (RDR_BIN_POOL_REFS) — so its payoff waits for AA.
+  // ---- tree billboards: tree0 sprite (MODULATE), double-sided, soft XLU -----
+  // Faithful soft-edge trees: a SINGLE XLU soft-edge pass (see
+  // demo_tree_material — bilinear 5551 + ZMODE_XLU alpha-over). This CONVERTS
+  // the old opaque cutout pass to XLU; it does NOT add a second draw, so the
+  // per-tile bin demand is unchanged (the T2 double-draw that overflowed
+  // RDR_BIN_POOL_REFS is avoided) and frame.h is untouched. The trees now route
+  // through the XLU sweep's per-tile gather + back-to-front sort (R.2).
   memset(&c, 0, sizeof c);
   c.u.set_material.state = &s_tree_state;
   push(CMD_SET_MATERIAL, &c);

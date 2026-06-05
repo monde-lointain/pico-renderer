@@ -652,8 +652,9 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
 // XLU materials are ALWAYS textured here (the flat fast path is opaque-only and
 // stays in sweep 1); a non-textured XLU material would write nothing, so we
 // gate on a valid texture and skip otherwise. `rs->alpha_cmp` is honored
-// (discard below threshold) for generality, though the tree XLU material does
-// not set it.
+// (discard below threshold) — the soft-edge tree XLU material sets it to 1 to
+// drop only fully-transparent texels while keeping+blending the bilinear soft
+// ring.
 // `zbuf` is const here: the XLU sweep z-TESTS but never WRITES depth (the no-
 // z-write invariant, enforced at the type level — a write would not compile).
 static void raster_one_xlu(const struct TriSetup* t,
