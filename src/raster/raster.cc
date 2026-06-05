@@ -162,6 +162,16 @@ enum { RASTER_XLU_TILE_CAP = 256 };
 // regardless (each tile is drawn by exactly one worker; the drop is per-tile).
 static uint32_t s_xlu_dropped = 0;
 
+#if PROFILER
+// T5 overdraw probe (PROFILER-only): per-WORKER, per-tile, per-pixel count of
+// XLU fragments that pass the z-test, reset per tile. Used to transition-count
+// distinct touched pixels (0->1) and pixels reaching depth>=2 (1->2) so the
+// report can derive mean XLU overdraw (= frags/distinct) — the go/no-go gate
+// for L6's front-to-back machinery. Per-core to avoid the cross-core race;
+// ~7.2KB, pico-prof build ONLY (PROFILER=0 erases it -> golden bit-identical).
+static uint8_t g_prof_xlu_depth[PROF_NUM_CORES][RDR_TILE_W * RDR_TILE_H];
+#endif
+
 // Edge function in Q12.4 integer space: signed area of (a->b) x (a->p). > 0
 // means p is to the left of directed edge a->b (screen y-down). Coords are
 // bounded (guard-band clipped) so the int32 product does not overflow.
@@ -439,10 +449,18 @@ static uint8_t gouraud_chan(int32_t w0, int32_t w1, int32_t w2, int c0, int c1,
 // tile_px_x0/y0 = the tile's top-left pixel in screen space. `rs` selects the
 // per-pixel path: flat-fill fast path (no valid texture, BIT-IDENTICAL to the
 // pre-R.1 rasterizer) or textured + Gouraud + combiner (valid texture).
-static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
-                       int tile_px_x0, int tile_px_y0, uint16_t* fb,
-                       uint16_t* zbuf, uint8_t* cov) {
+// Returns the number of pixels that passed the inside test (entered the heavy
+// per-pixel body) when PROFILER is on — the denominator for the opaque-fill
+// ns/pixel metric. Returns 0 when PROFILER=0: the counter compiles away and the
+// production path is byte-for-byte unchanged.
+static uint32_t raster_one(const struct TriSetup* t,
+                           const struct RenderState* rs, int tile_px_x0,
+                           int tile_px_y0, uint16_t* fb, uint16_t* zbuf,
+                           uint8_t* cov) {
   int const textured = rs_has_texture(rs);
+#if PROFILER
+  uint32_t px_inside = 0;  // pixels entering the heavy body (ns/px denominator)
+#endif
   // R.4: 2-cycle detail multitexture iff cycle==TWO and tex1 valid (constant
   // per triangle). When 0, the combiner step below is the EXACT pre-R.4
   // shade_pixel path -> byte-identical (the regression gate).
@@ -520,6 +538,11 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       if (!(in0 && in1 && in2)) {
         continue;
       }
+#if PROFILER
+      ++px_inside;  // entered the heavy body — counted pre-z-test on purpose:
+                    // the textured path pays full texture+combiner BEFORE the
+                    // z-test, so this is the true per-pixel-work count.
+#endif
       // Interpolate 1/w: perspective-correct in 1/w is linear in screen space.
       // inv_w = (w0*iw0 + w1*iw1 + w2*iw2) / area2. Numerator: w_i (Q24.8) *
       // iw (Q16.16) -> use 64-bit to avoid overflow, divide by area2 (Q24.8) to
@@ -627,6 +650,11 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       }
       // z-test AFTER cutout/keep so a discarded fragment never seeds depth.
       if (znew < zbuf[zi]) {
+#if PROFILER
+        // Overdraw probe: this textured fragment shaded fully then LOST the
+        // z-test — exactly the work Q3 (z-test-first) would elide. Sizes Q3.
+        ++g_prof_opaque_zrej[prof_core()];
+#endif
         continue;
       }
       zbuf[zi] = znew;
@@ -638,6 +666,11 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
       }
     }
   }
+#if PROFILER
+  return px_inside;
+#else
+  return 0;
+#endif
 }
 
 // Rasterize ONE already-setup TRANSLUCENT (XLU) triangle (R.2, sweep 2). Shares
@@ -657,14 +690,19 @@ static void raster_one(const struct TriSetup* t, const struct RenderState* rs,
 // ring.
 // `zbuf` is const here: the XLU sweep z-TESTS but never WRITES depth (the no-
 // z-write invariant, enforced at the type level — a write would not compile).
-static void raster_one_xlu(const struct TriSetup* t,
-                           const struct RenderState* rs, int tile_px_x0,
-                           int tile_px_y0, uint16_t* fb, const uint16_t* zbuf,
-                           uint8_t* cov) {
+// Returns inside-pixel count when PROFILER is on (mirrors raster_one — same
+// ns/px denominator), 0 otherwise (production path byte-for-byte unchanged).
+static uint32_t raster_one_xlu(const struct TriSetup* t,
+                               const struct RenderState* rs, int tile_px_x0,
+                               int tile_px_y0, uint16_t* fb,
+                               const uint16_t* zbuf, uint8_t* cov) {
   int const textured = rs_has_texture(rs);
   if (!textured) {
-    return;  // XLU without a texture contributes nothing (flat path is opaque).
+    return 0;  // XLU without a texture contributes nothing (flat is opaque).
   }
+#if PROFILER
+  uint32_t px_inside = 0;  // pixels passing the inside test (ns/px denominator)
+#endif
   // R.4: 2-cycle detail iff cycle==TWO and tex1 valid (constant per tri); else
   // the EXACT pre-R.4 shade_pixel XLU path (byte-identical regression gate).
   // The `textured &&` is redundant here (the early-return above guarantees it)
@@ -736,6 +774,11 @@ static void raster_one_xlu(const struct TriSetup* t,
       if (!(in0 && in1 && in2)) {
         continue;
       }
+#if PROFILER
+      ++px_inside;  // inside the tri (same denominator as opaque). NOTE: XLU
+                    // z-TESTS before shading (below), so a z-rejected XLU pixel
+                    // is cheap — unlike opaque, which shades before the z-test.
+#endif
       int64_t const num = ((int64_t)w0 * (int64_t)t->iw0) +
                           ((int64_t)w1 * (int64_t)t->iw1) +
                           ((int64_t)w2 * (int64_t)t->iw2);
@@ -751,6 +794,25 @@ static void raster_one_xlu(const struct TriSetup* t,
       if (znew < zbuf[zi]) {
         continue;
       }
+#if PROFILER
+      // Overdraw probe: a z-passing XLU fragment. Transition-count the
+      // per-pixel depth so the report derives mean overdraw (frags/distinct) +
+      // the depth>=2 fraction — the L6 go/no-go gate. (Placed after the z-test,
+      // so it counts only fragments that would actually composite.)
+      {
+        uint32_t const pc = prof_core();
+        uint8_t* const dp = &g_prof_xlu_depth[pc][zi];
+        if (*dp == 0) {
+          ++g_prof_xlu_distinct[pc];
+        } else if (*dp == 1) {
+          ++g_prof_xlu_ge2[pc];
+        }
+        if (*dp < 255) {
+          ++(*dp);
+        }
+        ++g_prof_xlu_frags[pc];
+      }
+#endif
 
       // Perspective-correct UV (same num/area2 form as the opaque path).
       int64_t const num_u = ((int64_t)w0 * t->u_iw0) +
@@ -815,6 +877,11 @@ static void raster_one_xlu(const struct TriSetup* t,
       }
     }
   }
+#if PROFILER
+  return px_inside;
+#else
+  return 0;
+#endif
 }
 
 // Per-tri back-to-front depth key: the sum of the 3 verts' inv_w (ASCENDING
@@ -904,15 +971,31 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
         continue;
       }
       struct TriSetup t;
-      int const rc =
-          tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
+      int rc;
+      {
+        // T5 FINE: per-triangle setup span (SysTick) — << 67ms, never wraps.
+        PROF_BLOCK_FINE(PROF_OPAQUE_SETUP);
+        rc = tri_setup(&t, &pool[ref->v0], &pool[ref->v1], &pool[ref->v2]);
+      }
       if (rc != RDR_OK) {
         continue;  // degenerate -> rejected, no fill
       }
       // TriRef.material indexes the interned render-state table; it selects the
       // per-pixel path (flat fast path vs textured/Gouraud/combiner).
       const struct RenderState* rs = &rstate_table[ref->material];
-      raster_one(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
+      uint32_t px;
+      {
+        // T5 FINE: per-triangle fill span (SysTick) — the per-pixel inner loop.
+        PROF_BLOCK_FINE(PROF_OPAQUE_FILL);
+        px = raster_one(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
+      }
+#if PROFILER
+      // Accumulate filled-pixel count into this core's slot — once per triangle
+      // (prof_core() + add, negligible), NOT per pixel. Outside the FINE block.
+      g_prof_opaque_px[prof_core()] += px;
+#else
+      (void)px;
+#endif
     }
   }
 
@@ -921,9 +1004,20 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
   // composite each over the framebuffer (z-test against sweep-1 depth, NO
   // z-write, texel-alpha alpha-over). Each tile is drawn by exactly ONE worker,
   // so a deterministic (stable) sort makes serial == 2-worker bit-identical.
+#if PROFILER
+  // Overdraw probe: reset THIS worker's per-pixel XLU depth for this tile,
+  // OUTSIDE the timed sweep_xlu block (so the memset doesn't perturb the
+  // measurement). Per-core slice; the XLU sweep below counts into it.
+  memset(g_prof_xlu_depth[prof_core()], 0, sizeof g_prof_xlu_depth[0]);
+#endif
   {
-    PROF_BLOCK_FINE(
-        PROF_SWEEP_XLU);  // T5: sweep 2 — sort + translucent composite
+    // T5: sweep 2 — sort + translucent composite. COARSE (time_us_64), NOT
+    // FINE: a tree-heavy tile's XLU fill (soft billboards, heavy back-to-front
+    // overdraw) exceeds SysTick's ~67ms span — measured wrap=1 on every window
+    // when FINE, which UNDER-reported XLU and hid its true cost in the coarse
+    // raster_tile "unaccounted" remainder. Coarse, like sweep_opaque, is wrap-
+    // free and gives the real XLU magnitude for the opaque-vs-XLU comparison.
+    PROF_BLOCK(PROF_SWEEP_XLU);
     if (xlu_n > 1) {
       xlu_sort_stable(xlu_idx, xlu_n, pool, bin);
     }
@@ -936,7 +1030,16 @@ void raster_tile_noclear(int tile, const struct TileBin* bin,
         continue;  // degenerate -> rejected, no fill
       }
       const struct RenderState* rs = &rstate_table[ref->material];
-      raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
+      uint32_t const px =
+          raster_one_xlu(&t, rs, tile_px_x0, tile_px_y0, fb, zbuf, cov_active);
+#if PROFILER
+      // Per-core XLU inside-pixel count (same denominator as opaque) — once per
+      // tri, not per pixel. ns/px = coarse sweep_xlu / xlu_px (µs-granular,
+      // fine for a hundreds-of-ms sweep).
+      g_prof_xlu_px[prof_core()] += px;
+#else
+      (void)px;
+#endif
     }
   }
 }
