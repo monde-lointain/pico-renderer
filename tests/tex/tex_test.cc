@@ -306,6 +306,64 @@ TEST(TexValidate, NullOrZeroDimIsOk) {
   EXPECT_EQ(tex_validate((const struct TexDesc*)0), RDR_OK);
 }
 
+// ---- D.2 handoff #5: pow2-dimension guard for WRAP/MIRROR ------------------
+// The sampler mask-wraps REPEAT/MIRROR axes (coord & (dim-1) / log2_pow2(dim));
+// a non-pow2 dim there silently corrupts wrapping AND costs +47 cyc/px (S0).
+// CLAMP saturates to [0,dim-1] (no mask), so CLAMP axes are EXEMPT — any dim
+// ok. (3) is the canonical non-pow2 dim: 3 & (3-1) == 2 != 0.
+
+TEST(TexValidate, RejectsNonPow2WidthOnWrapRepeat) {
+  static const uint16_t px[8] = {0};  // 3x1, w non-pow2
+  struct TexDesc t;
+  fill_desc(&t, px, 3, 1, TEXFMT_RGBA565, WRAP_REPEAT, FILTER_POINT,
+            (const void*)0);
+  EXPECT_EQ(tex_validate(&t), RDR_EINVAL);  // w=3 with REPEAT_s
+}
+
+TEST(TexValidate, RejectsNonPow2HeightOnWrapMirror) {
+  static const uint16_t px[8] = {0};  // 2x3, h non-pow2
+  struct TexDesc t;
+  fill_desc(&t, px, 2, 3, TEXFMT_RGBA565, WRAP_MIRROR, FILTER_POINT,
+            (const void*)0);
+  EXPECT_EQ(tex_validate(&t), RDR_EINVAL);  // h=3 with MIRROR_t
+}
+
+TEST(TexValidate, NonPow2OnClampOnlyAxisIsOk) {
+  // CLAMP saturates (no mask): a non-pow2 dim is fine on a CLAMP-only axis.
+  static const uint16_t px[16] = {0};  // 3x5, both dims non-pow2, both CLAMP
+  struct TexDesc t;
+  fill_desc(&t, px, 3, 5, TEXFMT_RGBA565, WRAP_CLAMP, FILTER_POINT,
+            (const void*)0);
+  EXPECT_EQ(tex_validate(&t), RDR_OK);
+}
+
+TEST(TexValidate, PerAxisPow2CheckIsIndependent) {
+  // Only the axis whose mode masks is constrained: w non-pow2 is OK when
+  // wrap_s is CLAMP, even though wrap_t is REPEAT on a pow2 h.
+  static const uint16_t px[16] = {0};  // 3x4: w=3 non-pow2, h=4 pow2
+  struct TexDesc t;
+  fill_desc(&t, px, 3, 4, TEXFMT_RGBA565, WRAP_CLAMP, FILTER_POINT,
+            (const void*)0);
+  t.wrap_s = (uint8_t)WRAP_CLAMP;   // w=3 non-pow2 but CLAMP -> exempt
+  t.wrap_t = (uint8_t)WRAP_REPEAT;  // h=4 pow2 with REPEAT -> ok
+  EXPECT_EQ(tex_validate(&t), RDR_OK);
+  // Flip: w non-pow2 now masks (REPEAT) -> reject.
+  t.wrap_s = (uint8_t)WRAP_REPEAT;
+  EXPECT_EQ(tex_validate(&t), RDR_EINVAL);
+}
+
+TEST(TexValidate, Pow2DimsOnWrapAccepted) {
+  // Both dims pow2 (incl. 1, since 1 & 0 == 0) with masking modes -> accepted.
+  static const uint16_t px[16] = {0};  // 4x2
+  struct TexDesc t;
+  fill_desc(&t, px, 4, 2, TEXFMT_RGBA565, WRAP_REPEAT, FILTER_POINT,
+            (const void*)0);
+  EXPECT_EQ(tex_validate(&t), RDR_OK);
+  fill_desc(&t, px, 1, 1, TEXFMT_RGBA565, WRAP_MIRROR, FILTER_POINT,
+            (const void*)0);
+  EXPECT_EQ(tex_validate(&t), RDR_OK);  // 1 is a power of two
+}
+
 // ---- CI sampler forces POINT even if filter says THREE_POINT ---------------
 // (Defense in depth: validate() rejects at setup, but the fetch must not crash
 //  / interpolate indices if a THREE_POINT CI slips through.)
