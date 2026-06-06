@@ -16,6 +16,7 @@
 #include "golden.h"
 #include "gtest/gtest.h"
 #include "oracle.h"
+#include "raster/interp.h"  // T5 L1: exact-integer DDA stepper under test
 #include "rdr/config.h"
 #include "rdr/types.h"
 #include "shade/shade.h"  // R.1 textured-path exact reference (shade_pixel)
@@ -3285,4 +3286,70 @@ TEST(RasterDetail, DetailShiftAtLeast32IsUbsanCleanAndMasks) {
     }
   }
   EXPECT_GT(checked, 50) << "too few covered pixels — test is vacuous";
+}
+
+// ---------------------------------------------------------------------------
+// T5 L1 — interp.h exact-integer DDA parity (the golden-neutral GATE).
+// The stepper must reproduce the rasterizer's per-pixel  (int32_t)(num / area2)
+// divide BIT-FOR-BIT across the full bounding box, for every interpolant —
+// including negative numerators (u_iw/v_iw), thin triangles (small area2 ->
+// large per-pixel quotient steps), and pixels OUTSIDE the triangle (the
+// accumulator must stay in lockstep with sx — the L1 desync invariant). If this
+// passes, L1 changes no output and the golden fb_crc is unchanged.
+namespace {
+
+// Drive the stepper exactly as the raster inner loop does (init at the row
+// origin sx=0,sy=0; begin_row per scanline; value-then-step_x per pixel) and
+// assert interp_value == the reference truncating divide at EVERY pixel of a
+// w x h grid. num(sx,sy) = num0 + sx*dx + sy*dy (int64, exact-linear).
+void check_interp_grid(int64_t num0, int64_t dx, int64_t dy, int32_t area2,
+                       int w, int h) {
+  ASSERT_GT(area2, 0);
+  struct Interp p;
+  interp_init(&p, num0, dx, dy, area2);
+  for (int sy = 0; sy < h; ++sy) {
+    interp_begin_row(&p);
+    for (int sx = 0; sx < w; ++sx) {
+      int64_t const num = num0 + ((int64_t)sx * dx) + ((int64_t)sy * dy);
+      int32_t const ref = (int32_t)(num / (int64_t)area2);  // C trunc-to-zero
+      ASSERT_EQ(interp_value(&p), ref)
+          << "sx=" << sx << " sy=" << sy << " num0=" << num0 << " dx=" << dx
+          << " dy=" << dy << " area2=" << area2;
+      interp_step_x(&p);
+    }
+  }
+}
+
+}  // namespace
+
+TEST(InterpDDA, NonNegativeMatchesDivide) {
+  // inv_w / Gouraud / fog class: num >= 0 across the grid (floor == trunc).
+  check_interp_grid(/*num0=*/0, /*dx=*/12345, /*dy=*/777, /*area2=*/4096, 60,
+                    60);
+  check_interp_grid(1 << 20, 65536, 65536, 257, 40, 40);       // ~Q16.16
+  check_interp_grid(255LL * 4096, -4096, -512, 4096, 60, 60);  // 0..255
+}
+
+TEST(InterpDDA, NegativeNumeratorTruncatesTowardZero) {
+  // u_iw/v_iw class: numerator goes negative across the grid; the trunc
+  // correction must match C's truncation toward zero (NOT floor) everywhere.
+  check_interp_grid(/*num0=*/-1000000, /*dx=*/53, /*dy=*/29, /*area2=*/4096, 80,
+                    80);
+  check_interp_grid(50000, -3000, -2000, 4096, 64, 64);  // crosses zero
+  check_interp_grid(-7, 1, 0, 5, 30, 1);                 // tiny, hand-checkable
+}
+
+TEST(InterpDDA, ThinTriangleLargeSteps) {
+  // Small area2 (near RASTER_AREA_EPS) with large numerators -> qx large /
+  // possibly negative; (q,r) must stay exact (32-bit) and matching.
+  check_interp_grid(123456789LL, 7654321, -1234567, 257, 60, 60);
+  check_interp_grid(-123456789LL, -7654321, 1234567, 257, 60, 60);
+}
+
+TEST(InterpDDA, ExactDivisibleBoundaries) {
+  // Exact multiples of area2 (remainder 0) at and around zero — the rf==0
+  // branch of the trunc correction (floor == trunc when exactly divisible).
+  check_interp_grid(/*num0=*/-4096LL * 3, /*dx=*/4096, /*dy=*/0, /*area2=*/4096,
+                    16, 1);  // -3,-2,-1,0,1,... exactly
+  check_interp_grid(0, 4096, 4096, 4096, 20, 20);
 }

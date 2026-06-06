@@ -16,6 +16,7 @@
 #include "blend/blend.h"  // blend_premul_accumulate/_resolve (XLU UNDER), fog_lerp
 #include "gfx/framebuffer.h"  // rgb565()
 #include "prof/prof.h"  // T5: PROF_RASTER_TILE + FINE sweep blocks (no-op when off)
+#include "raster/interp.h"  // T5 L1: exact-integer DDA interpolant stepper
 #include "rdr/config.h"
 #include "rdr/sram.h"     // __not_in_flash_func (SRAM placement; no-op on host)
 #include "shade/shade.h"  // shade_pixel (color combiner)
@@ -466,22 +467,75 @@ static fx16_16 perspective_texcoord_q16(int32_t num_uiw, int32_t inv_w_p) {
   return (fx16_16)q;
 }
 
-// Affine (screen-linear) interpolation of one packed-565 shade channel set at a
-// pixel: out8 = sum(w_i * chan_i) / area2, truncated. N64 RDP SHADE is NOT
-// perspective-corrected (only UV is). The divide reuses the signed num/area2
-// truncation form (P3-5 parity) so host<->device match.
-static uint8_t gouraud_chan(int32_t w0, int32_t w1, int32_t w2, int c0, int c1,
-                            int c2, int32_t area2) {
-  int64_t const num =
-      ((int64_t)w0 * c0) + ((int64_t)w1 * c1) + ((int64_t)w2 * c2);
-  int32_t v = (int32_t)(num / (int64_t)area2);
+// Clamp a stepped value to uint8 [0,255] — the Gouraud/fog readout clamp. The
+// affine SHADE/fog interpolation (out8 = sum(w_i*chan_i)/area2, truncated; N64
+// RDP SHADE is NOT perspective-corrected, only UV is) is now the L1 stepper;
+// this applies the post-divide [0,255] clamp to the stepped value.
+static uint8_t clamp_u8(int32_t v) {
   if (v < 0) {
-    v = 0;
+    return 0;
   }
   if (v > 255) {
-    v = 255;
+    return 255;
   }
   return (uint8_t)v;
+}
+
+// T5 L1: screen-affine basis for one (triangle, tile) — the three edge values
+// at the bounding-box origin pixel center plus their exact per-pixel (+x) and
+// per-scanline (+y) integer deltas. The edge functions are linear in the pixel
+// center (one pixel = 1<<RASTER_SUBPX in Q12.4), so each interpolant
+// num = w0*Q0 + w1*Q1 + w2*Q2 is screen-affine and DDA-steppable from this
+// basis (Abrash Black Book ch66: 1/z, s/z, t/z vary linearly in screenspace).
+struct EdgeAffine {
+  int32_t w0_o, w1_o, w2_o;        // edge values at (bb_minx,bb_miny) pixel ctr
+  int32_t dw0_dx, dw1_dx, dw2_dx;  // per-pixel +x deltas
+  int32_t dw0_dy, dw1_dy, dw2_dy;  // per-scanline +y deltas
+  int32_t area2;                   // shared divisor (> 0)
+};
+
+// noinline: this runs per (triangle,tile) — NOT per pixel — so keep its code
+// OUT of the SRAM-resident (.time_critical) raster_tile that inlines
+// raster_one; flash-resident setup keeps the tight RP2040 SRAM for the hot
+// per-pixel loop.
+static void INTERP_NOINLINE edge_affine_init(struct EdgeAffine* e,
+                                             const struct TriSetup* t,
+                                             int bb_minx, int bb_miny) {
+  fx12_4 const cx0 = (fx12_4)((bb_minx << RASTER_SUBPX) + RASTER_HALF);
+  fx12_4 const cy0 = (fx12_4)((bb_miny << RASTER_SUBPX) + RASTER_HALF);
+  e->w0_o = edge_eval(t->x1, t->y1, t->x2, t->y2, cx0, cy0);
+  e->w1_o = edge_eval(t->x2, t->y2, t->x0, t->y0, cx0, cy0);
+  e->w2_o = edge_eval(t->x0, t->y0, t->x1, t->y1, cx0, cy0);
+  // d w_i / d(pixel) from edge_eval's closed form (one pixel =
+  // 1<<RASTER_SUBPX).
+  int32_t const step = (int32_t)1 << RASTER_SUBPX;
+  e->dw0_dx = (int32_t)(t->y1 - t->y2) * step;
+  e->dw1_dx = (int32_t)(t->y2 - t->y0) * step;
+  e->dw2_dx = (int32_t)(t->y0 - t->y1) * step;
+  e->dw0_dy = (int32_t)(t->x2 - t->x1) * step;
+  e->dw1_dy = (int32_t)(t->x0 - t->x2) * step;
+  e->dw2_dy = (int32_t)(t->x1 - t->x0) * step;
+  e->area2 = t->area2;
+}
+
+// Set up one interpolant stepper from its three per-vertex values over the
+// EdgeAffine basis. Seeds one pixel LEFT of bb_minx (num_origin - dx) so the
+// loop-top interp_step_x lands on bb_minx and advances UNCONDITIONALLY per
+// pixel (the L1 desync invariant — the body's existing `continue`s stay valid
+// because every accumulator is stepped before the inside test / any early-out).
+// noinline (flash-resident): per-(triangle,tile) setup, not per pixel — see
+// edge_affine_init. Collapses the divide-heavy floor_divmod setup to one flash
+// copy + call sites instead of inlining it into the SRAM hot path.
+static void INTERP_NOINLINE interp_setup(struct Interp* p,
+                                         const struct EdgeAffine* e, int32_t q0,
+                                         int32_t q1, int32_t q2) {
+  int64_t const num_o = ((int64_t)e->w0_o * q0) + ((int64_t)e->w1_o * q1) +
+                        ((int64_t)e->w2_o * q2);
+  int64_t const dx = ((int64_t)e->dw0_dx * q0) + ((int64_t)e->dw1_dx * q1) +
+                     ((int64_t)e->dw2_dx * q2);
+  int64_t const dy = ((int64_t)e->dw0_dy * q0) + ((int64_t)e->dw1_dy * q1) +
+                     ((int64_t)e->dw2_dy * q2);
+  interp_init(p, num_o - dx, dx, dy, e->area2);
 }
 
 // Rasterize one already-setup triangle into the framebuffer + tile Z scratch.
@@ -561,9 +615,59 @@ static uint32_t raster_one(const struct TriSetup* t,
   bb_maxx = clampi(bb_maxx, tile_minx, tile_maxx);
   bb_maxy = clampi(bb_maxy, tile_miny, tile_maxy);
 
+  // T5 L1: set up the screen-affine interpolant steppers for this (tri,tile).
+  // inv_w always; fog if enabled; u/v + Gouraud only on the textured path. The
+  // per-pixel num/area2 divides become adds (interp_step_x) + a readout.
+  struct EdgeAffine ea;
+  edge_affine_init(&ea, t, bb_minx, bb_miny);
+  struct Interp i_invw;
+  interp_setup(&i_invw, &ea, t->iw0, t->iw1, t->iw2);
+  int const fog_en = rs->fog.enabled;
+  struct Interp i_fog = {};
+  if (fog_en) {
+    interp_setup(&i_fog, &ea, (int32_t)t->fog0, (int32_t)t->fog1,
+                 (int32_t)t->fog2);
+  }
+  struct Interp i_u = {};
+  struct Interp i_v = {};
+  struct Interp i_gr = {};
+  struct Interp i_gg = {};
+  struct Interp i_gb = {};
+  if (textured) {
+    interp_setup(&i_u, &ea, t->u_iw0, t->u_iw1, t->u_iw2);
+    interp_setup(&i_v, &ea, t->v_iw0, t->v_iw1, t->v_iw2);
+    interp_setup(&i_gr, &ea, (int32_t)sr[0], (int32_t)sr[1], (int32_t)sr[2]);
+    interp_setup(&i_gg, &ea, (int32_t)sg[0], (int32_t)sg[1], (int32_t)sg[2]);
+    interp_setup(&i_gb, &ea, (int32_t)sb[0], (int32_t)sb[1], (int32_t)sb[2]);
+  }
+
   for (int sy = bb_miny; sy < bb_maxy; ++sy) {
     fx12_4 const cy = (fx12_4)((sy << RASTER_SUBPX) + RASTER_HALF);
+    interp_begin_row(&i_invw);
+    if (fog_en) {
+      interp_begin_row(&i_fog);
+    }
+    if (textured) {
+      interp_begin_row(&i_u);
+      interp_begin_row(&i_v);
+      interp_begin_row(&i_gr);
+      interp_begin_row(&i_gg);
+      interp_begin_row(&i_gb);
+    }
     for (int sx = bb_minx; sx < bb_maxx; ++sx) {
+      // T5 L1: advance every active stepper UNCONDITIONALLY (before the inside
+      // test / any early-out) so each accumulator stays in lockstep with sx.
+      interp_step_x(&i_invw);
+      if (fog_en) {
+        interp_step_x(&i_fog);
+      }
+      if (textured) {
+        interp_step_x(&i_u);
+        interp_step_x(&i_v);
+        interp_step_x(&i_gr);
+        interp_step_x(&i_gg);
+        interp_step_x(&i_gb);
+      }
       fx12_4 const cx = (fx12_4)((sx << RASTER_SUBPX) + RASTER_HALF);
       // Barycentric edge functions: w_i opposite vertex i.
       int32_t const w0 = edge_eval(t->x1, t->y1, t->x2, t->y2, cx, cy);
@@ -582,14 +686,10 @@ static uint32_t raster_one(const struct TriSetup* t,
                     // the textured path pays full texture+combiner BEFORE the
                     // z-test, so this is the true per-pixel-work count.
 #endif
-      // Interpolate 1/w: perspective-correct in 1/w is linear in screen space.
-      // inv_w = (w0*iw0 + w1*iw1 + w2*iw2) / area2. Numerator: w_i (Q24.8) *
-      // iw (Q16.16) -> use 64-bit to avoid overflow, divide by area2 (Q24.8) to
-      // recover Q16.16.
-      int64_t const num = ((int64_t)w0 * (int64_t)t->iw0) +
-                          ((int64_t)w1 * (int64_t)t->iw1) +
-                          ((int64_t)w2 * (int64_t)t->iw2);
-      int32_t const inv_w = (int32_t)(num / (int64_t)t->area2);
+      // Interpolate 1/w (perspective-correct in 1/w is screen-linear): the
+      // (w0*iw0 + w1*iw1 + w2*iw2)/area2 divide is now the L1 stepper readout,
+      // bit-identical to (int32_t)(num/area2).
+      int32_t const inv_w = interp_value(&i_invw);
 
       int const tile_x = sx - tile_px_x0;
       int const tile_y = sy - tile_px_y0;
@@ -608,9 +708,8 @@ static uint32_t raster_one(const struct TriSetup* t,
         // skips this branch -> the write stays t->color, BIT-IDENTICAL to the
         // pre-R.3 flat path (the regression gate). Affine per-pixel factor.
         uint16_t out = t->color;
-        if (rs->fog.enabled) {
-          uint8_t const fogf = gouraud_chan(
-              w0, w1, w2, (int)t->fog0, (int)t->fog1, (int)t->fog2, t->area2);
+        if (fog_en) {
+          uint8_t const fogf = clamp_u8(interp_value(&i_fog));
           out = fog_lerp(out, rs->fog.color, fogf);
         }
         fb[(sy * RDR_SCREEN_W) + sx] = out;
@@ -624,24 +723,19 @@ static uint32_t raster_one(const struct TriSetup* t,
       }
 
       // TEXTURED + GOURAUD + COMBINER PATH (R.1, opaque pass).
-      // Perspective-correct UV: affine-interp u_iw/v_iw (same num/area2 form as
-      // inv_w), then recover the Q16.16 texel coord.
-      int64_t const num_u = ((int64_t)w0 * t->u_iw0) +
-                            ((int64_t)w1 * t->u_iw1) + ((int64_t)w2 * t->u_iw2);
-      int64_t const num_v = ((int64_t)w0 * t->v_iw0) +
-                            ((int64_t)w1 * t->v_iw1) + ((int64_t)w2 * t->v_iw2);
-      int32_t const u_iw_p = (int32_t)(num_u / (int64_t)t->area2);
-      int32_t const v_iw_p = (int32_t)(num_v / (int64_t)t->area2);
+      // Perspective-correct UV: affine-interp u_iw/v_iw (L1 stepper readouts,
+      // same num/area2 values as before), then recover the Q16.16 texel coord.
+      int32_t const u_iw_p = interp_value(&i_u);
+      int32_t const v_iw_p = interp_value(&i_v);
       fx16_16 const u_q16 = perspective_texcoord_q16(u_iw_p, inv_w);
       fx16_16 const v_q16 = perspective_texcoord_q16(v_iw_p, inv_w);
 
       // Gouraud shade (affine; NOT perspective-corrected — N64 RDP convention).
-      uint8_t const gr = gouraud_chan(w0, w1, w2, (int)sr[0], (int)sr[1],
-                                      (int)sr[2], t->area2);
-      uint8_t const gg = gouraud_chan(w0, w1, w2, (int)sg[0], (int)sg[1],
-                                      (int)sg[2], t->area2);
-      uint8_t const gb = gouraud_chan(w0, w1, w2, (int)sb[0], (int)sb[1],
-                                      (int)sb[2], t->area2);
+      // L1 stepper readouts (same num/area2 values), clamped as gouraud_chan
+      // did.
+      uint8_t const gr = clamp_u8(interp_value(&i_gr));
+      uint8_t const gg = clamp_u8(interp_value(&i_gg));
+      uint8_t const gb = clamp_u8(interp_value(&i_gb));
       uint16_t const shade565 = rgb565(gr, gg, gb);
 
       // Alpha-cutout (N11): if alpha-compare is on, fetch full RGBA and DISCARD
@@ -682,9 +776,8 @@ static uint32_t raster_one(const struct TriSetup* t,
       // gouraud_chan). Disabled fog -> skip (TVtx.fog is born 0 then, so this
       // is bit-identical to no-fog regardless, but the gate also avoids the
       // work).
-      if (rs->fog.enabled) {
-        uint8_t const fogf = gouraud_chan(w0, w1, w2, (int)t->fog0,
-                                          (int)t->fog1, (int)t->fog2, t->area2);
+      if (fog_en) {
+        uint8_t const fogf = clamp_u8(interp_value(&i_fog));
         out = fog_lerp(out, rs->fog.color, fogf);
       }
       // z-test AFTER cutout/keep so a discarded fragment never seeds depth.
@@ -812,9 +905,53 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
   bb_maxx = clampi(bb_maxx, tile_minx, tile_maxx);
   bb_maxy = clampi(bb_maxy, tile_miny, tile_maxy);
 
+  // T5 L1: screen-affine interpolant steppers (XLU is always textured here, so
+  // inv_w + u/v + Gouraud are always set up; fog if enabled). Same
+  // exact-integer DDA as raster_one — golden-neutral.
+  struct EdgeAffine ea;
+  edge_affine_init(&ea, t, bb_minx, bb_miny);
+  struct Interp i_invw;
+  struct Interp i_u;
+  struct Interp i_v;
+  struct Interp i_gr;
+  struct Interp i_gg;
+  struct Interp i_gb;
+  interp_setup(&i_invw, &ea, t->iw0, t->iw1, t->iw2);
+  interp_setup(&i_u, &ea, t->u_iw0, t->u_iw1, t->u_iw2);
+  interp_setup(&i_v, &ea, t->v_iw0, t->v_iw1, t->v_iw2);
+  interp_setup(&i_gr, &ea, (int32_t)sr[0], (int32_t)sr[1], (int32_t)sr[2]);
+  interp_setup(&i_gg, &ea, (int32_t)sg[0], (int32_t)sg[1], (int32_t)sg[2]);
+  interp_setup(&i_gb, &ea, (int32_t)sb[0], (int32_t)sb[1], (int32_t)sb[2]);
+  int const fog_en = rs->fog.enabled;
+  struct Interp i_fog = {};
+  if (fog_en) {
+    interp_setup(&i_fog, &ea, (int32_t)t->fog0, (int32_t)t->fog1,
+                 (int32_t)t->fog2);
+  }
+
   for (int sy = bb_miny; sy < bb_maxy; ++sy) {
     fx12_4 const cy = (fx12_4)((sy << RASTER_SUBPX) + RASTER_HALF);
+    interp_begin_row(&i_invw);
+    interp_begin_row(&i_u);
+    interp_begin_row(&i_v);
+    interp_begin_row(&i_gr);
+    interp_begin_row(&i_gg);
+    interp_begin_row(&i_gb);
+    if (fog_en) {
+      interp_begin_row(&i_fog);
+    }
     for (int sx = bb_minx; sx < bb_maxx; ++sx) {
+      // T5 L1: advance every stepper UNCONDITIONALLY (before the inside test /
+      // z-test / saturation early-out) so each stays in lockstep with sx.
+      interp_step_x(&i_invw);
+      interp_step_x(&i_u);
+      interp_step_x(&i_v);
+      interp_step_x(&i_gr);
+      interp_step_x(&i_gg);
+      interp_step_x(&i_gb);
+      if (fog_en) {
+        interp_step_x(&i_fog);
+      }
       fx12_4 const cx = (fx12_4)((sx << RASTER_SUBPX) + RASTER_HALF);
       int32_t const w0 = edge_eval(t->x1, t->y1, t->x2, t->y2, cx, cy);
       int32_t const w1 = edge_eval(t->x2, t->y2, t->x0, t->y0, cx, cy);
@@ -830,10 +967,8 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
                     // z-TESTS before shading (below), so a z-rejected XLU pixel
                     // is cheap — unlike opaque, which shades before the z-test.
 #endif
-      int64_t const num = ((int64_t)w0 * (int64_t)t->iw0) +
-                          ((int64_t)w1 * (int64_t)t->iw1) +
-                          ((int64_t)w2 * (int64_t)t->iw2);
-      int32_t const inv_w = (int32_t)(num / (int64_t)t->area2);
+      int32_t const inv_w =
+          interp_value(&i_invw);  // L1 stepper (golden-neutral)
 
       int const tile_x = sx - tile_px_x0;
       int const tile_y = sy - tile_px_y0;
@@ -877,23 +1012,16 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
         continue;
       }
 
-      // Perspective-correct UV (same num/area2 form as the opaque path).
-      int64_t const num_u = ((int64_t)w0 * t->u_iw0) +
-                            ((int64_t)w1 * t->u_iw1) + ((int64_t)w2 * t->u_iw2);
-      int64_t const num_v = ((int64_t)w0 * t->v_iw0) +
-                            ((int64_t)w1 * t->v_iw1) + ((int64_t)w2 * t->v_iw2);
-      int32_t const u_iw_p = (int32_t)(num_u / (int64_t)t->area2);
-      int32_t const v_iw_p = (int32_t)(num_v / (int64_t)t->area2);
+      // Perspective-correct UV (L1 stepper readouts; same num/area2 values).
+      int32_t const u_iw_p = interp_value(&i_u);
+      int32_t const v_iw_p = interp_value(&i_v);
       fx16_16 const u_q16 = perspective_texcoord_q16(u_iw_p, inv_w);
       fx16_16 const v_q16 = perspective_texcoord_q16(v_iw_p, inv_w);
 
-      // Gouraud shade (affine; N64 RDP convention) — same as opaque.
-      uint8_t const gr = gouraud_chan(w0, w1, w2, (int)sr[0], (int)sr[1],
-                                      (int)sr[2], t->area2);
-      uint8_t const gg = gouraud_chan(w0, w1, w2, (int)sg[0], (int)sg[1],
-                                      (int)sg[2], t->area2);
-      uint8_t const gb = gouraud_chan(w0, w1, w2, (int)sb[0], (int)sb[1],
-                                      (int)sb[2], t->area2);
+      // Gouraud shade (affine; N64 RDP convention) — L1 stepper readouts.
+      uint8_t const gr = clamp_u8(interp_value(&i_gr));
+      uint8_t const gg = clamp_u8(interp_value(&i_gg));
+      uint8_t const gb = clamp_u8(interp_value(&i_gb));
       uint16_t const shade565 = rgb565(gr, gg, gb);
 
       // XLU ALWAYS needs the texel's own alpha for the blend, so fetch full
@@ -924,9 +1052,8 @@ static uint32_t raster_one_xlu(const struct TriSetup* t,
       // accumulate the FOGGED color premultiplied by its texel alpha (faithful:
       // a distant translucent fragment fogs first, then contributes). Affine
       // interp (N64 per-vertex fog), same path as the opaque sweep.
-      if (rs->fog.enabled) {
-        uint8_t const fogf = gouraud_chan(w0, w1, w2, (int)t->fog0,
-                                          (int)t->fog1, (int)t->fog2, t->area2);
+      if (fog_en) {
+        uint8_t const fogf = clamp_u8(interp_value(&i_fog));
         combined = fog_lerp(combined, rs->fog.color, fogf);
       }
       // L6 FRONT-TO-BACK PREMULTIPLIED UNDER: accumulate the fogged combiner
