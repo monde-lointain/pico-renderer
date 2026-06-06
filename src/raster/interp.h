@@ -3,6 +3,24 @@
 
 #include <stdint.h>
 
+// Portable inline-control. always_inline/noinline are GCC/Clang attributes
+// (host clang, macOS appleclang, ARM gcc all honor them); MSVC — the host
+// Windows CI build — rejects __attribute__, so they no-op there. These attrs
+// only steer CODEGEN (per-pixel steppers must fold into the SRAM raster loop on
+// device; per-tri setup must stay flash-resident), which matters on the ARM
+// target; on a compiler without them the optimizer decides, fine for the
+// host correctness build. (Same #ifdef-guard rationale as rdr/sram.h.)
+// NOLINTBEGIN(cppcoreguidelines-macro-usage) — portability shim, not
+// constexpr-able
+#ifdef __GNUC__
+#define INTERP_ALWAYS_INLINE __attribute__((always_inline))
+#define INTERP_NOINLINE __attribute__((noinline))
+#else
+#define INTERP_ALWAYS_INLINE
+#define INTERP_NOINLINE
+#endif
+// NOLINTEND(cppcoreguidelines-macro-usage)
+
 // interp.h — screen-affine interpolant stepper (T5 L1: two-stage exact-integer
 // DDA). Replaces the per-pixel divide
 //     value = (int32_t)(num / area2)
@@ -100,8 +118,7 @@ static inline void interp_init(struct Interp* p, int64_t num_origin, int64_t dx,
 // loop at every -O level (at -Os the optimizer otherwise emits a flash call +
 // SRAM->flash veneer per call, which both wrecks the loop and makes the -Os
 // profiler unrepresentative of the shipped -O3 build).
-static inline __attribute__((always_inline)) void interp_begin_row(
-    struct Interp* p) {
+static inline INTERP_ALWAYS_INLINE void interp_begin_row(struct Interp* p) {
   p->qf = p->qf_row;
   p->rf = p->rf_row;
   p->qf_row += p->qy;
@@ -118,8 +135,7 @@ static inline __attribute__((always_inline)) void interp_begin_row(
 // lockstep with sx even across outside / z-rejected / saturated pixels (the L1
 // desync invariant). always_inline: the per-PIXEL hot path — must fold into the
 // SRAM loop at every -O level (see interp_begin_row).
-static inline __attribute__((always_inline)) void interp_step_x(
-    struct Interp* p) {
+static inline INTERP_ALWAYS_INLINE void interp_step_x(struct Interp* p) {
   p->qf += p->qx;
   p->rf += p->rx;
   if (p->rf >= p->area2) {
@@ -133,7 +149,7 @@ static inline __attribute__((always_inline)) void interp_step_x(
 // with rf in [0, area2), so num < 0 iff qf < 0; C truncates toward zero, which
 // is floor + 1 for a negative non-exact quotient. always_inline: per-PIXEL hot
 // path — must fold into the SRAM loop at every -O level (see interp_begin_row).
-static inline __attribute__((always_inline)) int32_t
+static inline INTERP_ALWAYS_INLINE int32_t
 interp_value(const struct Interp* p) {
   int32_t v = p->qf;
   if (p->qf < 0 && p->rf != 0) {

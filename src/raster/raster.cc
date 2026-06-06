@@ -498,10 +498,9 @@ struct EdgeAffine {
 // OUT of the SRAM-resident (.time_critical) raster_tile that inlines
 // raster_one; flash-resident setup keeps the tight RP2040 SRAM for the hot
 // per-pixel loop.
-static void __attribute__((noinline)) edge_affine_init(struct EdgeAffine* e,
-                                                       const struct TriSetup* t,
-                                                       int bb_minx,
-                                                       int bb_miny) {
+static void INTERP_NOINLINE edge_affine_init(struct EdgeAffine* e,
+                                             const struct TriSetup* t,
+                                             int bb_minx, int bb_miny) {
   fx12_4 const cx0 = (fx12_4)((bb_minx << RASTER_SUBPX) + RASTER_HALF);
   fx12_4 const cy0 = (fx12_4)((bb_miny << RASTER_SUBPX) + RASTER_HALF);
   e->w0_o = edge_eval(t->x1, t->y1, t->x2, t->y2, cx0, cy0);
@@ -527,10 +526,9 @@ static void __attribute__((noinline)) edge_affine_init(struct EdgeAffine* e,
 // noinline (flash-resident): per-(triangle,tile) setup, not per pixel — see
 // edge_affine_init. Collapses the divide-heavy floor_divmod setup to one flash
 // copy + call sites instead of inlining it into the SRAM hot path.
-static void __attribute__((noinline)) interp_setup(struct Interp* p,
-                                                   const struct EdgeAffine* e,
-                                                   int32_t q0, int32_t q1,
-                                                   int32_t q2) {
+static void INTERP_NOINLINE interp_setup(struct Interp* p,
+                                         const struct EdgeAffine* e, int32_t q0,
+                                         int32_t q1, int32_t q2) {
   int64_t const num_o = ((int64_t)e->w0_o * q0) + ((int64_t)e->w1_o * q1) +
                         ((int64_t)e->w2_o * q2);
   int64_t const dx = ((int64_t)e->dw0_dx * q0) + ((int64_t)e->dw1_dx * q1) +

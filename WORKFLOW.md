@@ -712,4 +712,18 @@ host reference (`DUMP_FB_CRC_FRAMES=480`):
   floor_divmods are negligible. → `pico_divider` link / `tri_setup` split are NOT needed for L1.
   (Carry the option to L2 only if its per-span setup proves heavy.)
 
+**Friction (4) — MSVC rejects raw `__attribute__` (caught by CI windows-msvc, NOT local).** PR #11's
+first CI run was 6/7 green but **windows-msvc FAILED**: bare `__attribute__((always_inline))` /
+`((noinline))` are GCC/Clang-only → MSVC `C2065 'always_inline': undeclared identifier`. Local host
+validation was clang (linux), which honors them, so it passed locally — the MSVC host build only
+exists on the Windows runner. FIX: portable `INTERP_ALWAYS_INLINE`/`INTERP_NOINLINE` macros guarded
+`#if defined(__GNUC__)` (no-op on MSVC; the attrs are device-codegen-only, host doesn't need them) —
+same rationale as `rdr/sram.h`'s `#ifdef __arm__` shim. LESSON: any GCC/Clang attribute in
+host-compiled code (`src/` minus pico-only) MUST be `#if defined(__GNUC__)`-guarded or it breaks the
+windows-msvc job; can't catch it locally without MSVC. Also re-confirmed the CI lesson: the watch
+exit code was 0 while windows-msvc was FAILURE — **parse per-job `statusCheckRollup` conclusions**,
+never the `gh pr checks --watch` rc. Sub-friction: an Edit `replace_all` of `__attribute__((...))`
+also clobbered the macro's own definition (self-referential `#define X X`) — scope replace_all away
+from definition sites.
+
 Push/PR/merge are USER-GATED.
