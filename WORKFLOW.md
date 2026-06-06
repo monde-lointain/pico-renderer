@@ -645,3 +645,71 @@ Pre-T5 CI/build-tooling cleanup. Two deliverables; owned files actually changed:
 **Friction:** (1) `-DRASTER_XLU_SAT=256` as a `cmake` arg became a CACHE var, NOT a compiler `-D` (the `#ifndef` default still won) — the Stage-1 A/B silently ran at 248 until caught by inspecting compile_commands. Drove the sweep by editing the header default per value instead (Edit tool; `sed -i` on a source is blocked by the destructive guard). Guard idea: a tunable meant for `-D` override should be documented WITH the exact compiler-flag injection (`CXXFLAGS=-D...` + fresh build dir), since the `cmake -D` cache path is a trap. (2) `clang-tidy-22` invoked DIRECTLY on raster.cc CRASHES (LLVM `<eof> parser` ICE) and warns the `orthodoxy.so` plugin is version-incompatible — only the sanctioned stripped-DB path (`cmake/StripOrthodoxyPlugin.cmake` → tidy over `build-host/tidy`) works. Don't invoke tidy directly; use the project's stripped DB.
 
 **Review round 2 (APPROVE-WITH-NITS — independent reviewer + Lead; all changes NON-FUNCTIONAL, golden held at 0xcad13160).** SHOULD-FIX: (1) rewrote the raster.h SWEEP-2 / raster_one_xlu contract block from the stale back-to-front `blend_pixel_alpha` model to the front-to-back premultiplied-UNDER + saturation-early-out + composite-pass model (the header is the interface contract). (2) **Threaded `int worker` into raster_tile + raster_tile_noclear** (last param, decl+def) and index `g_xlu_c_acc[worker]`/`g_xlu_acc_alpha[worker]` by it — DELETED `raster_worker()` + the `#include "pico.h"`/`PICO_ON_DEVICE` guard, so raster.cc is platform-agnostic again (no get_core_num). raster_one_xlu now takes the already-sliced `c_acc`/`acc_alpha` pointers from its caller; only the SELECTION in raster_tile_noclear moved. Updated the sole production caller src/sched/drain.h (passes `worker`, already in scope) + all test callers (sched_test threads `tile&1`; ~50 raster_test single-tile calls get `/*worker=*/0`). **The payoff (verified via a temporary `-DL6_SLICE_PROBE` build): the host 2-worker sim's touched-slice mask = 0x3 — it now drives accumulator slice 1, not just slice 0 as the old get_core_num()==0 host path did, so dual==serial now COVERS per-worker accumulator independence ON HOST.** Device behavior identical (worker==core==get_core_num there); dispatch_pico.cc recompiles clean and golden/on-target stay bit-identical. NITs: (3) raster.cc include comment, (4) src/raster/CMakeLists.txt link comment (note blend_pixel_alpha RETAINED — still used by tests + a valid primitive), (5) renamed the 4 reworked XLU/fog tests + docstrings off "back-to-front"/"AlphaOver" to the front-to-back-UNDER contract, (6) added `static_assert(RASTER_NUM_WORKERS == RDR_NUM_RASTER_WORKERS)` in src/sched/drain.h (the one TU seeing both headers; moved RASTER_NUM_WORKERS to raster.h so the assert can reference it without a layering inversion). **Re-gated:** host ctest 353/353 (the Lead's committed blend premul oracle +6); golden STILL 0xcad13160 (proves the worker refactor is pure); format clean (clang-format-22 --dry-run --Werror, 9 files); tidy 0 findings (stripped-DB, exit 0 + 0 `: error:`, incl. drain.h consumers sched.cc/dispatch_host.cc); pico renderer_demo.elf links no RAM overflow (bss 238284 B unchanged — `worker` is a register not storage; ~31KB raw headroom this worktree). Friction (3): the W1 `verify_stream_branch.sh T5` flags every file OUT-OF-LANE because it checks the stale W1 ownership map (T5=harness/tools), not this L6 stream's task grant — a known lane-map vs per-stream-grant mismatch; Lead reconciles lanes at merge.
+
+## T5 P3 — R.L1 two-stage exact-integer DDA (interpolant divide removal) — 2026-06-05
+
+GOLDEN-NEUTRAL inner-loop refactor: the 6 per-pixel `÷area2` divides (inv_w, u_iw, v_iw, 3×
+Gouraud, +fog) + ~9 `lmul` in `raster_one`/`raster_one_xlu` become adds-only DDA stepping. New
+`src/raster/interp.h` (POD `struct Interp` + `static inline` `interp_*` free fns) = Abrash Black
+Book ch56 `SetUpEdge`/`StepEdge` error-term DDA, ch66 "1/z varies linearly in screenspace" license.
+ONE deliberate deviation from the book: Abrash's `ErrTerm=0`/`>0` phase ROUNDS (gap-free edge
+placement); ours uses a FLOORED-divmod phase + a readout trunc-correction to reproduce the EXISTING
+`(int32_t)(num/area2)` (C trunc-toward-zero) BIT-FOR-BIT → golden unchanged. The 2 perspective
+divides (`perspective_texcoord_q16`, ÷ per-pixel inv_w) stay — that's L2. Edge functions stay
+from-scratch (coverage/fill-rule UNTOUCHED).
+
+**Guard (executable):** `tests/raster/raster_test.cc` `InterpDDA.*` (4 tests) step every interpolant
+across a full bb and assert bit-identical to `(int32_t)(num/area2)` — incl. negative numerators
+(u_iw/v_iw), thin tris (small area2 → large steps), exact-divisible boundaries, and the rf==0 trunc
+branch. This is the merge gate; it regresses loudly if the stepper math ever drifts from the divide.
+
+**Gates GREEN:** host ctest 357/357; oracle parity (RdrGolden, Raster.GoldenTileRegression);
+dual==serial 4/4 (opaque/XLU/fog/AA); **demo golden fb_crc 0xcad13160 UNCHANGED** (full 480-frame
+stream — golden-neutral proven); clang-format-22 clean; `make tidy` (host, stripped-DB) exit 0 +
+`make tidy-pico` exit 0; production pico `renderer_demo.uf2` links.
+
+**Friction (1) — SRAM overflow, the R7/headroom risk realized.** First production pico link
+OVERFLOWED RAM by 1848 B: `raster_one`/`_xlu` inline into the `__not_in_flash_func` (SRAM)
+`raster_tile`, so the divide-heavy PER-TRIANGLE `interp_setup` (inlined 6-7× per loop × 2 loops)
+bloated `.time_critical`. FIX: `edge_affine_init`/`interp_setup` marked `__attribute__((noinline))`
+→ flash-resident (they run per-(tri,tile), NOT per pixel); only the tiny per-PIXEL
+`interp_step_x`/`interp_value` stay inline in SRAM. Links clean after. Guard: the `ci_main.sh`
+pico-link step already catches an SRAM regression (it did, here). LESSON for L2/Q2: any new
+inner-loop code inlined into `raster_tile` costs SRAM 1:1 — keep per-tri setup `noinline`/flash.
+
+**Friction (2) — tidy.** `bugprone-implicit-widening-of-multiplication-result` (`-warnings-as-errors`)
+on a test constant `-4096 * 3` (int mul widened to int64 param) → made explicit `-4096LL * 3`.
+Confirms the memory: local `make tidy` MUST be clang-tidy-22 (matches CI), and use `make tidy`
+(stripped-DB), never direct clang-tidy on raster.cc (ICEs). (Also: `grep -c ': error:'` returning 1
+on ZERO matches false-failed a backgrounded tidy run — grep's count exit ≠ pass/fail; parse the
+`exit:` markers, same class as the `gh pr checks` trap.)
+
+**Friction (3) — `-Os` did NOT inline the per-pixel steppers (R5 realized). always_inline FIX.**
+On-target the first L1 `pico-prof` (`-Os`/MinSizeRel) showed opaque `5864 cyc/px` — WORSE than
+expected. Disasm: at `-Os` `interp_step_x`/`interp_value`/`interp_begin_row` were emitted as flash
+functions and CALLED from the SRAM hot loop **via SRAM→flash veneers, 43 BL/loop** (the `static
+inline` hint isn't honored at `-Os`), which also regressed XLU (8847 vs base 7752 ns/px, since XLU
+sets up all 6 steppers). The shipped PRODUCTION `-O3` build inlined them fine (verified: 0 BL, only
+`interp_setup`/`edge_affine_init` are flash) — so this was a `-Os`-profiler MEASUREMENT artifact, not
+a production bug. FIX: mark the 3 per-pixel steppers `__attribute__((always_inline))` → they fold
+into the SRAM loop at EVERY `-O` level (golden-neutral, re-verified 0xcad13160; `-O3` unchanged).
+LESSON: tiny per-pixel hot-path fns MUST be `always_inline`, never rely on the `-Os` inliner; and
+ALWAYS disasm-verify inlining when an `-Os` profiler number looks off (the plan's R5 check).
+
+**ON-TARGET RESULTS (RESOLVED) — device-validated, golden-neutral.** Flashed base-main + L1
+`pico-prof`, captured 480-frame USB-CDC streams (plain `cat`), compared per-frame `fb_crc` to the
+host reference (`DUMP_FB_CRC_FRAMES=480`):
+- **GOLDEN-NEUTRAL ON HARDWARE: host==device bit-identical, 0 mismatches** across every captured
+  frame, both the base and the L1 build (RP2040 dual-core, full scripted scene). The on-device proof
+  L1 changes no output.
+- **Before/after (same `-Os` profiler, clean divide-vs-DDA):** opaque fill `23798 → 21713` ns/px
+  (**−8.8%**); XLU `7752 → 7579` (**−2.2%**); `raster_tile` back-end core `818732 → 774304` µs
+  (**−5.4%**); `raster_dispatch` wall `423758 → 400380` µs (**−5.5%**). CONSERVATIVE: at `-Os` the
+  fill is texture/combiner-bound so divide removal is a smaller slice; the shipped `-O3` win is larger
+  but unmeasurable without an `-O3` profiler (the PROFILER=ON RAM constraint forces `-Os`; deferred).
+- **R1 ANSWERED — setup is NOT dominant:** `opaque_setup` = 0.72% of dispatch (5766 µs) vs
+  `opaque_fill` 42.9% — a 1:60 ratio, unchanged from base (0.70%). The per-(tri,tile) `interp_setup`
+  floor_divmods are negligible. → `pico_divider` link / `tri_setup` split are NOT needed for L1.
+  (Carry the option to L2 only if its per-span setup proves heavy.)
+
+Push/PR/merge are USER-GATED.
